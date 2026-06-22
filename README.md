@@ -9,7 +9,7 @@ Production thin-client for **SAIHM non-custodial memory**.
 - **Same transport as the open client** — `POST {method, params}` + `Authorization: Bearer <JWT>`; the endpoint binds your tenant from the JWT. HTTPS-only (loopback `http` permitted for local dev).
 - **Crypto-shred erasure** — `forget` destroys the endpoint-side wrapped DEK, rendering the cell undecryptable (GDPR Art. 17).
 
-> **▶ Try it across models.** Runnable, copy-paste demos — persistent memory shared across Claude, GPT, DeepSeek, Qwen, Kimi, GLM and more — live at the demo hub: **[github.com/citw2](https://github.com/citw2)**.
+> **▶ Try it across models.** A runnable, copy-paste demo — one encrypted memory shared across Claude and DeepSeek (and any model you point it at), with provable erasure — is live at **[citw2/demo-cross-model-memory](https://github.com/citw2/demo-cross-model-memory)**. More at the demo hub: [github.com/citw2](https://github.com/citw2).
 
 > **Key loss is unrecoverable by design.** If you lose your master secret you lose your KEK, and no one — including SAIHM — can open your cells. Back it up securely.
 
@@ -88,7 +88,7 @@ Non-2xx responses throw `SaihmEndpointError` with `status` and a typed `code` (e
 
 - **[`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro)** — source: [SAIHM-Admin/saihm-client-pro](https://github.com/SAIHM-Admin/saihm-client-pro). The client-side post-quantum crypto library this package seals with.
 - **[`@saihm/mcp-server`](https://www.npmjs.com/package/@saihm/mcp-server)** — source: [SAIHM-Admin/saihm-mcp](https://github.com/SAIHM-Admin/saihm-mcp). The open MCP thin-client for the SAIHM transport.
-- **Runnable demos** — copy-paste quickstarts that put SAIHM memory behind Claude, GPT, DeepSeek, Qwen, Kimi, GLM and more, at the demo hub: **[github.com/citw2](https://github.com/citw2)**.
+- **Runnable demos** — copy-paste quickstarts that put SAIHM memory behind Claude, GPT, DeepSeek, Qwen, Kimi, GLM and more. Start with **[citw2/demo-cross-model-memory](https://github.com/citw2/demo-cross-model-memory)**; more at the hub **[github.com/citw2](https://github.com/citw2)**.
 - **Join the protocol** — [saihm.coti.global/join](https://saihm.coti.global/join).
 
 ## License
