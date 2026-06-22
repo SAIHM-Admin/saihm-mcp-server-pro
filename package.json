@@ -1,0 +1,58 @@
+{
+  "name": "@saihm/mcp-server-pro",
+  "version": "0.1.0",
+  "description": "SAIHM production thin-client. Seals client-side via @saihm/client-pro (ML-DSA-65 identity, per-cell AES-256-GCM DEK wrapped under a client KEK, ML-KEM-768 authenticated sharing) and POSTs opaque ciphertext to the blind, non-custodial SAIHM /mcp endpoint. The master secret, KEK, and plaintext never leave this process. Apache-2.0.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf dist coverage",
+    "build": "npm run clean && tsc -p .",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "tsx --test tests/smoke.test.ts",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "saihm",
+    "post-quantum",
+    "non-custodial",
+    "client-side-encryption",
+    "agent-memory",
+    "mcp"
+  ],
+  "license": "Apache-2.0",
+  "author": "SAIHM",
+  "homepage": "https://saihm.coti.global",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SAIHM-Admin/saihm-mcp-server-pro.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SAIHM-Admin/saihm-mcp-server-pro/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@saihm/client-pro": "^0.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.0",
+    "tsx": "^4.22.2",
+    "typescript": "^6.0.3"
+  }
+}

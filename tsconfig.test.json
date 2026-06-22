@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "comment": "Strict type-check of the shipping client surface (src/**/*.ts). The runtime test suite is validated by execution via `npm test` (tsx --test) rather than by tsc.",
+  "include": ["src/**/*.ts"]
+}
