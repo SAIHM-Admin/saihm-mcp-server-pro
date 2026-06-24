@@ -6,10 +6,8 @@ Production thin-client for **SAIHM non-custodial memory**.
 
 - **Seal before send** — `remember` encrypts client-side; `recall` decrypts client-side.
 - **Post-quantum** — ML-DSA-65 identity/signing, ML-KEM-768 authenticated sharing (via `@saihm/client-pro`).
-- **Same transport as the open client** — `POST {method, params}` + `Authorization: Bearer <JWT>`; the endpoint binds your tenant from the JWT. HTTPS-only (loopback `http` permitted for local dev).
+- **Same transport as the standards client** — `POST {method, params}` + `Authorization: Bearer <JWT>`; the endpoint binds your tenant from the JWT. HTTPS-only (loopback `http` permitted for local dev).
 - **Crypto-shred erasure** — `forget` destroys the endpoint-side wrapped DEK, rendering the cell undecryptable (GDPR Art. 17).
-
-> **▶ Try it across models.** A runnable, copy-paste demo — one encrypted memory shared across Claude and DeepSeek (and any model you point it at), with provable erasure — is live at **[citw2/demo-cross-model-memory](https://github.com/citw2/demo-cross-model-memory)**. More at the demo hub: [github.com/citw2](https://github.com/citw2).
 
 > **Key loss is unrecoverable by design.** If you lose your master secret you lose your KEK, and no one — including SAIHM — can open your cells. Back it up securely.
 
@@ -48,10 +46,20 @@ await saihm.forget(cellId);
 // out-of-band; the library rejects directory key-substitution.
 await saihm.share({
   cellId,
-  recipientRecord,                       // the grantee's published identity record (hex)
-  recipientPinnedAgentIdHashHex,         // pinned out-of-band
+  recipientRecord, // the grantee's published identity record (hex)
+  recipientPinnedAgentIdHashHex, // pinned out-of-band
 });
 await saihm.revokeShare(cellId, recipientPinnedAgentIdHashHex);
+
+// Read a cell another agent shared TO you (the recipient side of `share`). Pin the
+// sharer's agentIdHash out-of-band; the library verifies the sharer's signature and
+// returns null when there is no live grant (e.g. revoked, or the sharer crypto-shredded it).
+const shared = await saihm.recallShared({
+  sharerPinnedAgentIdHashHex, // the sharer's agentIdHash, pinned out-of-band
+  sharerRecord, // the sharer's published identity record (hex)
+  cellId,
+});
+console.log(shared?.plaintext);
 
 // Operator-observable metadata only (no plaintext).
 const status = await saihm.status();
@@ -61,13 +69,13 @@ The derived `saihm.agentIdHash` must match the `sub` of the JWT in `SAIHM_AUTH_H
 
 ## Configuration
 
-| Env | Required | Meaning |
-|---|---|---|
-| `SAIHM_ENDPOINT_URL` | yes | `https://…/mcp` (or `http://` only for `127.0.0.1`/`localhost`). |
-| `SAIHM_AUTH_HEADER` | yes | `Bearer <JWT>`; the endpoint binds your tenant from the JWT `sub`. |
-| `SAIHM_MASTER_SECRET_HEX` | yes | ≥ 64 hex chars (≥ 32 bytes), high-entropy, client-held; never sent. |
-| `SAIHM_TIER` | no | Tier label baked into sealed metadata; resolved via `status()` if unset. |
-| `SAIHM_SEQ_STATE_PATH` | no | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates. |
+| Env                       | Required | Meaning                                                                           |
+| ------------------------- | -------- | --------------------------------------------------------------------------------- |
+| `SAIHM_ENDPOINT_URL`      | yes      | `https://…/mcp` (or `http://` only for `127.0.0.1`/`localhost`).                  |
+| `SAIHM_AUTH_HEADER`       | yes      | `Bearer <JWT>`; the endpoint binds your tenant from the JWT `sub`.                |
+| `SAIHM_MASTER_SECRET_HEX` | yes      | ≥ 64 hex chars (≥ 32 bytes), high-entropy, client-held; never sent.               |
+| `SAIHM_TIER`              | no       | Tier label baked into sealed metadata; resolved via `status()` if unset.          |
+| `SAIHM_SEQ_STATE_PATH`    | no       | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates. |
 
 ## Errors
 
@@ -75,21 +83,30 @@ Non-2xx responses throw `SaihmEndpointError` with `status` and a typed `code` (e
 
 ## Security model
 
-| Property | Guarantee |
-|---|---|
-| Confidentiality vs the endpoint | The endpoint holds ciphertext + wrapped DEKs + public keys only; no key able to decrypt. |
-| Integrity / authenticity | Every cell is ML-DSA-65-signed over its contents, including the sequence number. |
-| Anti-replay | The signed monotonic sequence is rejected by the endpoint if not strictly increasing. |
-| Tenant isolation | Your `agentIdHash` (= the JWT `sub`) namespaces your state; a write whose signed identity differs from the JWT is rejected. |
-| Authenticated sharing | Grantee public keys are pinned out-of-band and verified before any secret is bound to them. |
-| Erasure | Destroying the endpoint-side wrapped DEK crypto-shreds the cell. |
+| Property                        | Guarantee                                                                                                                                                                                                               |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Confidentiality vs the endpoint | The endpoint holds ciphertext + wrapped DEKs + public keys only; no key able to decrypt.                                                                                                                                |
+| Integrity / authenticity        | Every cell is ML-DSA-65-signed over its contents, including the sequence number.                                                                                                                                        |
+| Anti-replay                     | The signed monotonic sequence is rejected by the endpoint if not strictly increasing.                                                                                                                                   |
+| Tenant isolation                | Your `agentIdHash` (= the JWT `sub`) namespaces your state; a write whose signed identity differs from the JWT is rejected.                                                                                             |
+| Authenticated sharing           | Grantee public keys are pinned out-of-band and verified before any secret is bound to them; on the recipient side, `recallShared` pins the sharer's key and verifies the cell signature before returning any plaintext. |
+| Erasure                         | Destroying the endpoint-side wrapped DEK crypto-shreds the cell.                                                                                                                                                        |
 
-## Companion packages & demos
+## Where sealed cells are stored
 
-- **[`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro)** — source: [SAIHM-Admin/saihm-client-pro](https://github.com/SAIHM-Admin/saihm-client-pro). The client-side post-quantum crypto library this package seals with.
-- **[`@saihm/mcp-server`](https://www.npmjs.com/package/@saihm/mcp-server)** — source: [SAIHM-Admin/saihm-mcp](https://github.com/SAIHM-Admin/saihm-mcp). The open MCP thin-client for the SAIHM transport.
-- **Runnable demos** — copy-paste quickstarts that put SAIHM memory behind Claude, GPT, DeepSeek, Qwen, Kimi, GLM and more. Start with **[citw2/demo-cross-model-memory](https://github.com/citw2/demo-cross-model-memory)**; more at the hub **[github.com/citw2](https://github.com/citw2)**.
-- **Join the protocol** — [saihm.coti.global/join](https://saihm.coti.global/join).
+This client seals cells and hands the ciphertext to whatever operator endpoint
+you point `SAIHM_ENDPOINT_URL` at; **that operator chooses and configures the
+durable storage backend** — typically a local IPFS / Kubo node first, then a
+Filecoin deep-archive provider (e.g. Pinata, Synapse, or Lighthouse). Storage
+is operator-configured **by design**: the protocol never locks anyone to a
+single provider. If you run your own endpoint, provisioning that backend is
+your responsibility — see your operator deployment guide.
+
+Prefer not to run storage at all? **Join SAIHM** at <https://saihm.coti.global>
+and use the hosted **non-custodial** operator, which provides durable storage
+for you. Because this client seals every cell locally, the hosted operator
+only ever stores **ciphertext** and never holds your keys — managed storage
+without giving up custody (a paid hosted service).
 
 ## License
 

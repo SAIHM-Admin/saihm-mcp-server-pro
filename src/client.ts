@@ -43,6 +43,12 @@ import {
   sealCell,
   openCell,
   shareCell,
+  decodeShareEnvelope,
+  unwrapSharedDek,
+  verifyShareSig,
+  openCellWithDek,
+  verifyEnvelope,
+  verifyIdentityRecord,
   encodeEnvelope,
   decodeEnvelope,
   encodeShareEnvelope,
@@ -58,6 +64,7 @@ import {
 import type {
   ClientIdentity,
   WireEnvelope,
+  WireShareEnvelope,
   WireIdentityRecord,
 } from '@saihm/client-pro';
 
@@ -74,7 +81,11 @@ function assertEndpointUrl(endpoint: string): void {
     throw new Error(`SAIHM_ENDPOINT_URL is not a valid URL: ${endpoint}`);
   }
   if (url.protocol === 'https:') return;
-  if (url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')) return;
+  if (
+    url.protocol === 'http:' &&
+    (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+  )
+    return;
   throw new Error(
     `SAIHM_ENDPOINT_URL must use https:// (got ${url.protocol}//). ` +
       `Plain http:// is only allowed for 127.0.0.1 or localhost (dev).`,
@@ -88,6 +99,8 @@ function assertEndpointUrl(endpoint: string): void {
  * transport code (`"timeout"`, `"network"`, `"response_too_large"`, `"malformed_json"`,
  * `"seq_exhausted"`) or a read-integrity code (`"malformed_envelope"`, `"malformed_response"`,
  * `"foreign_envelope"`, `"cell_mismatch"`, `"stale_cell"`, `"undecryptable"`, `"cell_not_found"`)
+ * or a recipient share-read code (`"bad_sharer"`, `"malformed_share"`, `"foreign_share"`,
+ * `"share_mismatch"`, `"bad_share_sig"`, `"undecryptable_share"`, `"unverified_envelope"`)
  * or a caller-input code (`"bad_recipient"` — a malformed share recipient record / pinned hash).
  * The message never includes the response body verbatim; branch on `status` / `code`.
  */
@@ -103,9 +116,17 @@ export class SaihmEndpointError extends Error {
 }
 
 /** Read a response body with a hard byte budget — never trusts the content-length header. */
-async function readBodyCapped(res: Response, max: number, method: string): Promise<string> {
+async function readBodyCapped(
+  res: Response,
+  max: number,
+  method: string,
+): Promise<string> {
   const tooLarge = (): SaihmEndpointError =>
-    new SaihmEndpointError(0, 'response_too_large', `SAIHM endpoint ${method} response exceeded ${max}B`);
+    new SaihmEndpointError(
+      0,
+      'response_too_large',
+      `SAIHM endpoint ${method} response exceeded ${max}B`,
+    );
   const body = res.body;
   if (!body) {
     const t = await res.text();
@@ -211,6 +232,16 @@ export interface ShareGrant {
   expiryEpoch?: bigint | null;
 }
 
+/** Inputs to read a cell that another agent shared TO this agent (see {@link SaihmProClient.recallShared}). */
+export interface SharedReadGrant {
+  /** The SHARER's agentIdHash (hex), pinned OUT-OF-BAND — the namespace the cell was shared from. */
+  sharerPinnedAgentIdHashHex: string;
+  /** The SHARER's identity record (hex), from the directory; verified against the pin (anti key-substitution). */
+  sharerRecord: WireIdentityRecord;
+  /** The shared cell id to read. */
+  cellId: string;
+}
+
 export interface SaihmProClientOpts {
   /**
    * The caller's billing tier baked into each cell's (signed) public metadata. Best-effort label
@@ -255,7 +286,8 @@ class SeqState {
     }
     for (const [cellId, v] of Object.entries(obj)) {
       if (typeof v !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(v)) continue;
-      if (this.hwm.admit(this.agentIdHashHex, cellId, BigInt(v))) this.cellIds.add(cellId);
+      if (this.hwm.admit(this.agentIdHashHex, cellId, BigInt(v)))
+        this.cellIds.add(cellId);
     }
   }
 
@@ -324,13 +356,21 @@ export class SaihmProClient {
     const auth = process.env.SAIHM_AUTH_HEADER;
     const secretHex = process.env.SAIHM_MASTER_SECRET_HEX;
     if (!endpoint) throw new Error('SAIHM_ENDPOINT_URL env var required');
-    if (!auth) throw new Error("SAIHM_AUTH_HEADER env var required (e.g. 'Bearer <JWT>')");
-    if (!secretHex) throw new Error('SAIHM_MASTER_SECRET_HEX env var required (>= 64 hex chars)');
+    if (!auth)
+      throw new Error(
+        "SAIHM_AUTH_HEADER env var required (e.g. 'Bearer <JWT>')",
+      );
+    if (!secretHex)
+      throw new Error(
+        'SAIHM_MASTER_SECRET_HEX env var required (>= 64 hex chars)',
+      );
     let master: Uint8Array;
     try {
       master = fromHex(secretHex.trim());
     } catch {
-      throw new Error('SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex');
+      throw new Error(
+        'SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex',
+      );
     }
     if (master.length < 32) {
       master.fill(0);
@@ -364,7 +404,10 @@ export class SaihmProClient {
     try {
       const res = await fetch(this.endpoint, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: this.authHeader },
+        headers: {
+          'content-type': 'application/json',
+          authorization: this.authHeader,
+        },
         body: JSON.stringify({ method, params }),
         signal: ctrl.signal,
       });
@@ -380,20 +423,33 @@ export class SaihmProClient {
         throw new SaihmEndpointError(
           res.status,
           code,
-          `SAIHM endpoint ${method} failed: ${res.status} ${res.statusText}` + (code ? ` (${code})` : ''),
+          `SAIHM endpoint ${method} failed: ${res.status} ${res.statusText}` +
+            (code ? ` (${code})` : ''),
         );
       }
       try {
         return JSON.parse(text) as T;
       } catch {
-        throw new SaihmEndpointError(res.status, 'malformed_json', `SAIHM endpoint ${method} returned a non-JSON 2xx response`);
+        throw new SaihmEndpointError(
+          res.status,
+          'malformed_json',
+          `SAIHM endpoint ${method} returned a non-JSON 2xx response`,
+        );
       }
     } catch (e) {
       if (e instanceof SaihmEndpointError) throw e;
       if (e instanceof Error && e.name === 'AbortError') {
-        throw new SaihmEndpointError(408, 'timeout', `SAIHM endpoint ${method} timed out after ${this.requestTimeoutMs}ms`);
+        throw new SaihmEndpointError(
+          408,
+          'timeout',
+          `SAIHM endpoint ${method} timed out after ${this.requestTimeoutMs}ms`,
+        );
       }
-      throw new SaihmEndpointError(0, 'network', `SAIHM endpoint ${method} transport error`);
+      throw new SaihmEndpointError(
+        0,
+        'network',
+        `SAIHM endpoint ${method} transport error`,
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -405,33 +461,61 @@ export class SaihmProClient {
    * one bound to a different agent, one whose id != the requested id, or one this identity's KEK
    * cannot open — so a blind/compromised endpoint cannot relabel, mis-attribute, or rollback a cell.
    */
-  private openRow(expectedCellId: string | null, wire: WireEnvelope): RecalledCell {
+  private openRow(
+    expectedCellId: string | null,
+    wire: WireEnvelope,
+  ): RecalledCell {
     let env;
     try {
       env = decodeEnvelope(wire);
     } catch {
-      throw new SaihmEndpointError(502, 'malformed_envelope', `endpoint returned a malformed envelope${expectedCellId ? ` for cell '${expectedCellId}'` : ''}`);
+      throw new SaihmEndpointError(
+        502,
+        'malformed_envelope',
+        `endpoint returned a malformed envelope${expectedCellId ? ` for cell '${expectedCellId}'` : ''}`,
+      );
     }
     if (!ctEqual(env.agentIdHash, this.identity.agentIdHash)) {
-      throw new SaihmEndpointError(502, 'foreign_envelope', 'endpoint returned an envelope bound to a different agent');
+      throw new SaihmEndpointError(
+        502,
+        'foreign_envelope',
+        'endpoint returned an envelope bound to a different agent',
+      );
     }
     if (expectedCellId !== null && env.cellId !== expectedCellId) {
-      throw new SaihmEndpointError(502, 'cell_mismatch', `endpoint returned cell '${env.cellId}' for requested '${expectedCellId}'`);
+      throw new SaihmEndpointError(
+        502,
+        'cell_mismatch',
+        `endpoint returned cell '${env.cellId}' for requested '${expectedCellId}'`,
+      );
     }
     // Read-path rollback guard: env.seq is authenticated, but a hostile/buggy endpoint could replay
     // an OLDER validly-sealed version. Reject anything below a sequence we have already observed.
     const knownSeq = this.seq.current(env.cellId);
     if (knownSeq !== undefined && env.seq < knownSeq) {
-      throw new SaihmEndpointError(502, 'stale_cell', `endpoint returned a rolled-back envelope for cell '${env.cellId}' (seq ${env.seq} < ${knownSeq})`);
+      throw new SaihmEndpointError(
+        502,
+        'stale_cell',
+        `endpoint returned a rolled-back envelope for cell '${env.cellId}' (seq ${env.seq} < ${knownSeq})`,
+      );
     }
     let plaintext: string;
     try {
       plaintext = fromUtf8(openCell(env, this.identity.kek));
     } catch {
-      throw new SaihmEndpointError(502, 'undecryptable', `cell '${env.cellId}' could not be opened with this identity's key`);
+      throw new SaihmEndpointError(
+        502,
+        'undecryptable',
+        `cell '${env.cellId}' could not be opened with this identity's key`,
+      );
     }
     this.seq.observe(env.cellId, env.seq); // env.seq is authenticated (bound into the AEAD AAD)
-    return { cellId: env.cellId, plaintext, seq: env.seq.toString(10), commitmentHash: toHex(env.publicMeta.commitmentHash) };
+    return {
+      cellId: env.cellId,
+      plaintext,
+      seq: env.seq.toString(10),
+      commitmentHash: toHex(env.publicMeta.commitmentHash),
+    };
   }
 
   /** Authoritative tier from the JWT (via status), cached. Used to label sealed cell metadata. */
@@ -446,7 +530,10 @@ export class SaihmProClient {
    * Seal `content` client-side and store it BLIND. Creates a new cell, or updates `opts.cellId`
    * with a fresh monotonic seq. Returns the storage receipt (no plaintext leaves the process).
    */
-  async remember(content: string, opts: RememberOpts = {}): Promise<RememberResult> {
+  async remember(
+    content: string,
+    opts: RememberOpts = {},
+  ): Promise<RememberResult> {
     const cellId = opts.cellId ?? randomBytes(16).toString('hex');
     // Updating a provided cellId we have no local high-water for: learn the LIVE server seq first so
     // the write is not guaranteed-rejected as stale. Route the discovered envelope through openRow so
@@ -462,7 +549,11 @@ export class SaihmProClient {
     }
     const seq = this.seq.next(cellId);
     if (seq > MAX_SEQ) {
-      throw new SaihmEndpointError(0, 'seq_exhausted', `cell '${cellId}' has exhausted its uint64 sequence space`);
+      throw new SaihmEndpointError(
+        0,
+        'seq_exhausted',
+        `cell '${cellId}' has exhausted its uint64 sequence space`,
+      );
     }
     const tier = await this.resolveTier();
     const env = sealCell({
@@ -475,15 +566,23 @@ export class SaihmProClient {
       seq,
       tier,
     });
-    const r = await this.call<RememberResult>('saihm_remember', { wire: encodeEnvelope(env) });
+    const r = await this.call<RememberResult>('saihm_remember', {
+      wire: encodeEnvelope(env),
+    });
     this.seq.observe(cellId, seq); // advance only after the endpoint accepted the write
     return r;
   }
 
-  private async recallRawOne(cellId: string): Promise<{ found: boolean; wire?: WireEnvelope }> {
+  private async recallRawOne(
+    cellId: string,
+  ): Promise<{ found: boolean; wire?: WireEnvelope }> {
     const r = await this.call<unknown>('saihm_recall', { cellId });
     if (typeof r !== 'object' || r === null || Array.isArray(r)) {
-      throw new SaihmEndpointError(502, 'malformed_response', 'endpoint returned a malformed recall response');
+      throw new SaihmEndpointError(
+        502,
+        'malformed_response',
+        'endpoint returned a malformed recall response',
+      );
     }
     return r as { found: boolean; wire?: WireEnvelope };
   }
@@ -497,7 +596,11 @@ export class SaihmProClient {
   async recall(query?: string): Promise<RecalledCell[]> {
     const rows = await this.call<unknown>('saihm_recall', {});
     if (!Array.isArray(rows)) {
-      throw new SaihmEndpointError(502, 'malformed_response', 'endpoint returned a malformed recall-all response');
+      throw new SaihmEndpointError(
+        502,
+        'malformed_response',
+        'endpoint returned a malformed recall-all response',
+      );
     }
     const needle = query?.toLowerCase();
     const out: RecalledCell[] = [];
@@ -510,16 +613,32 @@ export class SaihmProClient {
     const seen = new Set<string>();
     for (const raw of rows) {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-        throw new SaihmEndpointError(502, 'malformed_response', 'endpoint returned a malformed recall-all row');
+        throw new SaihmEndpointError(
+          502,
+          'malformed_response',
+          'endpoint returned a malformed recall-all row',
+        );
       }
-      const row = raw as { cellId: string; found: boolean; wire?: WireEnvelope };
+      const row = raw as {
+        cellId: string;
+        found: boolean;
+        wire?: WireEnvelope;
+      };
       if (!row.found || !row.wire) continue;
       const cell = this.openRow(null, row.wire); // trusts env.cellId/seq, not the server row label
       if (seen.has(cell.cellId)) {
-        throw new SaihmEndpointError(502, 'malformed_response', `endpoint returned cell '${cell.cellId}' more than once in a recall-all response`);
+        throw new SaihmEndpointError(
+          502,
+          'malformed_response',
+          `endpoint returned cell '${cell.cellId}' more than once in a recall-all response`,
+        );
       }
       seen.add(cell.cellId);
-      if (needle !== undefined && !cell.plaintext.toLowerCase().includes(needle)) continue;
+      if (
+        needle !== undefined &&
+        !cell.plaintext.toLowerCase().includes(needle)
+      )
+        continue;
       out.push(cell);
     }
     return out;
@@ -546,30 +665,50 @@ export class SaihmProClient {
    * GRANT a cell to another agent, end-to-end authenticated. The DEK is re-wrapped to the grantee's
    * pinned ML-KEM key client-side; the endpoint blind-stores the share envelope. `shareCell` rejects
    * a directory record that does not match the out-of-band pin (throws `KeySubstitutionError` before
-   * any secret is bound). (Recipient READ is a v-next fast-follow and is intentionally not exposed.)
+   * any secret is bound). The grantee reads it with {@link SaihmProClient.recallShared}.
    */
   async share(grant: ShareGrant): Promise<ShareResult> {
     const own = await this.recallRawOne(grant.cellId);
     if (!own.found || !own.wire) {
-      throw new SaihmEndpointError(404, 'cell_not_found', `cannot share unknown cell '${grant.cellId}'`);
+      throw new SaihmEndpointError(
+        404,
+        'cell_not_found',
+        `cannot share unknown cell '${grant.cellId}'`,
+      );
     }
     let envelope;
     try {
       envelope = decodeEnvelope(own.wire);
     } catch {
-      throw new SaihmEndpointError(502, 'malformed_envelope', `endpoint returned a malformed envelope for cell '${grant.cellId}'`);
+      throw new SaihmEndpointError(
+        502,
+        'malformed_envelope',
+        `endpoint returned a malformed envelope for cell '${grant.cellId}'`,
+      );
     }
     if (!ctEqual(envelope.agentIdHash, this.identity.agentIdHash)) {
-      throw new SaihmEndpointError(502, 'foreign_envelope', 'endpoint returned an envelope bound to a different agent');
+      throw new SaihmEndpointError(
+        502,
+        'foreign_envelope',
+        'endpoint returned an envelope bound to a different agent',
+      );
     }
     if (envelope.cellId !== grant.cellId) {
-      throw new SaihmEndpointError(502, 'cell_mismatch', `endpoint returned cell '${envelope.cellId}' for requested '${grant.cellId}'`);
+      throw new SaihmEndpointError(
+        502,
+        'cell_mismatch',
+        `endpoint returned cell '${envelope.cellId}' for requested '${grant.cellId}'`,
+      );
     }
     // Rollback parity with the read path: if we already know a newer seq for this cell, refuse to
     // re-wrap a stale version the endpoint may have replayed (the grantee would otherwise read it).
     const knownSeq = this.seq.current(grant.cellId);
     if (knownSeq !== undefined && envelope.seq < knownSeq) {
-      throw new SaihmEndpointError(502, 'stale_cell', `endpoint returned a rolled-back envelope for cell '${grant.cellId}' (seq ${envelope.seq} < ${knownSeq})`);
+      throw new SaihmEndpointError(
+        502,
+        'stale_cell',
+        `endpoint returned a rolled-back envelope for cell '${grant.cellId}' (seq ${envelope.seq} < ${knownSeq})`,
+      );
     }
     // Caller-supplied grant inputs: surface a malformed record / pinned hash as a TYPED error rather
     // than leaking client-pro's raw WireFormatError / hex Error past this client's error contract.
@@ -580,7 +719,11 @@ export class SaihmProClient {
       recipientRecord = decodeIdentityRecord(grant.recipientRecord);
       recipientPinnedAgentIdHash = fromHex(grant.recipientPinnedAgentIdHashHex);
     } catch {
-      throw new SaihmEndpointError(0, 'bad_recipient', 'recipient identity record or pinned agentIdHash is malformed');
+      throw new SaihmEndpointError(
+        0,
+        'bad_recipient',
+        'recipient identity record or pinned agentIdHash is malformed',
+      );
     }
     const shareEnv = shareCell({
       envelope,
@@ -590,7 +733,11 @@ export class SaihmProClient {
       recipientRecord,
       recipientPinnedAgentIdHash,
     });
-    const params: { shareWire: ReturnType<typeof encodeShareEnvelope>; scope: string; expiryEpoch?: string } = {
+    const params: {
+      shareWire: ReturnType<typeof encodeShareEnvelope>;
+      scope: string;
+      expiryEpoch?: string;
+    } = {
       shareWire: encodeShareEnvelope(shareEnv),
       scope: grant.scope ?? 'read',
     };
@@ -601,8 +748,164 @@ export class SaihmProClient {
   }
 
   /** Revoke a prior grant to `recipientHex` for `cellId` (deletes the share envelope). */
-  async revokeShare(cellId: string, recipientHex: string): Promise<RevokeResult> {
+  async revokeShare(
+    cellId: string,
+    recipientHex: string,
+  ): Promise<RevokeResult> {
     return this.call('saihm_revoke_share', { cellId, recipient: recipientHex });
+  }
+
+  /**
+   * Recipient READ of a cell shared TO this agent. Fetches the opaque ML-KEM share envelope and the
+   * sharer's content ciphertext, authenticates the grant against the OUT-OF-BAND-pinned sharer key,
+   * unwraps the content DEK with this agent's ML-KEM secret, and opens the content. Returns `null`
+   * when no live grant exists (never shared, revoked, or expired) or the content was forgotten.
+   *
+   * Trust model (the endpoint is blind + assumed hostile): it never holds the DEK, so it cannot forge
+   * content — a tampered ciphertext fails the AEAD open, a substituted cell fails the id/attribution
+   * checks, and an unauthenticated share fails `verifyShareSig`. `verifyEnvelope` additionally proves
+   * the sharer's ML-DSA signature over the exact content (non-repudiation). The recipient's tier must
+   * be sharing-capable; otherwise the endpoint rejects the fetch (`BLIND_SHARE_TIER_REQUIRED`, 402).
+   */
+  async recallShared(grant: SharedReadGrant): Promise<RecalledCell | null> {
+    // 1) Pin the sharer's identity (defeats directory key-substitution) → trusted sharer ML-DSA key.
+    let sharerRecord;
+    let sharerPinned;
+    try {
+      sharerRecord = decodeIdentityRecord(grant.sharerRecord);
+      sharerPinned = fromHex(grant.sharerPinnedAgentIdHashHex);
+    } catch {
+      throw new SaihmEndpointError(
+        0,
+        'bad_sharer',
+        'sharer identity record or pinned agentIdHash is malformed',
+      );
+    }
+    verifyIdentityRecord(sharerRecord, sharerPinned); // throws KeySubstitutionError on a pin mismatch
+    const sharerHex = toHex(sharerPinned);
+
+    // 2) Fetch {share envelope, content ciphertext} for (sharer, cellId), keyed to THIS recipient.
+    const r = await this.call<unknown>('saihm_recall', {
+      sharer: sharerHex,
+      cellId: grant.cellId,
+    });
+    if (typeof r !== 'object' || r === null || Array.isArray(r)) {
+      throw new SaihmEndpointError(
+        502,
+        'malformed_response',
+        'endpoint returned a malformed shared-recall response',
+      );
+    }
+    const res = r as {
+      found?: boolean;
+      wire?: WireShareEnvelope;
+      contentWire?: WireEnvelope;
+    };
+    if (!res.found || !res.wire || !res.contentWire) return null; // no live grant / content unavailable
+
+    // 3) Authenticate the grant + unwrap the content DEK with this agent's ML-KEM secret.
+    let share;
+    try {
+      share = decodeShareEnvelope(res.wire);
+    } catch {
+      throw new SaihmEndpointError(
+        502,
+        'malformed_share',
+        `endpoint returned a malformed share envelope for cell '${grant.cellId}'`,
+      );
+    }
+    if (!ctEqual(share.recipientAgentIdHash, this.identity.agentIdHash)) {
+      throw new SaihmEndpointError(
+        502,
+        'foreign_share',
+        'endpoint returned a share addressed to a different recipient',
+      );
+    }
+    if (
+      !ctEqual(share.sharerAgentIdHash, sharerPinned) ||
+      share.cellId !== grant.cellId
+    ) {
+      throw new SaihmEndpointError(
+        502,
+        'share_mismatch',
+        `endpoint returned a share for the wrong sharer/cell`,
+      );
+    }
+    if (!verifyShareSig(share, sharerRecord.mldsaPubKey)) {
+      throw new SaihmEndpointError(
+        502,
+        'bad_share_sig',
+        'share envelope signature does not verify against the pinned sharer key',
+      );
+    }
+    let dek;
+    try {
+      dek = unwrapSharedDek({
+        share,
+        recipientAgentIdHash: this.identity.agentIdHash,
+        sharerPinnedMldsaPubKey: sharerRecord.mldsaPubKey,
+        recipientMlkemSecretKey: this.identity.mlkemSecretKey,
+      });
+    } catch {
+      throw new SaihmEndpointError(
+        502,
+        'undecryptable_share',
+        `share DEK for cell '${grant.cellId}' could not be unwrapped with this identity`,
+      );
+    }
+
+    // 4) Decode + verify the sharer-signed content envelope, then open with the unwrapped DEK.
+    try {
+      let env;
+      try {
+        env = decodeEnvelope(res.contentWire);
+      } catch {
+        throw new SaihmEndpointError(
+          502,
+          'malformed_envelope',
+          `endpoint returned a malformed content envelope for cell '${grant.cellId}'`,
+        );
+      }
+      if (!ctEqual(env.agentIdHash, sharerPinned)) {
+        throw new SaihmEndpointError(
+          502,
+          'foreign_envelope',
+          'shared content envelope is not signed by the pinned sharer',
+        );
+      }
+      if (env.cellId !== grant.cellId) {
+        throw new SaihmEndpointError(
+          502,
+          'cell_mismatch',
+          `endpoint returned cell '${env.cellId}' for requested '${grant.cellId}'`,
+        );
+      }
+      if (!verifyEnvelope(env)) {
+        throw new SaihmEndpointError(
+          502,
+          'unverified_envelope',
+          `shared content envelope for cell '${grant.cellId}' failed verification`,
+        );
+      }
+      let plaintext;
+      try {
+        plaintext = fromUtf8(openCellWithDek(env, dek));
+      } catch {
+        throw new SaihmEndpointError(
+          502,
+          'undecryptable',
+          `shared cell '${grant.cellId}' could not be opened with the unwrapped DEK`,
+        );
+      }
+      return {
+        cellId: env.cellId,
+        plaintext,
+        seq: env.seq.toString(10),
+        commitmentHash: toHex(env.publicMeta.commitmentHash),
+      };
+    } finally {
+      dek.fill(0); // scrub the unwrapped DEK regardless of outcome
+    }
   }
 
   /**
@@ -617,11 +920,22 @@ export class SaihmProClient {
     proposedValue: string | null;
   }): Promise<never> {
     await this.call('saihm_governance_propose', args);
-    throw new SaihmEndpointError(403, 'governance_unavailable', 'governance unavailable');
+    throw new SaihmEndpointError(
+      403,
+      'governance_unavailable',
+      'governance unavailable',
+    );
   }
 
-  async governanceVote(args: { proposalId: string; approve: boolean }): Promise<never> {
+  async governanceVote(args: {
+    proposalId: string;
+    approve: boolean;
+  }): Promise<never> {
     await this.call('saihm_governance_vote', args);
-    throw new SaihmEndpointError(403, 'governance_unavailable', 'governance unavailable');
+    throw new SaihmEndpointError(
+      403,
+      'governance_unavailable',
+      'governance unavailable',
+    );
   }
 }
