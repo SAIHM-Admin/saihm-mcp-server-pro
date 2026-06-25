@@ -19,13 +19,20 @@
  *
  * Configure via env (see {@link SaihmProClient.bootFromEnv}):
  *   SAIHM_ENDPOINT_URL      `https://…/mcp` (or `http://` only for 127.0.0.1 / localhost, dev).
- *   SAIHM_AUTH_HEADER       Authorization value, e.g. `"Bearer <JWT>"` (the onboard-issued JWT).
+ *   SAIHM_AUTH_HEADER       OPTIONAL Authorization value, e.g. `"Bearer <JWT>"`. When UNSET, the
+ *                           client SELF-ONBOARDS: it mints + auto-refreshes its own short-lived JWT
+ *                           from the master secret (ML-DSA challenge/response against `/api/onboard`),
+ *                           so a subscriber pastes one config ONCE and never re-pastes a token. When
+ *                           set, it is used verbatim and no self-onboarding occurs.
+ *   SAIHM_PAYMENT_METHOD    required for self-onboarding (e.g. `"stripe"` / `"stablecoin"`); the
+ *                           proof-of-entitlement rail the endpoint checks. Ignored when SAIHM_AUTH_HEADER is set.
  *   SAIHM_MASTER_SECRET_HEX >= 64 hex chars (>= 32 bytes) of high-entropy material; CLIENT-HELD,
  *                           never transmitted or logged. Its derived `agentIdHash` MUST equal the
  *                           JWT `sub` (the blind endpoint rejects a write whose signed agentIdHash
  *                           != JWT.sub — BLIND_ATTRIBUTION_MISMATCH).
- *   SAIHM_TIER              optional; the billing tier label baked into sealed cell metadata. If
- *                           unset, the client resolves the authoritative tier once via `status()`.
+ *   SAIHM_TIER              the billing tier label baked into sealed cell metadata. REQUIRED for
+ *                           self-onboarding (it is part of the onboard request); otherwise optional —
+ *                           if unset (static-auth mode) the client resolves it once via `status()`.
  *   SAIHM_SEQ_STATE_PATH    optional path; persists per-cell seq high-water marks (mode 600) so a
  *                           cell UPDATE survives a process restart without a stale-seq rejection.
  *
@@ -35,11 +42,18 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 
 import {
   deriveIdentity,
+  signChallenge,
   sealCell,
   openCell,
   shareCell,
@@ -90,6 +104,29 @@ function assertEndpointUrl(endpoint: string): void {
     `SAIHM_ENDPOINT_URL must use https:// (got ${url.protocol}//). ` +
       `Plain http:// is only allowed for 127.0.0.1 or localhost (dev).`,
   );
+}
+
+/** Refresh a self-onboard JWT this long before its `exp` (cushions clock skew + in-flight latency). */
+const JWT_REFRESH_SKEW_MS = 60_000;
+/** Conservative assumed lifetime for an opaque (non-JWT) token whose `exp` we cannot read. */
+const OPAQUE_TOKEN_TTL_MS = 5 * 60_000;
+
+/** Decode a JWT's `exp` (seconds since epoch) into epoch-ms; `undefined` if it is not parseable. */
+function jwtExpMs(jwt: string): number | undefined {
+  const parts = jwt.split('.');
+  const payloadB64 = parts[1];
+  if (parts.length !== 3 || !payloadB64) return undefined;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(payloadB64, 'base64url').toString('utf-8'),
+    ) as { exp?: unknown };
+    if (typeof payload.exp === 'number' && Number.isFinite(payload.exp)) {
+      return payload.exp * 1000;
+    }
+  } catch {
+    /* opaque / non-JWT token — caller falls back to a conservative TTL */
+  }
+  return undefined;
 }
 
 /**
@@ -252,6 +289,17 @@ export interface SaihmProClientOpts {
   /** Path to persist per-cell seq high-water marks (mode 600). Enables cross-restart cell updates. */
   seqStatePath?: string;
   /**
+   * The proof-of-entitlement rail (`"stripe"`, `"stablecoin"`, …) used when SELF-ONBOARDING (i.e.
+   * no static `authHeader`). Sent in the `/api/onboard` request alongside the ML-DSA-signed nonce.
+   * Required for self-onboarding; ignored when a static `authHeader` is supplied.
+   */
+  paymentMethod?: string;
+  /**
+   * Override the base origin used for self-onboarding requests (`/api/onboard/challenge`,
+   * `/api/onboard`). Defaults to the origin of `SAIHM_ENDPOINT_URL`. Advanced / testing knob.
+   */
+  onboardBaseUrl?: string;
+  /**
    * Per-request timeout budget in milliseconds (default 30000). A request that exceeds it is aborted
    * and surfaces a typed `SaihmEndpointError(408, "timeout")`. An advanced / testing tuning knob — a
    * non-positive or non-numeric value falls back to the default.
@@ -324,22 +372,30 @@ class SeqState {
 
 export class SaihmProClient {
   private readonly endpoint: string;
-  private readonly authHeader: string;
+  /** A static Authorization header (e.g. `"Bearer <JWT>"`), or `undefined` in self-onboard mode. */
+  private readonly staticAuthHeader: string | undefined;
+  /** Self-onboard only: the proof-of-entitlement rail sent to `/api/onboard`. */
+  private readonly paymentMethod: string | undefined;
+  /** Base origin for `/api/onboard*` + `/api/stripe/*` calls (defaults to the endpoint origin). */
+  private readonly onboardBase: string;
   private readonly identity: ClientIdentity;
   private readonly agentIdHashHex: string;
   private readonly seq: SeqState;
   private readonly requestTimeoutMs: number;
   private tier: string | undefined;
+  // Self-onboard token cache (single-flight via authInFlight; never written to disk).
+  private cachedJwt: string | undefined;
+  private cachedJwtRefreshAtMs = 0;
+  private authInFlight: Promise<string> | null = null;
 
   constructor(
     endpoint: string,
-    authHeader: string,
+    authHeader: string | undefined,
     masterSecret: Uint8Array,
     opts: SaihmProClientOpts = {},
   ) {
     assertEndpointUrl(endpoint);
     this.endpoint = endpoint;
-    this.authHeader = authHeader;
     // deriveIdentity derives the KEK + ML-DSA/ML-KEM keys and does NOT retain `masterSecret`.
     this.identity = deriveIdentity(masterSecret);
     this.agentIdHashHex = toHex(this.identity.agentIdHash);
@@ -349,20 +405,72 @@ export class SaihmProClient {
       typeof opts.requestTimeoutMs === 'number' && opts.requestTimeoutMs > 0
         ? opts.requestTimeoutMs
         : REQUEST_TIMEOUT_MS;
+
+    // Base for /api/onboard* + /api/stripe/* — always available (the `join` flow + self-onboard need it).
+    this.onboardBase = (
+      opts.onboardBaseUrl ?? new URL(endpoint).origin
+    ).replace(/\/+$/, '');
+
+    const trimmedAuth =
+      typeof authHeader === 'string' && authHeader.trim()
+        ? authHeader
+        : undefined;
+    if (trimmedAuth) {
+      this.staticAuthHeader = trimmedAuth;
+    } else {
+      // SELF-ONBOARD MODE: mint + auto-refresh the JWT from this identity. Requires the tier (it is
+      // part of the onboard request) and the payment method (the entitlement rail the endpoint checks).
+      if (!opts.paymentMethod) {
+        throw new Error(
+          'self-onboarding requires a paymentMethod (set SAIHM_PAYMENT_METHOD) when no auth header is supplied',
+        );
+      }
+      if (this.tier === undefined) {
+        throw new Error(
+          'self-onboarding requires a tier (set SAIHM_TIER) when no auth header is supplied',
+        );
+      }
+      this.paymentMethod = opts.paymentMethod;
+    }
   }
 
   static bootFromEnv(): SaihmProClient {
     const endpoint = process.env.SAIHM_ENDPOINT_URL;
     const auth = process.env.SAIHM_AUTH_HEADER;
-    const secretHex = process.env.SAIHM_MASTER_SECRET_HEX;
     if (!endpoint) throw new Error('SAIHM_ENDPOINT_URL env var required');
-    if (!auth)
-      throw new Error(
-        "SAIHM_AUTH_HEADER env var required (e.g. 'Bearer <JWT>')",
-      );
+    // The master secret may be supplied inline via SAIHM_MASTER_SECRET_HEX, or — preferably for
+    // operators / security-conscious users — as the path to a mode-600 file via
+    // SAIHM_MASTER_SECRET_FILE so the root seed is never inlined into a synced/shared MCP config.
+    // FILE wins when both are set.
+    const secretFile = process.env.SAIHM_MASTER_SECRET_FILE;
+    let secretHex: string | undefined;
+    if (secretFile) {
+      try {
+        secretHex = readFileSync(secretFile, 'utf-8');
+      } catch {
+        throw new Error(
+          `SAIHM_MASTER_SECRET_FILE could not be read: ${secretFile}`,
+        );
+      }
+      try {
+        // Advisory only (never blocks): warn if the secret file is group/world-accessible on POSIX.
+        if (
+          process.platform !== 'win32' &&
+          (statSync(secretFile).mode & 0o077) !== 0
+        ) {
+          process.stderr.write(
+            `warning: SAIHM_MASTER_SECRET_FILE ${secretFile} is group/world-accessible; chmod 600 it.\n`,
+          );
+        }
+      } catch {
+        /* stat is advisory only */
+      }
+    } else {
+      secretHex = process.env.SAIHM_MASTER_SECRET_HEX;
+    }
     if (!secretHex)
       throw new Error(
-        'SAIHM_MASTER_SECRET_HEX env var required (>= 64 hex chars)',
+        'SAIHM_MASTER_SECRET_HEX (or SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars)',
       );
     let master: Uint8Array;
     try {
@@ -378,9 +486,13 @@ export class SaihmProClient {
     }
     const optTier = process.env.SAIHM_TIER;
     const optSeqPath = process.env.SAIHM_SEQ_STATE_PATH;
+    const optPaymentMethod = process.env.SAIHM_PAYMENT_METHOD;
     const opts: SaihmProClientOpts = {};
     if (optTier) opts.tier = optTier;
     if (optSeqPath) opts.seqStatePath = optSeqPath;
+    if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
+    // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
+    // SAIHM_PAYMENT_METHOD + SAIHM_TIER (paste-once). Set => used verbatim, no self-onboarding.
     try {
       return new SaihmProClient(endpoint, auth, master, opts);
     } finally {
@@ -398,7 +510,202 @@ export class SaihmProClient {
     return encodeIdentityRecord(this.identity.identityRecord);
   }
 
+  /**
+   * Resolve the Authorization header for a request. In static-auth mode this is the configured
+   * header. In self-onboard mode it returns a cached JWT, transparently minting/refreshing one
+   * (single-flight) when none is cached or it is within 60s of expiry.
+   */
+  private async currentAuthHeader(): Promise<string> {
+    if (this.staticAuthHeader) return this.staticAuthHeader;
+    if (this.cachedJwt && Date.now() < this.cachedJwtRefreshAtMs) {
+      return 'Bearer ' + this.cachedJwt;
+    }
+    if (!this.authInFlight) {
+      this.authInFlight = this.onboard().finally(() => {
+        this.authInFlight = null;
+      });
+    }
+    return 'Bearer ' + (await this.authInFlight);
+  }
+
+  /**
+   * Mint a fresh subscriber JWT: GET a challenge nonce, sign it with this identity's ML-DSA secret
+   * key, and POST {pubkey, nonce, signature, tier, paymentMethod} to `/api/onboard`. The endpoint
+   * verifies the signature + an active subscription and returns a short-lived JWT, which is cached
+   * with its decoded expiry. The master secret / secret key never leave this process.
+   */
+  private async onboard(): Promise<string> {
+    const base = this.onboardBase;
+    const ch = await this.onboardFetch<{ nonce?: unknown }>(
+      base + '/api/onboard/challenge',
+      { method: 'GET' },
+    );
+    const nonce = ch.nonce;
+    if (typeof nonce !== 'string' || nonce.length === 0) {
+      throw new SaihmEndpointError(
+        502,
+        'onboard_no_nonce',
+        'onboard challenge returned no nonce',
+      );
+    }
+    let nonceBytes: Uint8Array;
+    try {
+      nonceBytes = fromHex(nonce);
+    } catch {
+      throw new SaihmEndpointError(
+        502,
+        'onboard_bad_nonce',
+        'onboard challenge nonce is not hex',
+      );
+    }
+    const signature = toHex(
+      signChallenge(this.identity.mldsaSecretKey, nonceBytes),
+    );
+    const out = await this.onboardFetch<{ jwt?: unknown }>(
+      base + '/api/onboard',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          pubkey: toHex(this.identity.mldsaPubKey),
+          nonce,
+          signature,
+          tier: this.tier,
+          paymentMethod: this.paymentMethod,
+        }),
+      },
+    );
+    if (typeof out.jwt !== 'string' || out.jwt.length === 0) {
+      throw new SaihmEndpointError(
+        502,
+        'onboard_no_jwt',
+        'onboard did not return a JWT',
+      );
+    }
+    this.cachedJwt = out.jwt;
+    // Schedule proactive refresh BEFORE expiry. Honor the token's own `exp`; for an opaque token assume
+    // a short conservative TTL. Clamp the skew to at most half the remaining life so a short-lived token
+    // still yields a positive cache window (otherwise we would re-onboard on every single call).
+    const now = Date.now();
+    const expMs = jwtExpMs(out.jwt) ?? now + OPAQUE_TOKEN_TTL_MS;
+    const skew = Math.min(
+      JWT_REFRESH_SKEW_MS,
+      Math.max(0, Math.floor((expMs - now) / 2)),
+    );
+    this.cachedJwtRefreshAtMs = expMs - skew;
+    return out.jwt;
+  }
+
+  /**
+   * Self-serve operator join: request a Stripe HOSTED-checkout URL to subscribe THIS identity at the
+   * configured tier (`SAIHM_TIER`). Open the URL in a browser to pay; afterwards the client
+   * self-onboards on the next run. Only the PUBLIC key is sent; the master secret never leaves here.
+   */
+  async requestCheckoutUrl(): Promise<string> {
+    if (this.tier === undefined) {
+      throw new SaihmEndpointError(
+        0,
+        'no_tier',
+        'join requires a tier (set SAIHM_TIER)',
+      );
+    }
+    const out = await this.onboardFetch<{ url?: unknown }>(
+      this.onboardBase + '/api/stripe/checkout',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          tier: this.tier,
+          mldsaPubKey: toHex(this.identity.mldsaPubKey),
+          uiMode: 'hosted',
+        }),
+      },
+    );
+    if (typeof out.url !== 'string' || !out.url.startsWith('https://')) {
+      throw new SaihmEndpointError(
+        502,
+        'checkout_no_url',
+        'checkout did not return a hosted URL',
+      );
+    }
+    return out.url;
+  }
+
+  /** Onboard-path HTTP with the same timeout + body-cap + typed-error discipline as `doCall`. */
+  private async onboardFetch<T>(url: string, init: RequestInit): Promise<T> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: ctrl.signal });
+      const text = await readBodyCapped(res, MAX_RESPONSE_BYTES, 'onboard');
+      if (!res.ok) {
+        let code: string | undefined;
+        try {
+          const j = JSON.parse(text) as Record<string, unknown>;
+          if (typeof j.error === 'string') code = j.error;
+        } catch {
+          /* non-JSON error body */
+        }
+        throw new SaihmEndpointError(
+          res.status,
+          code,
+          `SAIHM onboard failed: ${res.status} ${res.statusText}` +
+            (code ? ` (${code})` : ''),
+        );
+      }
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        throw new SaihmEndpointError(
+          res.status,
+          'malformed_json',
+          'SAIHM onboard returned a non-JSON 2xx response',
+        );
+      }
+    } catch (e) {
+      if (e instanceof SaihmEndpointError) throw e;
+      if (e instanceof Error && e.name === 'AbortError') {
+        throw new SaihmEndpointError(
+          408,
+          'timeout',
+          `SAIHM onboard timed out after ${this.requestTimeoutMs}ms`,
+        );
+      }
+      throw new SaihmEndpointError(
+        0,
+        'network',
+        'SAIHM onboard transport error',
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async call<T>(method: string, params: unknown): Promise<T> {
+    const header = await this.currentAuthHeader();
+    try {
+      return await this.doCall<T>(method, params, header);
+    } catch (e) {
+      // Self-onboard mode: a 401 means the cached JWT expired or was revoked mid-flight. Drop it,
+      // re-onboard once, and retry. Static-auth mode surfaces the 401 to the caller unchanged.
+      if (
+        !this.staticAuthHeader &&
+        e instanceof SaihmEndpointError &&
+        e.status === 401
+      ) {
+        this.cachedJwt = undefined;
+        const fresh = await this.currentAuthHeader();
+        return await this.doCall<T>(method, params, fresh);
+      }
+      throw e;
+    }
+  }
+
+  private async doCall<T>(
+    method: string,
+    params: unknown,
+    authHeader: string,
+  ): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
     try {
@@ -406,7 +713,7 @@ export class SaihmProClient {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: this.authHeader,
+          authorization: authHeader,
         },
         body: JSON.stringify({ method, params }),
         signal: ctrl.signal,

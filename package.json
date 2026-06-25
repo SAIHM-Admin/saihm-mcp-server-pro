@@ -1,6 +1,6 @@
 {
   "name": "@saihm/mcp-server-pro",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "description": "SAIHM production thin-client. Seals client-side via @saihm/client-pro (ML-DSA-65 identity, per-cell AES-256-GCM DEK wrapped under a client KEK, ML-KEM-768 authenticated sharing) and POSTs opaque ciphertext to the blind, non-custodial SAIHM /mcp endpoint. The master secret, KEK, and plaintext never leave this process. Apache-2.0.",
   "type": "module",
   "main": "dist/index.js",
@@ -11,11 +11,14 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "saihm-mcp-server-pro": "dist/server.js"
+  },
   "scripts": {
     "clean": "rm -rf dist coverage",
-    "build": "npm run clean && tsc -p .",
+    "build": "npm run clean && tsc -p . && chmod +x dist/server.js",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test": "tsx --test tests/client_pro.test.ts",
+    "test": "tsx --test tests/smoke.test.ts tests/server.test.ts",
     "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "files": [
@@ -45,7 +48,9 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@saihm/client-pro": "^0.1.1"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@saihm/client-pro": "^0.1.2",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.9.0",

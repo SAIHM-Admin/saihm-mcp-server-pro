@@ -17,13 +17,61 @@ Production thin-client for **SAIHM non-custodial memory**.
 npm install @saihm/mcp-server-pro
 ```
 
-## Usage
+## Run as an MCP server
+
+The package ships a stdio MCP server. Point your MCP host (Claude Desktop,
+Claude Code, …) at it — paste this **once**:
+
+```jsonc
+{
+  "mcpServers": {
+    "saihm": {
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": {
+        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp",
+        "SAIHM_MASTER_SECRET_HEX": "<your 64+ hex master secret>",
+        "SAIHM_TIER": "PRO",
+        "SAIHM_PAYMENT_METHOD": "stripe",
+      },
+    },
+  },
+}
+```
+
+With no `SAIHM_AUTH_HEADER`, the server **self-onboards**: it mints and
+auto-refreshes its own short-lived access token from your master secret, so
+there is no token to paste or re-paste. Eight tools are exposed
+(`saihm_remember`, `saihm_recall`, `saihm_forget`, `saihm_status`,
+`saihm_share`, `saihm_revoke_share`, `saihm_governance_propose`,
+`saihm_governance_vote`).
+
+### Self-serve join
+
+To subscribe an identity from the command line instead of the website, run the
+one-off `join` command with the same env:
+
+```sh
+SAIHM_ENDPOINT_URL=https://saihm.coti.global/mcp \
+SAIHM_MASTER_SECRET_HEX=<your 64+ hex master secret> \
+SAIHM_TIER=PRO SAIHM_PAYMENT_METHOD=stripe \
+  npx -y @saihm/mcp-server-pro join
+```
+
+It prints a Stripe checkout link bound to your identity. Pay in a browser, then
+start the server normally (drop `join`) — it connects automatically. Keep
+`SAIHM_MASTER_SECRET_HEX` safe: it is the only key to your memory and cannot be
+recovered.
+
+## Use as a library
 
 ```ts
 import { SaihmProClient } from '@saihm/mcp-server-pro';
 
-// Boot from env: SAIHM_ENDPOINT_URL, SAIHM_AUTH_HEADER, SAIHM_MASTER_SECRET_HEX
-//   (optional: SAIHM_TIER, SAIHM_SEQ_STATE_PATH)
+// Boot from env: SAIHM_ENDPOINT_URL, SAIHM_MASTER_SECRET_HEX
+//   self-onboard (recommended): + SAIHM_PAYMENT_METHOD + SAIHM_TIER (omit SAIHM_AUTH_HEADER)
+//   static token (advanced):    + SAIHM_AUTH_HEADER="Bearer <JWT>"
+//   (optional: SAIHM_SEQ_STATE_PATH)
 const saihm = SaihmProClient.bootFromEnv();
 
 // Store — encrypted before it leaves the process.
@@ -65,21 +113,28 @@ console.log(shared?.plaintext);
 const status = await saihm.status();
 ```
 
-The derived `saihm.agentIdHash` must match the `sub` of the JWT in `SAIHM_AUTH_HEADER`; publish `saihm.identityRecord` so other agents can share to you.
+The derived `saihm.agentIdHash` is the `sub` the endpoint binds your tenant to — when self-onboarding the client proves it via ML-DSA; with a static `SAIHM_AUTH_HEADER` it must equal the JWT `sub`. Publish `saihm.identityRecord` so other agents can share to you.
 
 ## Configuration
 
-| Env                       | Required | Meaning                                                                           |
-| ------------------------- | -------- | --------------------------------------------------------------------------------- |
-| `SAIHM_ENDPOINT_URL`      | yes      | `https://…/mcp` (or `http://` only for `127.0.0.1`/`localhost`).                  |
-| `SAIHM_AUTH_HEADER`       | yes      | `Bearer <JWT>`; the endpoint binds your tenant from the JWT `sub`.                |
-| `SAIHM_MASTER_SECRET_HEX` | yes      | ≥ 64 hex chars (≥ 32 bytes), high-entropy, client-held; never sent.               |
-| `SAIHM_TIER`              | no       | Tier label baked into sealed metadata; resolved via `status()` if unset.          |
-| `SAIHM_SEQ_STATE_PATH`    | no       | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates. |
+| Env                        | Required          | Meaning                                                                                                                                                                                                           |
+| -------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SAIHM_ENDPOINT_URL`       | yes               | `https://…/mcp` (or `http://` only for `127.0.0.1`/`localhost`).                                                                                                                                                  |
+| `SAIHM_AUTH_HEADER`        | no                | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended): the client mints + auto-refreshes its own short-lived JWT from the master secret, so you paste one config once and never re-paste a token. |
+| `SAIHM_PAYMENT_METHOD`     | self-onboard only | Your entitlement rail (e.g. `stripe`). Required when `SAIHM_AUTH_HEADER` is unset; ignored otherwise.                                                                                                             |
+| `SAIHM_MASTER_SECRET_HEX`  | yes\*             | ≥ 64 hex chars (≥ 32 bytes), high-entropy, client-held; never sent. \*Provide this **or** `SAIHM_MASTER_SECRET_FILE`.                                                                                             |
+| `SAIHM_MASTER_SECRET_FILE` | yes\*             | Path to a **mode-600** file holding the hex master secret. Preferred for operators: keeps the root seed out of a synced/shared MCP config. Takes precedence over `SAIHM_MASTER_SECRET_HEX` when both are set.     |
+| `SAIHM_TIER`               | self-onboard only | Tier label baked into sealed metadata. Required when self-onboarding; otherwise optional — resolved via `status()` if unset.                                                                                      |
+| `SAIHM_SEQ_STATE_PATH`     | no                | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates.                                                                                                                                 |
+
+> **Self-onboarding (paste once):** with `SAIHM_AUTH_HEADER` unset, the client proves
+> control of your identity via the endpoint's ML-DSA challenge/response and mints its own
+> token, refreshing transparently on expiry. Cancelling your subscription stops the next
+> refresh, so access ends naturally.
 
 ## Errors
 
-Non-2xx responses throw `SaihmEndpointError` with `status` and a typed `code` (e.g. `BLIND_NO_FREE_TIER`, `BLIND_BAD_EXPIRY`, `governance_unavailable`). Branch on those rather than the message.
+Non-2xx responses throw `SaihmEndpointError` with `status` and a typed `code` (e.g. `BLIND_BAD_EXPIRY`, `BLIND_STALE_SEQ`, `governance_unavailable`). Branch on those rather than the message.
 
 ## Security model
 

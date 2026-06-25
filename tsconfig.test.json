@@ -3,6 +3,6 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "comment": "Strict type-check of the shipping client surface (src/**/*.ts). The runtime test suite is validated by execution via `npm test` (tsx --test) rather than by tsc.",
+  "comment": "Strict typecheck of the shipping client surface (src). The test suite is validated by EXECUTION via `npm test` (tsx --test) rather than by tsc.",
   "include": ["src/**/*.ts"]
 }
