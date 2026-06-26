@@ -11,6 +11,11 @@ Production thin-client for **SAIHM non-custodial memory**.
 
 > **Key loss is unrecoverable by design.** If you lose your master secret you lose your KEK, and no one — including SAIHM — can open your cells. Back it up securely.
 
+## See it run
+
+- **Live cross-model demos** — offline, ~1 min each, no account: <https://citw2.github.io/saihm-demos/>. Ground a memory you own in Claude, GPT, DeepSeek, Qwen, Kimi, or GLM, then prove you can erase it. `demo-claude-code` runs a stdio MCP server exactly like this one for Claude Code and Cursor.
+- **Token benchmark** — recalling a bounded set of memory cells instead of re-sending the transcript cut input tokens by **62.8%–85.9%** (up to ~86%) across a realistic multi-session task; open, offline, reproducible: <https://github.com/citw2/saihm-token-benchmark>.
+
 ## Install
 
 ```sh
