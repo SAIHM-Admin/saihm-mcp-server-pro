@@ -2,6 +2,18 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] — 2026-06-28
+
+### Changed
+
+- **`join` now completes the endpoint's proof-of-possession challenge before requesting a checkout link.** It fetches a server challenge and signs it with the in-process ML-DSA-65 secret key — the same challenge/response the self-onboarding path already performs — so the hosted checkout is cryptographically bound to the caller's own identity. Required by the current `/api/stripe/checkout` contract.
+
+## [0.1.6] — 2026-06-25
+
+### Changed
+
+- Reproducible publish: regenerated lockfile and removed a stray formatter config. No API changes.
+
 ## [0.1.5] — 2026-06-25
 
 ### Added
@@ -30,6 +42,8 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.1.7]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.7
+[0.1.6]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.6
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0

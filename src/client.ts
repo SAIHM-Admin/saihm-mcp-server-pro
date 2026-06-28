@@ -609,6 +609,32 @@ export class SaihmProClient {
         'join requires a tier (set SAIHM_TIER)',
       );
     }
+    // Proof-of-possession: /api/stripe/checkout requires a fresh server nonce signed
+    // by THIS identity's ML-DSA secret key (the same gate /api/onboard uses), proving
+    // we hold the private key for the mldsaPubKey we send. Without it the route 401s.
+    const ch = await this.onboardFetch<{ nonce?: unknown }>(
+      this.onboardBase + '/api/onboard/challenge',
+      { method: 'GET' },
+    );
+    const nonce = ch.nonce;
+    if (typeof nonce !== 'string' || nonce.length === 0) {
+      throw new SaihmEndpointError(
+        502,
+        'checkout_no_nonce',
+        'onboard challenge returned no nonce',
+      );
+    }
+    let nonceBytes: Uint8Array;
+    try {
+      nonceBytes = fromHex(nonce);
+    } catch {
+      throw new SaihmEndpointError(
+        502,
+        'checkout_bad_nonce',
+        'onboard challenge nonce is not hex',
+      );
+    }
+    const signature = toHex(signChallenge(this.identity.mldsaSecretKey, nonceBytes));
     const out = await this.onboardFetch<{ url?: unknown }>(
       this.onboardBase + '/api/stripe/checkout',
       {
@@ -617,6 +643,8 @@ export class SaihmProClient {
         body: JSON.stringify({
           tier: this.tier,
           mldsaPubKey: toHex(this.identity.mldsaPubKey),
+          nonce,
+          signature,
           uiMode: 'hosted',
         }),
       },
