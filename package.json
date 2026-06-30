@@ -1,6 +1,6 @@
 {
   "name": "@saihm/mcp-server-pro",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "SAIHM production thin-client. Seals client-side via @saihm/client-pro (ML-DSA-65 identity, per-cell AES-256-GCM DEK wrapped under a client KEK, ML-KEM-768 authenticated sharing) and POSTs opaque ciphertext to the blind, non-custodial SAIHM /mcp endpoint. The master secret, KEK, and plaintext never leave this process. Apache-2.0.",
   "type": "module",
   "main": "dist/index.js",
@@ -35,7 +35,12 @@
     "non-custodial",
     "client-side-encryption",
     "agent-memory",
-    "mcp"
+    "persistent-memory",
+    "ai-agents",
+    "gdpr",
+    "mcp",
+    "model-context-protocol",
+    "mcp-server"
   ],
   "license": "Apache-2.0",
   "author": "SAIHM",
@@ -49,7 +54,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@saihm/client-pro": "^0.1.2",
+    "@saihm/client-pro": "^0.1.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

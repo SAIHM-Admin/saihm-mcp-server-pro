@@ -2,6 +2,19 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] — 2026-06-30
+
+### Added
+
+- **Structured tool output.** `saihm_remember`, `saihm_recall`, and `saihm_status` now advertise an `outputSchema` and return matching `structuredContent`, so MCP hosts and agents get typed results instead of parsing prose.
+- **`saihm_session_bootstrap` prompt.** A new MCP prompt (the `prompts` capability is now advertised) that tells an agent to load its SAIHM memory via `saihm_recall` at the start of a session.
+- **`SAIHM_DISCOVERY_SOURCE`** (also `discoverySource` on `SaihmProClientOpts`) — an optional attribution tag (e.g. `"glama"`, `"mcp-registry"`) sent as `source` on self-onboard, so an operator can attribute a paid conversion to the install channel. Free-form; sanitised endpoint-side.
+- npm `keywords`, README badges, and a `SECURITY.md` coordinated-disclosure policy (source tree only; not part of the published tarball) for discovery.
+
+### Changed
+
+- Depends on `@saihm/client-pro` >= 0.1.5 (was >= 0.1.2).
+
 ## [0.1.7] — 2026-06-28
 
 ### Changed

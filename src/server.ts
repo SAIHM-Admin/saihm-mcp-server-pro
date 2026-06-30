@@ -39,7 +39,7 @@ const PACKAGE_VERSION: string = (
 
 const server = new McpServer(
   { name: 'saihm', version: PACKAGE_VERSION },
-  { capabilities: { tools: {} } },
+  { capabilities: { tools: {}, prompts: {} } },
 );
 
 // Lazily boot so the MCP `initialize` handshake always succeeds; a misconfiguration surfaces as a
@@ -50,7 +50,10 @@ function getClient(): SaihmProClient {
   return client;
 }
 
-const ok = (text: string) => ({ content: [{ type: 'text' as const, text }] });
+const ok = (text: string, structuredContent?: Record<string, unknown>) => ({
+  content: [{ type: 'text' as const, text }],
+  ...(structuredContent ? { structuredContent } : {}),
+});
 
 /** Surface any error as a typed MCP tool error (never crash the server). */
 function fail(e: unknown) {
@@ -63,21 +66,44 @@ function fail(e: unknown) {
   return { content: [{ type: 'text' as const, text }], isError: true as const };
 }
 
-server.tool(
+server.registerTool(
   'saihm_remember',
-  'Store information to SAIHM persistent encrypted memory (sealed client-side). Pass an existing cellId to update it.',
   {
-    content: z.string().describe('Information to remember'),
-    cellId: z
-      .string()
-      .optional()
-      .describe('Existing cell id (hex) to update; omit to create a new cell'),
+    title: 'Remember',
+    description:
+      'Store information to SAIHM persistent encrypted memory (sealed client-side). Pass an existing cellId to update it. Use this when an agent or user wants a fact, decision, or context to persist across sessions.',
+    inputSchema: {
+      content: z.string().describe('Information to remember'),
+      cellId: z
+        .string()
+        .optional()
+        .describe('Existing cell id (hex) to update; omit to create a new cell'),
+    },
+    outputSchema: {
+      cellId: z.string(),
+      seq: z.string(),
+      shardId: z.string(),
+      commitmentHash: z.string(),
+    },
+    annotations: {
+      title: 'Remember',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ content, cellId }) => {
     try {
       const r = await getClient().remember(content, cellId ? { cellId } : {});
       return ok(
         `REMEMBERED [${r.cellId}] seq=${r.seq} shard=${r.shardId} commit=${r.commitmentHash.slice(0, 16)}…`,
+        {
+          cellId: r.cellId,
+          seq: String(r.seq),
+          shardId: String(r.shardId),
+          commitmentHash: r.commitmentHash,
+        },
       );
     } catch (e) {
       return fail(e);
@@ -85,28 +111,61 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'saihm_recall',
-  'Retrieve and decrypt your memories (opened client-side). Optional keyword filter.',
-  { query: z.string().optional().describe('Filter by keyword (empty = all)') },
+  {
+    title: 'Recall',
+    description:
+      'Retrieve and decrypt your memories (opened client-side). Optional keyword filter. Use this at the start of a session or whenever past context is needed.',
+    inputSchema: { query: z.string().optional().describe('Filter by keyword (empty = all)') },
+    outputSchema: {
+      count: z.number(),
+      memories: z.array(
+        z.object({ cellId: z.string(), seq: z.string(), plaintext: z.string() }),
+      ),
+    },
+    annotations: {
+      title: 'Recall',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
   async ({ query }) => {
     try {
       const cells = await getClient().recall(query);
-      if (cells.length === 0) return ok('No memories stored.');
+      const memories = cells.map((c) => ({
+        cellId: c.cellId,
+        seq: String(c.seq),
+        plaintext: c.plaintext,
+      }));
+      if (cells.length === 0) return ok('No memories stored.', { count: 0, memories });
       const lines = [`RECALL ${cells.length} memories`];
       for (const c of cells)
         lines.push(`  [${c.cellId}] seq=${c.seq} | ${c.plaintext}`);
-      return ok(lines.join('\n'));
+      return ok(lines.join('\n'), { count: cells.length, memories });
     } catch (e) {
       return fail(e);
     }
   },
 );
 
-server.tool(
+server.registerTool(
   'saihm_forget',
-  'Cryptographically erase a memory (GDPR Art. 17): destroys the endpoint-side wrapped DEK so the cell can never be decrypted again.',
-  { id: z.string().describe('Memory cell id (hex) to erase') },
+  {
+    title: 'Forget (GDPR erasure)',
+    description:
+      'Cryptographically erase a memory (GDPR Art. 17): destroys the endpoint-side wrapped DEK so the cell can never be decrypted again. Use this only to permanently and irreversibly delete a memory by its cell id.',
+    inputSchema: { id: z.string().describe('Memory cell id (hex) to erase') },
+    annotations: {
+      title: 'Forget (GDPR erasure)',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
   async ({ id }) => {
     try {
       const r = await getClient().forget(id);
@@ -119,15 +178,44 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'saihm_status',
-  'Show operator-observable session status (no plaintext): tier, shards, sharing, BFSI, custody.',
-  {},
+  {
+    title: 'Status',
+    description:
+      'Show operator-observable session status (no plaintext): tier, shards, sharing, BFSI, custody. Use this to check the identity, custody, storage, and sharing state of the current SAIHM session.',
+    inputSchema: {},
+    outputSchema: {
+      agentIdHash: z.string(),
+      tier: z.string(),
+      custody: z.string(),
+      activeShardCount: z.number(),
+      activeSharingContracts: z.number(),
+      bfsi: z.number(),
+      snapshotEpoch: z.string(),
+    },
+    annotations: {
+      title: 'Status',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
   async () => {
     try {
       const d = await getClient().status();
       return ok(
         `SAIHM Session\n  agent=${d.agentIdHashHex.slice(0, 16)}…  tier=${d.tier}  custody=${d.custody}\n  shards=${d.activeShardCount}  sharing=${d.activeSharingContracts}  bfsi=${d.bfsi.toFixed(3)} (R=${d.bfsi_R} M=${d.bfsi_M})  epoch=${d.snapshotEpoch}`,
+        {
+          agentIdHash: d.agentIdHashHex,
+          tier: String(d.tier),
+          custody: String(d.custody),
+          activeShardCount: Number(d.activeShardCount),
+          activeSharingContracts: Number(d.activeSharingContracts),
+          bfsi: d.bfsi,
+          snapshotEpoch: String(d.snapshotEpoch),
+        },
       );
     } catch (e) {
       return fail(e);
@@ -135,30 +223,41 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'saihm_share',
-  "Share a cell with another agent, end-to-end authenticated. Pin the grantee's agentIdHash out-of-band.",
   {
-    cellId: z.string().describe('The cell to share'),
-    recipientRecord: z
-      .object({
-        mldsaPubKey: z.string(),
-        mlkemPubKey: z.string(),
-        mlkemPubKeySelfSig: z.string(),
-      })
-      .describe("The grantee's published identity record (hex fields)"),
-    recipientPinnedAgentIdHashHex: z
-      .string()
-      .describe("The grantee's agentIdHash (hex), pinned out-of-band"),
-    scope: z
-      .enum(['read', 'write', 'readwrite'])
-      .optional()
-      .describe('Access scope (default read)'),
-    expiryEpoch: z
-      .string()
-      .regex(/^[0-9]+$/, 'expiryEpoch must be a decimal UNIX-epoch count')
-      .optional()
-      .describe('Optional expiry as a UNIX-epoch count (decimal string)'),
+    title: 'Share',
+    description:
+      "Share a cell with another agent, end-to-end authenticated. Pin the grantee's agentIdHash out-of-band. Use this to grant another agent access to a specific memory.",
+    inputSchema: {
+      cellId: z.string().describe('The cell to share'),
+      recipientRecord: z
+        .object({
+          mldsaPubKey: z.string(),
+          mlkemPubKey: z.string(),
+          mlkemPubKeySelfSig: z.string(),
+        })
+        .describe("The grantee's published identity record (hex fields)"),
+      recipientPinnedAgentIdHashHex: z
+        .string()
+        .describe("The grantee's agentIdHash (hex), pinned out-of-band"),
+      scope: z
+        .enum(['read', 'write', 'readwrite'])
+        .optional()
+        .describe('Access scope (default read)'),
+      expiryEpoch: z
+        .string()
+        .regex(/^[0-9]+$/, 'expiryEpoch must be a decimal UNIX-epoch count')
+        .optional()
+        .describe('Optional expiry as a UNIX-epoch count (decimal string)'),
+    },
+    annotations: {
+      title: 'Share',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({
     cellId,
@@ -184,14 +283,25 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'saihm_revoke_share',
-  'Revoke a prior share grant to a recipient for a cell.',
   {
-    cellId: z.string().describe('The shared cell id'),
-    recipientHex: z
-      .string()
-      .describe("The grantee's agentIdHash (hex) to revoke"),
+    title: 'Revoke share',
+    description:
+      "Revoke a prior share grant to a recipient for a cell. Use this to withdraw a grantee's access.",
+    inputSchema: {
+      cellId: z.string().describe('The shared cell id'),
+      recipientHex: z
+        .string()
+        .describe("The grantee's agentIdHash (hex) to revoke"),
+    },
+    annotations: {
+      title: 'Revoke share',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
   },
   async ({ cellId, recipientHex }) => {
     try {
@@ -205,18 +315,29 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'saihm_governance_propose',
-  "Submit a gSAIHM governance proposal. Scope MUST be 'emission_param' or 'protocol_upgrade'.",
   {
-    scope: z
-      .enum(['emission_param', 'protocol_upgrade'])
-      .describe('Governable scope'),
-    paramKey: z
-      .string()
-      .optional()
-      .describe('Parameter key (when scope=emission_param)'),
-    proposedValue: z.string().optional().describe('Proposed value as string'),
+    title: 'Propose (governance)',
+    description:
+      "Submit a gSAIHM governance proposal. Scope MUST be 'emission_param' or 'protocol_upgrade'. Use this to open a protocol governance vote.",
+    inputSchema: {
+      scope: z
+        .enum(['emission_param', 'protocol_upgrade'])
+        .describe('Governable scope'),
+      paramKey: z
+        .string()
+        .optional()
+        .describe('Parameter key (when scope=emission_param)'),
+      proposedValue: z.string().optional().describe('Proposed value as string'),
+    },
+    annotations: {
+      title: 'Propose (governance)',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ scope, paramKey, proposedValue }) => {
     try {
@@ -232,12 +353,23 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'saihm_governance_vote',
-  'Cast a vote on an open gSAIHM governance proposal.',
   {
-    proposalId: z.string().describe('Hex proposalId'),
-    approve: z.boolean().describe('true = approve, false = reject'),
+    title: 'Vote (governance)',
+    description:
+      'Cast a vote on an open gSAIHM governance proposal. Use this to approve or reject an open proposal by its proposalId.',
+    inputSchema: {
+      proposalId: z.string().describe('Hex proposalId'),
+      approve: z.boolean().describe('true = approve, false = reject'),
+    },
+    annotations: {
+      title: 'Vote (governance)',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
   },
   async ({ proposalId, approve }) => {
     try {
@@ -247,6 +379,28 @@ server.tool(
       return fail(e);
     }
   },
+);
+
+// Session-bootstrap prompt (an MCP Prompt, not a tool — the 8-tool surface is unchanged).
+// Hosts surface this so an agent loads its persistent memory before other work.
+server.registerPrompt(
+  'saihm_session_bootstrap',
+  {
+    title: 'Load SAIHM memory',
+    description:
+      'Load your SAIHM persistent memory at the start of a session, before other work.',
+  },
+  () => ({
+    messages: [
+      {
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: 'Before anything else, call the saihm_recall tool (no query, or a keyword if you have one) to load my SAIHM persistent memory for this session, then briefly summarise what you recalled.',
+        },
+      },
+    ],
+  }),
 );
 
 /**

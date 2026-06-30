@@ -33,6 +33,9 @@
  *   SAIHM_TIER              the billing tier label baked into sealed cell metadata. REQUIRED for
  *                           self-onboarding (it is part of the onboard request); otherwise optional —
  *                           if unset (static-auth mode) the client resolves it once via `status()`.
+ *   SAIHM_DISCOVERY_SOURCE  OPTIONAL attribution tag (e.g. `"glama"`, `"mcp-registry"`) naming the
+ *                           channel this install came from; sent as `source` on self-onboard so the
+ *                           operator can attribute the paid conversion. Sanitised endpoint-side.
  *   SAIHM_SEQ_STATE_PATH    optional path; persists per-cell seq high-water marks (mode 600) so a
  *                           cell UPDATE survives a process restart without a stale-seq rejection.
  *
@@ -295,6 +298,13 @@ export interface SaihmProClientOpts {
    */
   paymentMethod?: string;
   /**
+   * Optional discovery-attribution tag naming the channel this install came from
+   * (e.g. `"glama"`, `"mcp-registry"`). Sent as `source` in the `/api/onboard` body so
+   * the operator can attribute a paid conversion to its origin (referrer is not
+   * available for CLI/registry installs). Free-form; the endpoint sanitises it.
+   */
+  discoverySource?: string;
+  /**
    * Override the base origin used for self-onboarding requests (`/api/onboard/challenge`,
    * `/api/onboard`). Defaults to the origin of `SAIHM_ENDPOINT_URL`. Advanced / testing knob.
    */
@@ -376,6 +386,8 @@ export class SaihmProClient {
   private readonly staticAuthHeader: string | undefined;
   /** Self-onboard only: the proof-of-entitlement rail sent to `/api/onboard`. */
   private readonly paymentMethod: string | undefined;
+  /** WS-J discovery-attribution tag sent as `source` on self-onboard (optional). */
+  private readonly discoverySource: string | undefined;
   /** Base origin for `/api/onboard*` + `/api/stripe/*` calls (defaults to the endpoint origin). */
   private readonly onboardBase: string;
   private readonly identity: ClientIdentity;
@@ -400,6 +412,7 @@ export class SaihmProClient {
     this.identity = deriveIdentity(masterSecret);
     this.agentIdHashHex = toHex(this.identity.agentIdHash);
     this.tier = opts.tier;
+    this.discoverySource = opts.discoverySource;
     this.seq = new SeqState(this.agentIdHashHex, opts.seqStatePath);
     this.requestTimeoutMs =
       typeof opts.requestTimeoutMs === 'number' && opts.requestTimeoutMs > 0
@@ -487,10 +500,12 @@ export class SaihmProClient {
     const optTier = process.env.SAIHM_TIER;
     const optSeqPath = process.env.SAIHM_SEQ_STATE_PATH;
     const optPaymentMethod = process.env.SAIHM_PAYMENT_METHOD;
+    const optDiscoverySource = process.env.SAIHM_DISCOVERY_SOURCE;
     const opts: SaihmProClientOpts = {};
     if (optTier) opts.tier = optTier;
     if (optSeqPath) opts.seqStatePath = optSeqPath;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
+    if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
     // SAIHM_PAYMENT_METHOD + SAIHM_TIER (paste-once). Set => used verbatim, no self-onboarding.
     try {
@@ -572,6 +587,7 @@ export class SaihmProClient {
           signature,
           tier: this.tier,
           paymentMethod: this.paymentMethod,
+          ...(this.discoverySource ? { source: this.discoverySource } : {}),
         }),
       },
     );

@@ -1,5 +1,8 @@
 # @saihm/mcp-server-pro
 
+[![npm version](https://img.shields.io/npm/v/@saihm/mcp-server-pro.svg)](https://www.npmjs.com/package/@saihm/mcp-server-pro)
+[![license](https://img.shields.io/npm/l/@saihm/mcp-server-pro.svg)](./LICENSE)
+
 Production thin-client for **SAIHM non-custodial memory**.
 
 `SaihmProClient` seals every cell **on the client** with [`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro), then POSTs the resulting ciphertext to the blind SAIHM `/mcp` endpoint. The endpoint stores, anchors, shares, and meters over ciphertext — it never holds your keys and cannot read your memory. Your master secret, key-encryption key, and plaintext never leave this process.
@@ -15,6 +18,21 @@ Production thin-client for **SAIHM non-custodial memory**.
 
 - **Live cross-model demos** — offline, ~1 min each, no account: <https://citw2.github.io/saihm-demos/>. Ground a memory you own in Claude, GPT, DeepSeek, Qwen, Kimi, or GLM, then prove you can erase it. `demo-claude-code` runs a stdio MCP server exactly like this one for Claude Code and Cursor.
 - **Token benchmark** — recalling a bounded set of memory cells instead of re-sending the transcript cut input tokens by **62.8%–85.9%** (up to ~86%) across a realistic multi-session task; open, offline, reproducible: <https://github.com/citw2/saihm-token-benchmark>.
+
+## Tool reference
+
+| Tool | Title | Behavior |
+|---|---|---|
+| `saihm_remember` | Remember | seals + writes a memory cell (client-side) |
+| `saihm_recall` | Recall | read-only; opens cells client-side |
+| `saihm_forget` | Forget (GDPR erasure) | **destructive** — irreversible erasure |
+| `saihm_status` | Status | read-only |
+| `saihm_share` | Share | end-to-end-authenticated grant |
+| `saihm_revoke_share` | Revoke share | withdraws a grant |
+| `saihm_governance_propose` | Propose (governance) | opens a proposal |
+| `saihm_governance_vote` | Vote (governance) | casts a vote |
+
+Each tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) and a human-readable `title`, so MCP hosts can gate confirmations and agents can select the right tool at reasoning time.
 
 ## Install
 
