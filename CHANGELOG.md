@@ -2,6 +2,14 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] — 2026-07-06
+
+### Added
+
+- **Free tier — self-serve, non-custodial activation.** `npx -y @saihm/mcp-server-pro free-join` (with `SAIHM_TIER=FREE`) activates a free, one-time lifetime memory allowance bound to your own key. A one-time GitHub device sign-in confirms a unique person; the provider token stays server-ephemeral and the client never holds it. `acquireFreeEntitlement()` exposes the same headless device flow to library callers, with an `onPrompt` callback for the user-code display.
+- **`upgrade` subcommand.** `npx -y @saihm/mcp-server-pro upgrade [PRO|PRO_FAST|ENTERPRISE|ENTERPRISE_FAST]` prints a monthly checkout link bound to your identity; billing attaches to the same key, so every existing memory persists. `requestUpgradeUrl(tier)` for library callers.
+- **Advisory free-tier usage nags** via the `onQuotaNag` client option — a non-blocking heads-up as lifetime usage approaches its limit (fired at most once per call type and threshold). It never blocks a call.
+
 ## [0.1.8] — 2026-06-30
 
 ### Added
@@ -55,6 +63,8 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.1.9]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.9
+[0.1.8]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.8
 [0.1.7]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.7
 [0.1.6]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.6
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5

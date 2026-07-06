@@ -16,6 +16,10 @@
  *   npx -y @saihm/mcp-server-pro
  * Self-serve join (one-off, prints a Stripe checkout link to subscribe this identity):
  *   npx -y @saihm/mcp-server-pro join
+ * Self-serve FREE activation (one-off, OAuth device flow — requires SAIHM_TIER=FREE):
+ *   npx -y @saihm/mcp-server-pro free-join
+ * Upgrade FREE -> monthly paid, same key/memories (one-off — requires SAIHM_TIER=FREE):
+ *   npx -y @saihm/mcp-server-pro upgrade [PRO|PRO_FAST|ENTERPRISE|ENTERPRISE_FAST]
  *
  * Boot from env (self-onboard): SAIHM_ENDPOINT_URL, SAIHM_MASTER_SECRET_HEX,
  *   SAIHM_TIER, SAIHM_PAYMENT_METHOD. Advanced/legacy: SAIHM_AUTH_HEADER (static).
@@ -428,9 +432,84 @@ async function runJoin(): Promise<void> {
   );
 }
 
+/**
+ * Self-serve FREE activation: derive this identity from the env master secret and onboard it to the
+ * FREE tier via the operator bridge's OAuth device flow (RFC 8628). Prints the one-tap prompt (open a
+ * URL, enter a code) and waits for authorization; the provider token stays server-ephemeral and this
+ * process never holds it. After it succeeds, run the server normally (no `free-join`) and it
+ * self-onboards FREE. Requires SAIHM_TIER=FREE. Writes only to stdout/stderr — not the MCP stream.
+ */
+async function runFreeJoin(): Promise<void> {
+  const c = SaihmProClient.bootFromEnv();
+  const r = await c.acquireFreeEntitlement({
+    onPrompt: (p) =>
+      process.stdout.write(
+        [
+          '',
+          'SAIHM — activate your FREE memory. In a browser:',
+          '',
+          `  1. open   ${p.verificationUri}`,
+          `  2. enter  ${p.userCode}`,
+          '',
+          `  (code expires in ~${Math.max(1, Math.round(p.expiresIn / 60))} min) — waiting for authorization…`,
+          '',
+        ].join('\n'),
+      ),
+  });
+  process.stdout.write(
+    [
+      '',
+      'FREE memory activated for this identity:',
+      '',
+      `  identity (agentIdHash): ${r.agentIdHash}`,
+      '',
+      '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your memory and cannot be',
+      '  recovered. Start the server normally (drop the "free-join" argument) and it connects',
+      '  automatically. Upgrading to a paid plan later attaches to THIS same key — your memories persist.',
+      '',
+    ].join('\n'),
+  );
+}
+
+/**
+ * Self-serve FREE -> paid upgrade: derive this identity from the env master secret and request a Stripe
+ * hosted-checkout link to subscribe it to a monthly paid tier (default PRO; override via arg or
+ * SAIHM_UPGRADE_TIER). Billing attaches to THIS same key, so every existing memory persists. Requires
+ * SAIHM_TIER=FREE. After payment, reconfigure SAIHM_TIER/SAIHM_PAYMENT_METHOD and start the server
+ * normally. Writes only to stdout/stderr — not the MCP stream.
+ */
+async function runUpgrade(): Promise<void> {
+  const c = SaihmProClient.bootFromEnv();
+  const target = (process.argv[3] ?? process.env.SAIHM_UPGRADE_TIER ?? 'PRO').trim();
+  const url = await c.requestUpgradeUrl(target);
+  process.stdout.write(
+    [
+      '',
+      `SAIHM — upgrade this identity to ${target} (monthly). Your memories stay on this same key:`,
+      '',
+      '  ' + url,
+      '',
+      `  identity (agentIdHash): ${c.agentIdHash}`,
+      '',
+      '  Open the link above in a browser and pay. After payment, set SAIHM_TIER and',
+      '  SAIHM_PAYMENT_METHOD for the paid tier and start the server normally (drop the',
+      '  "upgrade" argument) — it self-onboards paid and every prior memory is still there.',
+      '',
+    ].join('\n'),
+  );
+}
+
 async function main(): Promise<void> {
   if (process.argv[2] === 'join') {
     await runJoin();
+    return;
+  }
+  if (process.argv[2] === 'free-join') {
+    await runFreeJoin();
+    return;
+  }
+  if (process.argv[2] === 'upgrade') {
+    await runUpgrade();
     return;
   }
   const transport = new StdioServerTransport();

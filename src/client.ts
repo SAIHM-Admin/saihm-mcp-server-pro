@@ -114,6 +114,45 @@ const JWT_REFRESH_SKEW_MS = 60_000;
 /** Conservative assumed lifetime for an opaque (non-JWT) token whose `exp` we cannot read. */
 const OPAQUE_TOKEN_TTL_MS = 5 * 60_000;
 
+/** Default client->bridge poll cadence for the FREE device-flow claim loop when the bridge gives none. */
+const FREE_ONBOARD_POLL_MS = 5_000;
+
+/**
+ * The monthly-subscription tiers a FREE identity may upgrade to via {@link SaihmProClient.requestUpgradeUrl}.
+ * FREE (the origin) and any usage-metered/PAYG label are deliberately excluded: the free->paid door lands on
+ * a mandatory monthly subscription (ratified), never a pay-as-you-go plan.
+ */
+const MONTHLY_PAID_TIERS: ReadonlySet<string> = new Set([
+  'PRO',
+  'PRO_FAST',
+  'ENTERPRISE',
+  'ENTERPRISE_FAST',
+]);
+
+/** Lifetime-usage fractions (percent) at which the FREE tier surfaces an upgrade nag. 100 = hard cap reached. */
+const QUOTA_NAG_THRESHOLDS = [80, 95, 100] as const;
+type QuotaNagThreshold = (typeof QUOTA_NAG_THRESHOLDS)[number];
+
+/** Advisory upgrade call-to-action carried on every {@link QuotaNag} (no pricing — set by the operator/site). */
+const UPGRADE_HINT =
+  'Upgrade to a monthly PRO subscription to keep going — your memories stay on this same key. ' +
+  'Run `npx -y @saihm/mcp-server-pro upgrade` for a checkout link.';
+
+/** Parse a non-negative decimal-string bigint (as bridges serialise counters); `null` if not one. */
+function parseDecimalBig(v: unknown): bigint | null {
+  if (typeof v !== 'string' || !/^[0-9]+$/.test(v)) return null;
+  try {
+    return BigInt(v);
+  } catch {
+    return null;
+  }
+}
+
+/** Minimal async sleep used by the FREE device-flow poll loop. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Decode a JWT's `exp` (seconds since epoch) into epoch-ms; `undefined` if it is not parseable. */
 function jwtExpMs(jwt: string): number | undefined {
   const parts = jwt.split('.');
@@ -315,6 +354,74 @@ export interface SaihmProClientOpts {
    * non-positive or non-numeric value falls back to the default.
    */
   requestTimeoutMs?: number;
+  /**
+   * FREE tier only: an advisory callback invoked as lifetime usage approaches (80/95%) or reaches
+   * (100%) the FREE quota for a call type, so a host can nudge the user to upgrade BEFORE the hard cap.
+   * It NEVER blocks or fails a call (a throwing callback is swallowed) and fires at most once per
+   * (callType, threshold). Paid tiers never invoke it. See {@link QuotaNag}.
+   */
+  onQuotaNag?: (nag: QuotaNag) => void;
+}
+
+/** The human-facing device-flow prompt surfaced by {@link SaihmProClient.acquireFreeEntitlement}. */
+export interface FreeDevicePrompt {
+  /** The short code the human types at `verificationUri` (e.g. `WDJB-MJHT`). */
+  userCode: string;
+  /** The URL the human opens in a browser to enter `userCode` (e.g. `https://github.com/login/device`). */
+  verificationUri: string;
+  /** Seconds until the device/user code expires and the flow must be restarted. */
+  expiresIn: number;
+}
+
+/** Options for {@link SaihmProClient.acquireFreeEntitlement}. */
+export interface FreeEntitlementOpts {
+  /**
+   * OAuth provider slug the operator's bridge is configured for (default `"github"`). The provider's
+   * OAuth client_id lives SERVER-SIDE only; the device flow runs on the bridge and this client never
+   * sees or holds the provider access token — it stays server-ephemeral (device flow, not token reuse).
+   */
+  provider?: string;
+  /**
+   * Invoked ONCE with the device-flow prompt: display `userCode` and have the human open
+   * `verificationUri` in a browser and enter it. This is what makes FREE onboarding headless — no
+   * redirect URI, no browser automation, works from a CLI / MCP host.
+   */
+  onPrompt: (prompt: FreeDevicePrompt) => void;
+  /** Overall wall-clock budget (ms) to wait for authorization. Defaults to the flow's `expiresIn`. */
+  timeoutMs?: number;
+  /**
+   * Override the client->bridge claim poll cadence (ms). Advanced / testing knob; defaults to the
+   * bridge-advertised `interval`, else {@link FREE_ONBOARD_POLL_MS}. Non-positive values are ignored.
+   */
+  pollIntervalMs?: number;
+}
+
+/** Result of a successful {@link SaihmProClient.acquireFreeEntitlement}. */
+export interface FreeEntitlementResult {
+  /** This client's sovereign agent id (hex) the durable FREE entitlement was bound to. */
+  agentIdHash: string;
+}
+
+/**
+ * An advisory FREE-tier usage nag surfaced via {@link SaihmProClientOpts.onQuotaNag} as lifetime usage
+ * approaches (80/95%) or reaches (100%) the FREE quota for a call type. It NEVER blocks a call and is
+ * fired at most once per (callType, threshold) for the life of the client. FREE tier only.
+ */
+export interface QuotaNag {
+  /** The metered call type this nag is about: `"remember"`, `"recall"`, `"forget"`, or `"sharing"`. */
+  callType: string;
+  /** The crossed threshold as a percent of the lifetime quota (80, 95, or 100). */
+  threshold: QuotaNagThreshold;
+  /** True when the hard cap is reached (threshold 100): the NEXT such call is rejected until upgrade. */
+  atHardCap: boolean;
+  /** Lifetime usage of `callType` after the triggering call; `null` when the surface carried no counter. */
+  used: bigint | null;
+  /** The FREE lifetime quota for `callType`; `null` when the surface carried no counter. */
+  limit: bigint | null;
+  /** `used / limit` in [0,1]; `1` at the hard cap. `null` when the counters were unavailable. */
+  fraction: number | null;
+  /** A ready-to-show upgrade call-to-action (no pricing). See {@link UPGRADE_HINT}. */
+  upgradeHint: string;
 }
 
 // ── per-cell seq high-water store (in-memory rule from @saihm/client-pro, optional file mirror) ──
@@ -399,6 +506,10 @@ export class SaihmProClient {
   private cachedJwt: string | undefined;
   private cachedJwtRefreshAtMs = 0;
   private authInFlight: Promise<string> | null = null;
+  /** FREE-tier upgrade-nag callback (advisory; paid never fires it). */
+  private readonly onQuotaNag: ((nag: QuotaNag) => void) | undefined;
+  /** `${callType}:${threshold}` keys already nagged, so each nag fires at most once per client. */
+  private readonly firedNagKeys = new Set<string>();
 
   constructor(
     endpoint: string,
@@ -412,6 +523,7 @@ export class SaihmProClient {
     this.identity = deriveIdentity(masterSecret);
     this.agentIdHashHex = toHex(this.identity.agentIdHash);
     this.tier = opts.tier;
+    this.onQuotaNag = opts.onQuotaNag;
     this.discoverySource = opts.discoverySource;
     this.seq = new SeqState(this.agentIdHashHex, opts.seqStatePath);
     this.requestTimeoutMs =
@@ -432,8 +544,11 @@ export class SaihmProClient {
       this.staticAuthHeader = trimmedAuth;
     } else {
       // SELF-ONBOARD MODE: mint + auto-refresh the JWT from this identity. Requires the tier (it is
-      // part of the onboard request) and the payment method (the entitlement rail the endpoint checks).
-      if (!opts.paymentMethod) {
+      // part of the onboard request). PAID tiers also require a payment method (the entitlement rail
+      // the endpoint checks). The FREE tier carries NO payment: its entitlement is proven ONCE, out of
+      // band, via `acquireFreeEntitlement` (bridge-proxied OAuth device flow) and bound to this sovereign
+      // key; thereafter /api/onboard mints FREE JWTs with no paymentMethod and the same refresh loop runs.
+      if (this.tier !== 'FREE' && !opts.paymentMethod) {
         throw new Error(
           'self-onboarding requires a paymentMethod (set SAIHM_PAYMENT_METHOD) when no auth header is supplied',
         );
@@ -625,9 +740,44 @@ export class SaihmProClient {
         'join requires a tier (set SAIHM_TIER)',
       );
     }
-    // Proof-of-possession: /api/stripe/checkout requires a fresh server nonce signed
-    // by THIS identity's ML-DSA secret key (the same gate /api/onboard uses), proving
-    // we hold the private key for the mldsaPubKey we send. Without it the route 401s.
+    return this.checkoutUrlForTier(this.tier);
+  }
+
+  /**
+   * FREE -> monthly-PRO upgrade: request a Stripe HOSTED-checkout URL to subscribe THIS SAME sovereign
+   * identity to a paid MONTHLY tier (default `PRO`). The upgrade attaches billing to the SAME ML-DSA key,
+   * so `agentIdHash` is unchanged and every existing memory persists — no migration, no re-onboard. After
+   * payment, reconfigure `SAIHM_TIER`/`SAIHM_PAYMENT_METHOD` for the paid tier and the ordinary refresh
+   * loop mints paid JWTs. This is the FREE->paid door: it requires `SAIHM_TIER=FREE` (an already-paid
+   * identity uses {@link requestCheckoutUrl}) and refuses anything but a monthly subscription tier.
+   * Only the PUBLIC key is sent; the master secret never leaves here.
+   */
+  async requestUpgradeUrl(targetTier: string = 'PRO'): Promise<string> {
+    if (this.tier !== 'FREE') {
+      throw new SaihmEndpointError(
+        0,
+        'not_free_tier',
+        'requestUpgradeUrl is the FREE->paid upgrade path (set SAIHM_TIER=FREE); a paid identity uses requestCheckoutUrl',
+      );
+    }
+    const target = targetTier.trim();
+    if (!MONTHLY_PAID_TIERS.has(target)) {
+      throw new SaihmEndpointError(
+        0,
+        'bad_upgrade_tier',
+        `upgrade target must be a monthly paid tier (${[...MONTHLY_PAID_TIERS].join(', ')}); got '${targetTier}'`,
+      );
+    }
+    return this.checkoutUrlForTier(target);
+  }
+
+  /**
+   * Shared checkout-URL request for a given billing `tier`, bound to THIS identity. Proof-of-possession:
+   * `/api/stripe/checkout` requires a fresh server nonce signed by THIS identity's ML-DSA secret key (the
+   * same gate `/api/onboard` uses), proving we hold the private key for the `mldsaPubKey` we send —
+   * without it the route 401s. Underpins both {@link requestCheckoutUrl} and {@link requestUpgradeUrl}.
+   */
+  private async checkoutUrlForTier(tier: string): Promise<string> {
     const ch = await this.onboardFetch<{ nonce?: unknown }>(
       this.onboardBase + '/api/onboard/challenge',
       { method: 'GET' },
@@ -657,7 +807,7 @@ export class SaihmProClient {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          tier: this.tier,
+          tier,
           mldsaPubKey: toHex(this.identity.mldsaPubKey),
           nonce,
           signature,
@@ -673,6 +823,216 @@ export class SaihmProClient {
       );
     }
     return out.url;
+  }
+
+  /** GET a fresh single-use onboard challenge nonce (validated hex). Shared by the FREE poll loop. */
+  private async fetchChallengeNonce(base: string): Promise<string> {
+    const ch = await this.onboardFetch<{ nonce?: unknown }>(
+      base + '/api/onboard/challenge',
+      { method: 'GET' },
+    );
+    const nonce = ch.nonce;
+    if (typeof nonce !== 'string' || nonce.length === 0) {
+      throw new SaihmEndpointError(
+        502,
+        'onboard_no_nonce',
+        'onboard challenge returned no nonce',
+      );
+    }
+    try {
+      fromHex(nonce); // fail HERE on a non-hex nonce, not inside signChallenge
+    } catch {
+      throw new SaihmEndpointError(
+        502,
+        'onboard_bad_nonce',
+        'onboard challenge nonce is not hex',
+      );
+    }
+    return nonce;
+  }
+
+  /**
+   * ONE-TIME FREE-tier onboarding via an OAuth-provider DEVICE FLOW (RFC 8628), bridge-proxied.
+   *
+   * Proves a real, Sybil-resistant human identity and binds it to THIS sovereign ML-DSA key so the
+   * operator can write a durable FREE entitlement — WITHOUT this client ever holding the provider's
+   * OAuth token (the device flow runs server-side on the bridge; the token is server-ephemeral). One
+   * ML-DSA-signed challenge nonce is BOTH the proof-of-key-possession AND the identity-binding nonce:
+   * it ties the provider identity to `agentIdHash` in a single, single-use step.
+   *
+   * Flow: `POST /api/free-onboard/start {pubkey, provider}` -> `{flowId, userCode, verificationUri, …}`;
+   * surface the prompt to the human (open the URL, enter the code); then poll
+   * `POST /api/free-onboard/claim {flowId, pubkey, nonce, signature}` until the bridge reports
+   * `granted` (human authorized + Sybil gate admitted). After this resolves the entitlement is durable
+   * (`endEpoch=null`) and the ordinary self-onboard/refresh loop mints FREE JWTs indefinitely — no
+   * payment, no re-auth. Call ONCE per identity; a second call on an already-entitled key returns a
+   * typed idempotent success (`already_granted`).
+   *
+   * SECURITY: the only crypto that crosses the wire is this client's own ML-DSA nonce signature; the
+   * master secret / secret key never leave this process; the provider access token is never sent to or
+   * held by this client. Requires `SAIHM_TIER=FREE`.
+   */
+  async acquireFreeEntitlement(
+    opts: FreeEntitlementOpts,
+  ): Promise<FreeEntitlementResult> {
+    if (this.tier !== 'FREE') {
+      throw new SaihmEndpointError(
+        0,
+        'not_free_tier',
+        'acquireFreeEntitlement requires the FREE tier (set SAIHM_TIER=FREE)',
+      );
+    }
+    const provider = (opts.provider ?? 'github').trim() || 'github';
+    const base = this.onboardBase;
+    const pubkey = toHex(this.identity.mldsaPubKey);
+
+    // Step 1 — start the SERVER-SIDE device flow. The client receives only a display prompt + an opaque
+    // flow handle; it never receives the provider device_code or any provider token.
+    const start = await this.onboardFetch<{
+      flowId?: unknown;
+      userCode?: unknown;
+      verificationUri?: unknown;
+      expiresIn?: unknown;
+      interval?: unknown;
+    }>(base + '/api/free-onboard/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pubkey, provider }),
+    });
+    const flowId = start.flowId;
+    const userCode = start.userCode;
+    const verificationUri = start.verificationUri;
+    if (
+      typeof flowId !== 'string' ||
+      !flowId ||
+      typeof userCode !== 'string' ||
+      !userCode ||
+      typeof verificationUri !== 'string' ||
+      !verificationUri
+    ) {
+      throw new SaihmEndpointError(
+        502,
+        'free_onboard_bad_start',
+        'free-onboard start did not return a device prompt',
+      );
+    }
+    // RFC 8628 device codes are short-lived (~15 min); clamp the bridge-advertised window to a sane
+    // range [60s, 1800s] so a hostile/broken bridge cannot make this loop honor an absurd deadline.
+    const expiresIn = Math.min(
+      1_800,
+      Math.max(
+        60,
+        typeof start.expiresIn === 'number' && start.expiresIn > 0
+          ? Math.floor(start.expiresIn)
+          : 900,
+      ),
+    );
+    const pollMs =
+      typeof opts.pollIntervalMs === 'number' && opts.pollIntervalMs > 0
+        ? opts.pollIntervalMs
+        : Math.min(
+            // Cap the bridge-advertised cadence well under the server challenge-nonce TTL (~30 min) so a
+            // freshly-minted nonce cannot expire mid-sleep — this keeps the pollMs << NONCE_TTL invariant
+            // the consecutive-401 terminal-surface logic relies on. Symmetric to the `expiresIn` clamp.
+            60_000,
+            Math.max(
+              1_000,
+              (typeof start.interval === 'number' && start.interval > 0
+                ? start.interval
+                : FREE_ONBOARD_POLL_MS / 1_000) * 1_000,
+            ),
+          );
+
+    // Surface the one-tap prompt to the human (open verificationUri, enter userCode).
+    opts.onPrompt({ userCode, verificationUri, expiresIn });
+
+    // Step 2 — sign a fresh challenge nonce; it is BOTH proof-of-possession AND the single-use
+    // identity-binding nonce (F6). The signature (not the master secret) is all that crosses the wire.
+    let nonce = await this.fetchChallengeNonce(base);
+    let signature = toHex(
+      signChallenge(this.identity.mldsaSecretKey, fromHex(nonce)),
+    );
+
+    // Step 3 — CLAIM-FIRST poll loop. The re-mint decision is robust to BOTH shapes a Phase-7 handler
+    // might use for a stale/consumed nonce, so the client is not load-bearing on a single contract:
+    //   - a 2xx body `status:'nonce_stale'` (the clean contract: pending polls VERIFY-not-consume, and
+    //     the single-use F6 consume happens only AT grant), OR
+    //   - a 401 (the naive contract, if the handler reuses `consumeChallenge` per-poll): a nonce this
+    //     client JUST signed can only 401 for a server-side nonce-lifecycle reason (expired/consumed/
+    //     replayed), NEVER a genuine bad signature — so a claim-path 401 means "re-mint + retry".
+    // Response `status` map: granted|already_granted -> done; pending -> wait; nonce_stale -> re-mint;
+    // any other status -> terminal typed denial (e.g. sybil_denied). Terminal denials arrive as a 2xx
+    // status or a NON-401 error, so they are never swallowed by the 401 re-mint path. Polling BEFORE
+    // sleeping guarantees >=1 claim; we only sleep when the next poll still fits inside the deadline.
+    const budgetMs =
+      typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0
+        ? opts.timeoutMs
+        : expiresIn * 1_000;
+    const deadline = Date.now() + budgetMs;
+    // A single 401 on a freshly-signed nonce is optimistically treated as a nonce-lifecycle event and
+    // re-minted; but a claim carrying a JUST-re-minted (fresh) nonce that ALSO 401s is a TERMINAL auth
+    // denial (bad signature, bad_tier, sybil-expressed-as-401), NOT a nonce issue — so surface it rather
+    // than burn the whole poll budget. The counter (cleared by any 2xx) bounds the optimism to one re-mint.
+    let consecutive401 = 0;
+    for (;;) {
+      let refresh = false;
+      let terminal: SaihmEndpointError | undefined;
+      try {
+        const claim = await this.onboardFetch<{
+          status?: unknown;
+          agentIdHash?: unknown;
+          error?: unknown;
+        }>(base + '/api/free-onboard/claim', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ flowId, pubkey, nonce, signature }),
+        });
+        consecutive401 = 0; // any 2xx response clears the 401 streak
+        const status = claim.status;
+        if (status === 'granted' || status === 'already_granted') {
+          // Trust only THIS identity's own agentIdHash, never the server-returned value.
+          return { agentIdHash: this.agentIdHashHex };
+        }
+        if (status === 'nonce_stale') {
+          refresh = true;
+        } else if (status !== 'pending') {
+          terminal = new SaihmEndpointError(
+            403,
+            typeof claim.error === 'string'
+              ? claim.error
+              : 'free_onboard_denied',
+            `free-onboard was not granted (${typeof status === 'string' ? status : 'unknown'})`,
+          );
+        }
+      } catch (e) {
+        // A 401 on a freshly-signed nonce is assumed to be a server-side nonce-lifecycle event and
+        // re-minted ONCE. If the very next claim (fresh nonce) 401s again, the 401 is terminal (bad-sig /
+        // bad_tier / sybil-as-401) — surface it. Anything non-401 (404, other 4xx/5xx, transport) is
+        // terminal and surfaced unchanged.
+        if (e instanceof SaihmEndpointError && e.status === 401) {
+          consecutive401 += 1;
+          if (consecutive401 >= 2) throw e;
+          refresh = true;
+        } else {
+          throw e;
+        }
+      }
+      if (terminal) throw terminal;
+      if (refresh) {
+        nonce = await this.fetchChallengeNonce(base);
+        signature = toHex(
+          signChallenge(this.identity.mldsaSecretKey, fromHex(nonce)),
+        );
+      }
+      if (Date.now() + pollMs > deadline) {
+        throw new SaihmEndpointError(
+          408,
+          'free_onboard_timeout',
+          'free-onboard timed out waiting for authorization',
+        );
+      }
+      await sleep(pollMs);
+    }
   }
 
   /** Onboard-path HTTP with the same timeout + body-cap + typed-error discipline as `doCall`. */
@@ -727,8 +1087,9 @@ export class SaihmProClient {
 
   private async call<T>(method: string, params: unknown): Promise<T> {
     const header = await this.currentAuthHeader();
+    let result: T;
     try {
-      return await this.doCall<T>(method, params, header);
+      result = await this.doCall<T>(method, params, header);
     } catch (e) {
       // Self-onboard mode: a 401 means the cached JWT expired or was revoked mid-flight. Drop it,
       // re-onboard once, and retry. Static-auth mode surfaces the 401 to the caller unchanged.
@@ -739,9 +1100,119 @@ export class SaihmProClient {
       ) {
         this.cachedJwt = undefined;
         const fresh = await this.currentAuthHeader();
-        return await this.doCall<T>(method, params, fresh);
+        try {
+          result = await this.doCall<T>(method, params, fresh);
+        } catch (e2) {
+          this.maybeNagFromError(method, e2); // advisory; never swallows e2
+          throw e2;
+        }
+        this.maybeNagFromResult(method, result); // advisory; never throws
+        return result;
       }
+      this.maybeNagFromError(method, e); // advisory; never swallows e
       throw e;
+    }
+    this.maybeNagFromResult(method, result); // advisory; never throws
+    return result;
+  }
+
+  /** Map an MCP tool method to the monetization call type its quota is tracked under (nag labelling). */
+  private nagCallType(method: string): string {
+    switch (method) {
+      case 'saihm_remember':
+        return 'remember';
+      case 'saihm_recall':
+        return 'recall';
+      case 'saihm_forget':
+        return 'forget';
+      case 'saihm_share':
+      case 'saihm_revoke_share':
+        return 'sharing';
+      default:
+        return 'usage';
+    }
+  }
+
+  /**
+   * Fire the FREE-tier upgrade nag for the highest crossed threshold not yet fired for `callType`, and
+   * mark that threshold AND every lower one fired (so a single big jump nags once, not 3×). FREE only;
+   * a no-op unless an `onQuotaNag` callback is set. A throwing callback is swallowed — a nag NEVER
+   * affects the underlying call's success. On the hard-cap-error path `used`/`limit` are `null` (no
+   * counter was carried) but `fraction` is `1` — the 429 is itself definitive proof of 100% usage.
+   */
+  private fireNag(
+    callType: string,
+    threshold: QuotaNagThreshold,
+    used: bigint | null,
+    limit: bigint | null,
+    fraction: number | null,
+  ): void {
+    if (!this.onQuotaNag || this.tier !== 'FREE') return;
+    const key = `${callType}:${threshold}`;
+    if (this.firedNagKeys.has(key)) return;
+    // Suppress this and every lower threshold so a jump straight to 96% nags once (at 95), not at 80+95.
+    for (const t of QUOTA_NAG_THRESHOLDS) {
+      if (t <= threshold) this.firedNagKeys.add(`${callType}:${t}`);
+    }
+    try {
+      this.onQuotaNag({
+        callType,
+        threshold,
+        atHardCap: threshold === 100,
+        used,
+        limit,
+        fraction,
+        upgradeHint: UPGRADE_HINT,
+      });
+    } catch {
+      /* an advisory nag must never break the caller's operation */
+    }
+  }
+
+  /**
+   * FREE tier only: if a 2xx tool response carried optional quota telemetry
+   * (`quota: { callType?, used, limit }`, decimal-string counters; `limit` "0" = unlimited), nag at the
+   * highest crossed 80/95/100 threshold. Additive + optional: paid responses and telemetry-free bridges
+   * carry no `quota` field, so this is a silent no-op there. Note `recall`'s all-memories response is a
+   * bare JSON array with nowhere to carry `quota`, so recall surfaces upgrade pressure only via the 429
+   * hard-cap path in {@link maybeNagFromError}, not at 80/95%.
+   */
+  private maybeNagFromResult<T>(method: string, result: T): void {
+    if (!this.onQuotaNag || this.tier !== 'FREE') return;
+    if (typeof result !== 'object' || result === null) return;
+    const q = (result as { quota?: unknown }).quota;
+    if (typeof q !== 'object' || q === null) return;
+    const used = parseDecimalBig((q as { used?: unknown }).used);
+    const limit = parseDecimalBig((q as { limit?: unknown }).limit);
+    if (used === null || limit === null || limit <= 0n) return; // unusable / unlimited (0) => no nag
+    const rawCt = (q as { callType?: unknown }).callType;
+    const callType =
+      typeof rawCt === 'string' && rawCt ? rawCt : this.nagCallType(method);
+    const fraction = Number(used) / Number(limit);
+    const pct = fraction * 100;
+    // Highest crossed threshold first; fireNag no-ops if it (or a higher one) already fired.
+    for (const t of [100, 95, 80] as const) {
+      if (pct >= t) {
+        this.fireNag(callType, t, used, limit, Math.min(1, fraction));
+        return;
+      }
+    }
+  }
+
+  /**
+   * FREE tier only: a `429 quota_hard_cap` is the live bridge telling us the lifetime cap is reached, so
+   * nag at 100% (`atHardCap`) BEFORE the error propagates. This rides an EXISTING server behaviour — it
+   * needs no new telemetry contract — so it is the one nag that works the moment the FREE tier is live.
+   * The error is re-thrown by the caller unchanged; this method only observes.
+   */
+  private maybeNagFromError(method: string, e: unknown): void {
+    if (!this.onQuotaNag || this.tier !== 'FREE') return;
+    if (
+      e instanceof SaihmEndpointError &&
+      e.status === 429 &&
+      e.code === 'quota_hard_cap'
+    ) {
+      this.fireNag(this.nagCallType(method), 100, null, null, 1);
     }
   }
 

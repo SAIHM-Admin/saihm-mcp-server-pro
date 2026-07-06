@@ -69,6 +69,42 @@ there is no token to paste or re-paste. Eight tools are exposed
 `saihm_share`, `saihm_revoke_share`, `saihm_governance_propose`,
 `saihm_governance_vote`).
 
+### Start free
+
+Activate a **free tier** — a one-time, lifetime memory allowance, no card. Set
+`SAIHM_TIER=FREE` and prove you're a unique person once via a GitHub device
+sign-in; your memory is then bound to your own key for life.
+
+```sh
+SAIHM_ENDPOINT_URL=https://saihm.coti.global/mcp \
+SAIHM_MASTER_SECRET_HEX=<your 64+ hex master secret> \
+SAIHM_TIER=FREE \
+  npx -y @saihm/mcp-server-pro free-join
+```
+
+Open the printed link, enter the short code, approve. SAIHM never sees or stores
+the GitHub token — the sign-in stays in your browser and the token is
+server-ephemeral. When it returns, start the server normally (drop `free-join`)
+and it self-onboards free.
+
+The free allowance is a fixed, one-time lifetime grant of writes, reads, and
+shares — it never resets or refills, and it is not a trial. The client shows
+your remaining balance and warns you as you approach it, so nothing fails by
+surprise.
+
+**Upgrade any time — same key, same memories:**
+
+```sh
+SAIHM_ENDPOINT_URL=https://saihm.coti.global/mcp \
+SAIHM_MASTER_SECRET_HEX=<your 64+ hex master secret> \
+SAIHM_TIER=FREE \
+  npx -y @saihm/mcp-server-pro upgrade PRO
+```
+
+This prints a monthly checkout link bound to your identity; billing attaches to
+the same key, so every memory you already have persists. Pay, switch your config
+to the paid tier, and start the server normally.
+
 ### Self-serve join
 
 To subscribe an identity from the command line instead of the website, run the
@@ -144,10 +180,10 @@ The derived `saihm.agentIdHash` is the `sub` the endpoint binds your tenant to �
 | -------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SAIHM_ENDPOINT_URL`       | yes               | `https://…/mcp` (or `http://` only for `127.0.0.1`/`localhost`).                                                                                                                                                  |
 | `SAIHM_AUTH_HEADER`        | no                | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended): the client mints + auto-refreshes its own short-lived JWT from the master secret, so you paste one config once and never re-paste a token. |
-| `SAIHM_PAYMENT_METHOD`     | self-onboard only | Your entitlement rail (e.g. `stripe`). Required when `SAIHM_AUTH_HEADER` is unset; ignored otherwise.                                                                                                             |
+| `SAIHM_PAYMENT_METHOD`     | paid self-onboard | Your entitlement rail (e.g. `stripe`) for a paid tier. **Not used by the FREE tier** — activate free with `free-join` (no card). Ignored when `SAIHM_AUTH_HEADER` is set.                                          |
 | `SAIHM_MASTER_SECRET_HEX`  | yes\*             | ≥ 64 hex chars (≥ 32 bytes), high-entropy, client-held; never sent. \*Provide this **or** `SAIHM_MASTER_SECRET_FILE`.                                                                                             |
 | `SAIHM_MASTER_SECRET_FILE` | yes\*             | Path to a **mode-600** file holding the hex master secret. Preferred for operators: keeps the root seed out of a synced/shared MCP config. Takes precedence over `SAIHM_MASTER_SECRET_HEX` when both are set.     |
-| `SAIHM_TIER`               | self-onboard only | Tier label baked into sealed metadata. Required when self-onboarding; otherwise optional — resolved via `status()` if unset.                                                                                      |
+| `SAIHM_TIER`               | self-onboard only | Tier label baked into sealed metadata (`FREE`, `PRO`, …). Required when self-onboarding; otherwise optional — resolved via `status()` if unset.                                                                    |
 | `SAIHM_SEQ_STATE_PATH`     | no                | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates.                                                                                                                                 |
 
 > **Self-onboarding (paste once):** with `SAIHM_AUTH_HEADER` unset, the client proves
