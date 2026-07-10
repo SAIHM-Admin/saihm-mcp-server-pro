@@ -439,7 +439,7 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
   let created = false;
   if (!existsSync(keyPath)) {
     const secretHex = randomBytes(32).toString('hex');
-    mkdirSync(dirname(keyPath), { recursive: true });
+    mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
     const tmp = `${keyPath}.tmp.${process.pid}.${Date.now()}`;
     writeFileSync(tmp, secretHex, { mode: 0o600 });
     renameSync(tmp, keyPath); // atomic; inherits the tmp file's 0600 mode

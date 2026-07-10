@@ -18,7 +18,7 @@
     "clean": "rm -rf dist coverage",
     "build": "npm run clean && tsc -p . && chmod +x dist/server.js",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test": "tsx --test tests/smoke.test.ts tests/server.test.ts",
+    "test": "tsx --test tests/smoke.test.ts tests/server.test.ts tests/self_join.test.ts tests/server_recall_shared.test.ts tests/server_self_join.test.ts",
     "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "files": [
@@ -58,6 +58,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@noble/post-quantum": "^0.6.1",
     "@types/node": "^25.9.0",
     "tsx": "^4.22.2",
     "typescript": "^6.0.3"
