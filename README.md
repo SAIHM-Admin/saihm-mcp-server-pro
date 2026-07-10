@@ -24,7 +24,7 @@ Production thin-client for **SAIHM non-custodial memory**.
 | Tool | Title | Behavior |
 |---|---|---|
 | `saihm_remember` | Remember | seals + writes a memory cell (client-side) |
-| `saihm_recall` | Recall | read-only; opens cells client-side |
+| `saihm_recall` | Recall | read-only; opens your cells — or a cell shared to you — client-side |
 | `saihm_forget` | Forget (GDPR erasure) | **destructive** — irreversible erasure |
 | `saihm_status` | Status | read-only |
 | `saihm_share` | Share | end-to-end-authenticated grant |
@@ -68,6 +68,43 @@ there is no token to paste or re-paste. Eight tools are exposed
 (`saihm_remember`, `saihm_recall`, `saihm_forget`, `saihm_status`,
 `saihm_share`, `saihm_revoke_share`, `saihm_governance_propose`,
 `saihm_governance_vote`).
+
+### Zero-config free start — prompt your agent to "Join SAIHM"
+
+The easiest start needs **no master secret and no card**. Point your MCP host at
+the server with self-join enabled:
+
+```jsonc
+{
+  "mcpServers": {
+    "saihm": {
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": {
+        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp",
+        "SAIHM_SELF_JOIN": "1",
+      },
+    },
+  },
+}
+```
+
+Then, in your agent session, just say:
+
+> Join SAIHM.
+
+The agent calls the `saihm_join` tool, which **generates your identity on this
+device** (a 32-byte master secret written mode-600 to `~/.saihm/free-identity.key`)
+and hands back a one-time device sign-in — open the link, enter the short code,
+approve. That step confirms you're a unique person; SAIHM never sees or stores the
+token. When it returns, your **free**, non-custodial memory is live and the other
+tools work. The key persists on this device, so your next session resumes with
+your memory intact.
+
+`saihm_join` appears only when `SAIHM_SELF_JOIN=1`; it is a one-time onboarding
+affordance, not a ninth protocol tool. Because your master secret is generated
+locally and never leaves the process, **back up `~/.saihm/free-identity.key` — if
+you lose it, no one (including SAIHM) can open your cells.**
 
 ### Start free
 
@@ -184,7 +221,9 @@ The derived `saihm.agentIdHash` is the `sub` the endpoint binds your tenant to �
 | `SAIHM_MASTER_SECRET_HEX`  | yes\*             | ≥ 64 hex chars (≥ 32 bytes), high-entropy, client-held; never sent. \*Provide this **or** `SAIHM_MASTER_SECRET_FILE`.                                                                                             |
 | `SAIHM_MASTER_SECRET_FILE` | yes\*             | Path to a **mode-600** file holding the hex master secret. Preferred for operators: keeps the root seed out of a synced/shared MCP config. Takes precedence over `SAIHM_MASTER_SECRET_HEX` when both are set.     |
 | `SAIHM_TIER`               | self-onboard only | Tier label baked into sealed metadata (`FREE`, `PRO`, …). Required when self-onboarding; otherwise optional — resolved via `status()` if unset.                                                                    |
-| `SAIHM_SEQ_STATE_PATH`     | no                | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates.                                                                                                                                 |
+| `SAIHM_SEQ_STATE_PATH`     | no                | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates. |
+| `SAIHM_SELF_JOIN` | free self-join | Set to `1` to enable the `saihm_join` onboarding tool ("prompt your agent to Join SAIHM"). The server self-generates + persists a non-custodial identity and activates the free tier — no master secret needed. Off by default. |
+| `SAIHM_HOME` | no | Base dir for the self-join identity file (`$SAIHM_HOME/free-identity.key`, mode 600). Defaults to `~/.saihm`.                                                                                                                                 |
 
 > **Self-onboarding (paste once):** with `SAIHM_AUTH_HEADER` unset, the client proves
 > control of your identity via the endpoint's ML-DSA challenge/response and mints its own

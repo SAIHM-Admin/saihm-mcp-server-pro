@@ -7,6 +7,9 @@ coverage/
 .env.*
 .DS_Store
 
+# Local pre-edit source backups — never ship / never push (source-history hygiene).
+.backups/
+
 # Operator-internal integration suite (imports the non-shipping operator
 # endpoint package); validated locally, not part of the public client repo.
 tests/client_pro.test.ts

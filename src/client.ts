@@ -46,13 +46,15 @@
 
 import { randomBytes } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join as pathJoin } from 'node:path';
+import { homedir } from 'node:os';
 
 import {
   deriveIdentity,
@@ -403,6 +405,52 @@ export interface FreeEntitlementResult {
 }
 
 /**
+ * Dark self-join flag. When `SAIHM_SELF_JOIN=1`, the pro server exposes the `saihm_join`
+ * bootstrap tool and this client will (a) self-generate + persist an identity on the first
+ * join and (b) re-load that persisted identity on a plain restart with no env secret. Unset
+ * (the default) => every self-join path below is inert and boot behaviour is byte-identical.
+ */
+export function selfJoinEnabled(): boolean {
+  return process.env.SAIHM_SELF_JOIN === '1';
+}
+
+/** Default on-disk location of a self-generated FREE identity (written mode 600). */
+export function defaultIdentityPath(): string {
+  const home = process.env.SAIHM_HOME || pathJoin(homedir(), '.saihm');
+  return pathJoin(home, 'free-identity.key');
+}
+
+/**
+ * Ensure an identity secret is available to {@link SaihmProClient.bootFromEnv} for a self-join,
+ * WITHOUT ever returning or printing the secret. If an env secret (HEX or FILE) is already
+ * configured it is left untouched. Otherwise the default key file is used — read if present, else
+ * freshly generated (32 bytes CSPRNG) and written atomically at mode 600. `SAIHM_MASTER_SECRET_FILE`
+ * and (only if unset) `SAIHM_TIER=FREE` are set so the very next bootFromEnv self-onboards this
+ * identity FREE. The master secret is the ONLY key to the memory and is never logged — only its path.
+ */
+export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string } {
+  if (process.env.SAIHM_MASTER_SECRET_FILE) {
+    return { created: false, keyPath: process.env.SAIHM_MASTER_SECRET_FILE };
+  }
+  if (process.env.SAIHM_MASTER_SECRET_HEX) {
+    return { created: false, keyPath: '(SAIHM_MASTER_SECRET_HEX)' };
+  }
+  const keyPath = defaultIdentityPath();
+  let created = false;
+  if (!existsSync(keyPath)) {
+    const secretHex = randomBytes(32).toString('hex');
+    mkdirSync(dirname(keyPath), { recursive: true });
+    const tmp = `${keyPath}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmp, secretHex, { mode: 0o600 });
+    renameSync(tmp, keyPath); // atomic; inherits the tmp file's 0600 mode
+    created = true;
+  }
+  process.env.SAIHM_MASTER_SECRET_FILE = keyPath;
+  if (!process.env.SAIHM_TIER) process.env.SAIHM_TIER = 'FREE';
+  return { created, keyPath };
+}
+
+/**
  * An advisory FREE-tier usage nag surfaced via {@link SaihmProClientOpts.onQuotaNag} as lifetime usage
  * approaches (80/95%) or reaches (100%) the FREE quota for a call type. It NEVER blocks a call and is
  * fired at most once per (callType, threshold) for the life of the client. FREE tier only.
@@ -596,10 +644,30 @@ export class SaihmProClient {
     } else {
       secretHex = process.env.SAIHM_MASTER_SECRET_HEX;
     }
-    if (!secretHex)
+    // Dark self-join fallback (SAIHM_SELF_JOIN=1 only): a prior `saihm_join` persists the
+    // self-generated identity to the default key file, so a plain restart with no env secret
+    // re-loads it. Off by default => this block is inert and boot behaviour is unchanged.
+    if (!secretHex && selfJoinEnabled()) {
+      const p = defaultIdentityPath();
+      if (existsSync(p)) {
+        try {
+          secretHex = readFileSync(p, 'utf-8');
+        } catch {
+          throw new Error(`self-join identity file could not be read: ${p}`);
+        }
+      }
+    }
+    if (!secretHex) {
+      // Self-join enabled but no identity yet => guide the agent to the join tool rather than
+      // surfacing a raw env-var error (a memory tool was called before `saihm_join`).
+      if (selfJoinEnabled())
+        throw new Error(
+          'No SAIHM memory yet on this device. Ask me to "Join SAIHM" first (the saihm_join tool) to create your free memory, then try again.',
+        );
       throw new Error(
         'SAIHM_MASTER_SECRET_HEX (or SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars)',
       );
+    }
     let master: Uint8Array;
     try {
       master = fromHex(secretHex.trim());
@@ -612,7 +680,8 @@ export class SaihmProClient {
       master.fill(0);
       throw new Error('SAIHM_MASTER_SECRET_HEX must decode to >= 32 bytes');
     }
-    const optTier = process.env.SAIHM_TIER;
+    const optTier =
+      process.env.SAIHM_TIER ?? (selfJoinEnabled() ? 'FREE' : undefined);
     const optSeqPath = process.env.SAIHM_SEQ_STATE_PATH;
     const optPaymentMethod = process.env.SAIHM_PAYMENT_METHOD;
     const optDiscoverySource = process.env.SAIHM_DISCOVERY_SOURCE;

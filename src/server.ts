@@ -30,7 +30,14 @@ import { dirname, join as pathJoin } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { SaihmProClient, SaihmEndpointError } from './client.js';
+import {
+  SaihmProClient,
+  SaihmEndpointError,
+  selfJoinEnabled,
+  ensureSelfJoinIdentityEnv,
+  type FreeDevicePrompt,
+  type FreeEntitlementResult,
+} from './client.js';
 
 const PACKAGE_VERSION: string = (
   JSON.parse(
@@ -120,8 +127,31 @@ server.registerTool(
   {
     title: 'Recall',
     description:
-      'Retrieve and decrypt your memories (opened client-side). Optional keyword filter. Use this at the start of a session or whenever past context is needed.',
-    inputSchema: { query: z.string().optional().describe('Filter by keyword (empty = all)') },
+      'Retrieve and decrypt your memories (opened client-side). Optional keyword filter. Use this at the start of a session or whenever past context is needed. Can ALSO read one specific cell another agent shared TO you — pass sharerPinnedAgentIdHashHex + sharerRecord + cellId (read-only; the sharer must have shared it with you).',
+    inputSchema: {
+      query: z
+        .string()
+        .optional()
+        .describe('Filter your OWN memories by keyword (empty = all). Ignored when reading a shared cell.'),
+      sharerPinnedAgentIdHashHex: z
+        .string()
+        .optional()
+        .describe(
+          "Read a cell shared TO you: the SHARER's agentIdHash (hex), pinned out-of-band. When set, sharerRecord and cellId are also required.",
+        ),
+      sharerRecord: z
+        .object({
+          mldsaPubKey: z.string(),
+          mlkemPubKey: z.string(),
+          mlkemPubKeySelfSig: z.string(),
+        })
+        .optional()
+        .describe("The SHARER's published identity record (hex fields). Required with sharerPinnedAgentIdHashHex."),
+      cellId: z
+        .string()
+        .optional()
+        .describe('The shared cell id to read. Required when reading a shared cell.'),
+    },
     outputSchema: {
       count: z.number(),
       memories: z.array(
@@ -136,8 +166,45 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ query }) => {
+  async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId }) => {
     try {
+      // Shared-read branch: read a single cell another agent shared TO this agent. Presence of the
+      // sharer pin selects this branch; the sharer record + cellId are then mandatory. The endpoint
+      // (blind) only returns a cell for which a live grant to THIS recipient exists; the client
+      // authenticates the grant + opens it locally. Read-only — no write scope on the tool surface.
+      if (sharerPinnedAgentIdHashHex) {
+        if (!sharerRecord || !cellId) {
+          throw new Error(
+            'To read a shared cell, provide sharerPinnedAgentIdHashHex, sharerRecord, and cellId together.',
+          );
+        }
+        const cell = await getClient().recallShared({
+          sharerPinnedAgentIdHashHex,
+          sharerRecord,
+          cellId,
+        });
+        if (!cell) {
+          return ok('No shared cell found (no live grant to you, or content unavailable).', {
+            count: 0,
+            memories: [],
+          });
+        }
+        const mem = { cellId: cell.cellId, seq: String(cell.seq), plaintext: cell.plaintext };
+        return ok(`SHARED-RECALL [${cell.cellId}] seq=${cell.seq} | ${cell.plaintext}`, {
+          count: 1,
+          memories: [mem],
+        });
+      }
+
+      // Partial shared-read args (record/cellId but no sharer pin) => fail loud rather than silently
+      // returning the caller's OWN memories, which would surprise an agent that intended a shared read.
+      if (sharerRecord || cellId) {
+        throw new Error(
+          'To read a shared cell, provide sharerPinnedAgentIdHashHex, sharerRecord, and cellId together.',
+        );
+      }
+
+      // Own-memories branch (unchanged).
       const cells = await getClient().recall(query);
       const memories = cells.map((c) => ({
         cellId: c.cellId,
@@ -406,6 +473,141 @@ server.registerPrompt(
     ],
   }),
 );
+
+// ============================================================================
+// saihm_join — self-join bootstrap tool (DARK: registered only when SAIHM_SELF_JOIN=1).
+// Lets an agent activate FREE memory straight from a chat prompt with no prior website
+// visit and no pre-provisioned key: it self-generates the sovereign key on this device,
+// runs the Sybil-safe device flow (one human approval), and brings the memory tools
+// online. The master secret is created locally and NEVER printed. This is a bootstrap
+// affordance — like the saihm_session_bootstrap prompt — NOT a 9th protocol tool; the
+// canonical 8 protocol tools remain the surface (STATE:#60, amended 2026-07-10).
+// ============================================================================
+interface JoinState {
+  running: boolean;
+  prompt?: FreeDevicePrompt;
+  result?: FreeEntitlementResult;
+  error?: unknown;
+  keyPath: string;
+  createdKey: boolean;
+}
+let joinState: JoinState | null = null;
+
+/** Wait (bounded) until the background flow produces a prompt, a result, or an error. */
+async function waitForJoinSignal(ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (!joinState || joinState.prompt || joinState.result || joinState.error) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+function joinPendingText(s: JoinState): string {
+  const p = s.prompt as FreeDevicePrompt;
+  const mins = Math.max(1, Math.round(p.expiresIn / 60));
+  const keyNote = s.createdKey
+    ? `A new memory key was created and saved to ${s.keyPath} — keep this file safe; it is the only key to your memory and cannot be recovered.`
+    : `Using your existing memory key (${s.keyPath}).`;
+  return [
+    'To activate your free SAIHM memory, in a browser:',
+    `  1. open   ${p.verificationUri}`,
+    `  2. enter  ${p.userCode}`,
+    `The code expires in about ${mins} min. Approve it, then ask me to "Join SAIHM" again and I will finish.`,
+    keyNote,
+  ].join('\n');
+}
+
+function joinSuccessText(s: JoinState): string {
+  return [
+    "You're in — your free SAIHM memory is active.",
+    `  identity: ${(s.result as FreeEntitlementResult).agentIdHash}`,
+    `  key file: ${s.keyPath} (the only key to your memory; keep it safe — it cannot be recovered)`,
+    'Your SAIHM memory tools are ready to use now.',
+  ].join('\n');
+}
+
+if (selfJoinEnabled()) {
+  server.registerTool(
+    'saihm_join',
+    {
+      title: 'Join SAIHM (activate free memory)',
+      description:
+        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, call saihm_join again to finish; the memory tools then work. No payment and no website visit.',
+      inputSchema: {},
+      annotations: {
+        title: 'Join SAIHM (activate free memory)',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      try {
+        // Resume an in-flight or finished flow (the human approves between two calls).
+        if (joinState) {
+          if (joinState.result) return ok(joinSuccessText(joinState));
+          if (joinState.error) {
+            const e = joinState.error;
+            joinState = null; // allow a clean retry
+            return fail(e);
+          }
+          if (joinState.prompt) return ok(joinPendingText(joinState));
+          await waitForJoinSignal(15_000); // running but no prompt yet
+          if (joinState?.result) return ok(joinSuccessText(joinState));
+          if (joinState?.error) {
+            const e = joinState.error;
+            joinState = null;
+            return fail(e);
+          }
+          if (joinState?.prompt) return ok(joinPendingText(joinState));
+          return ok('Still getting your activation ready — ask me to "Join SAIHM" again in a few seconds.');
+        }
+
+        // Fresh flow: ensure an identity, boot a FREE client, run the device flow in the background.
+        const { created, keyPath } = ensureSelfJoinIdentityEnv();
+        const jc = SaihmProClient.bootFromEnv(); // tier FREE (defaulted by ensureSelfJoinIdentityEnv)
+        // Capture THIS flow's state object; every background callback guards on `joinState === s` so a
+        // late callback from a superseded flow can never mutate a newer one (defence in depth — by
+        // construction only one background runs at a time, but this survives future refactors).
+        const s: JoinState = { running: true, keyPath, createdKey: created };
+        joinState = s;
+        void jc
+          .acquireFreeEntitlement({
+            onPrompt: (p) => {
+              if (joinState === s) s.prompt = p;
+            },
+          })
+          .then((res) => {
+            if (joinState === s) {
+              s.result = res;
+              s.running = false;
+              client = jc; // memory tools use the joined client for the rest of this session
+            }
+          })
+          .catch((err) => {
+            if (joinState === s) {
+              s.error = err;
+              s.running = false;
+            }
+          });
+
+        await waitForJoinSignal(15_000);
+        if (joinState?.error) {
+          const e = joinState.error;
+          joinState = null;
+          return fail(e);
+        }
+        if (joinState?.result) return ok(joinSuccessText(joinState)); // instant already_granted
+        if (joinState?.prompt) return ok(joinPendingText(joinState));
+        return ok('Starting your free activation — ask me to "Join SAIHM" again in a few seconds to get your approval code.');
+      } catch (e) {
+        joinState = null;
+        return fail(e);
+      }
+    },
+  );
+}
 
 /**
  * Self-serve operator join: derive this identity from the env master secret, ask the operator endpoint

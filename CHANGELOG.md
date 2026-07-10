@@ -2,6 +2,13 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.10] — 2026-07-10
+
+### Added
+
+- **`saihm_join` — self-serve activation from inside the agent.** Prompt your agent to _"Join SAIHM"_ and it activates a free, non-custodial memory allowance with no manual key handling: the agent generates its own identity seed on-device, persists it mode-600 under `~/.saihm/` (or `SAIHM_HOME`), and completes a one-time device sign-in that confirms a unique person. Off by default; opt in with `SAIHM_SELF_JOIN=1`. The master secret is generated locally and never leaves the process. This is an onboarding bootstrap affordance, not a protocol tool — the eight SAIHM tools remain the surface.
+- **`saihm_recall` reads memories shared _to_ you.** The recall tool now accepts an optional sharer identity (`sharerPinnedAgentIdHashHex` plus the sharer's published identity record) and a `cellId`, routing to the recipient-side `recallShared` read (present in the library since 0.1.3) so tool-only agents — not just library callers — can open a cell another agent shared with them. It pins the sharer out-of-band, verifies the sharer and content signatures, and fails closed when there is no live grant. Own-memory recall is unchanged, and the tool count stays eight.
+
 ## [0.1.9] — 2026-07-06
 
 ### Added
@@ -63,6 +70,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.1.10]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.10
 [0.1.9]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.9
 [0.1.8]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.8
 [0.1.7]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.7
