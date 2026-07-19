@@ -38,6 +38,9 @@
  *                           operator can attribute the paid conversion. Sanitised endpoint-side.
  *   SAIHM_SEQ_STATE_PATH    optional path; persists per-cell seq high-water marks (mode 600) so a
  *                           cell UPDATE survives a process restart without a stale-seq rejection.
+ *   SAIHM_RECALL_CACHE_PATH optional path (mode 600); when set, `recall` runs in DELTA mode —
+ *                           it fetches only cells not already cached, cutting a session-start
+ *                           recall from O(all cells) to O(new). Holds plaintext at rest ⇒ opt-in.
  *
  * Concurrency: writes to DISTINCT cells are safe to run concurrently. Concurrent updates to the
  * SAME cell are single-writer by contract — the server's monotonic-seq guard rejects the loser with
@@ -333,6 +336,15 @@ export interface SaihmProClientOpts {
   /** Path to persist per-cell seq high-water marks (mode 600). Enables cross-restart cell updates. */
   seqStatePath?: string;
   /**
+   * Path to persist this agent's opened cells (mode 600), keyed by cellId. When set, `recall`
+   * switches to DELTA mode: it sends the cached cellIds to the endpoint and fetches only cells it
+   * does not already hold, cutting a session-start recall from O(all cells) to O(new cells). Holds
+   * plaintext at rest, so it is opt-in (unset = full recall-all every call, the prior behavior).
+   * Requires an endpoint that supports delta recall; degrades gracefully to a
+   * full recall if the endpoint does not support it.
+   */
+  recallCachePath?: string;
+  /**
    * The proof-of-entitlement rail (`"stripe"`, `"stablecoin"`, …) used when SELF-ONBOARDING (i.e.
    * no static `authHeader`). Sent in the `/api/onboard` request alongside the ML-DSA-signed nonce.
    * Required for self-onboarding; ignored when a static `authHeader` is supplied.
@@ -535,6 +547,115 @@ class SeqState {
   }
 }
 
+// ── recall delta cache (dark; active only when a recallCachePath is configured) ──────────────────
+// Persists this agent's OPENED cells keyed by cellId so a session start can ask the endpoint for
+// only NEW cells (delta) instead of a full recall-all fan-out. Holds plaintext ⇒ written mode 600
+// (same posture as the seq store) and opt-in by config, never on by default. A corrupt/absent file
+// is treated as a cold start — the next recall repopulates it from a full or delta response.
+//
+// SELF-WRITE COHERENCE: a delta recall SKIPS cellIds the client already holds, so a client's own
+// in-place UPDATE (remember with an existing cellId) or fresh create would be invisible to its next
+// recall. remember() and forget() therefore update this cache directly (upsert / remove), keeping a
+// client coherent with its OWN writes. A different client/session sharing the same cache path would
+// not observe that update until it re-reads the cell — the same single-writer contract the seq store
+// already carries; document + serialize same-cell writes across clients if you need both to land.
+class RecallCache {
+  private cells = new Map<string, RecalledCell>();
+  constructor(private readonly path?: string) {
+    if (this.path) this.load();
+  }
+
+  get configured(): boolean {
+    return this.path !== undefined;
+  }
+
+  private load(): void {
+    let raw: string;
+    try {
+      raw = readFileSync(this.path!, 'utf-8');
+    } catch {
+      return; // no cache yet — cold start
+    }
+    let obj: unknown;
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return; // corrupt/empty — cold start (a full recall will rebuild it)
+    }
+    if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return;
+    for (const [cellId, v] of Object.entries(obj as Record<string, unknown>)) {
+      const c = v as Partial<RecalledCell>;
+      if (
+        c !== null &&
+        typeof c === 'object' &&
+        typeof c.plaintext === 'string' &&
+        typeof c.seq === 'string' &&
+        typeof c.commitmentHash === 'string'
+      ) {
+        this.cells.set(cellId, { cellId, plaintext: c.plaintext, seq: c.seq, commitmentHash: c.commitmentHash });
+      }
+    }
+  }
+
+  private persist(): void {
+    if (this.path === undefined) return;
+    const obj: Record<string, RecalledCell> = {};
+    for (const [id, c] of this.cells) obj[id] = c;
+    mkdirSync(dirname(this.path), { recursive: true });
+    const tmp = `${this.path}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
+    renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
+  }
+
+  knownCellIds(): string[] {
+    return [...this.cells.keys()];
+  }
+
+  all(): RecalledCell[] {
+    return [...this.cells.values()];
+  }
+
+  /** Merge a delta `added` set and prune to the endpoint's authoritative live cellId set. Persists
+   *  only when something actually changed, so a no-op delta recall (nothing added, nothing forgotten)
+   *  does not rewrite the whole cache file each session start. */
+  merge(added: RecalledCell[], liveCellIds: string[]): void {
+    const live = new Set(liveCellIds);
+    let changed = false;
+    for (const id of [...this.cells.keys()])
+      if (!live.has(id)) {
+        this.cells.delete(id); // prune forgotten
+        changed = true;
+      }
+    for (const c of added) {
+      this.cells.set(c.cellId, c);
+      changed = true;
+    }
+    if (changed) this.persist();
+  }
+
+  /** Replace the whole cache from a full recall result, then persist. */
+  replaceAll(cells: RecalledCell[]): void {
+    this.cells = new Map(cells.map((c) => [c.cellId, c]));
+    this.persist();
+  }
+
+  /** Insert/replace one cell the client itself just wrote (create or update), then persist. No-op
+   *  when the cache is disabled. Keeps a self-written update visible to the next delta recall, which
+   *  would otherwise skip a cellId the client already holds. */
+  upsert(cell: RecalledCell): void {
+    if (this.path === undefined) return;
+    this.cells.set(cell.cellId, cell);
+    this.persist();
+  }
+
+  /** Drop one cell the client just forgot, then persist. Prevents the cache from serving a cell the
+   *  endpoint has crypto-shredded (delta would not re-list it, so it must be removed here). */
+  remove(cellId: string): void {
+    if (this.path === undefined) return;
+    if (this.cells.delete(cellId)) this.persist();
+  }
+}
+
 export class SaihmProClient {
   private readonly endpoint: string;
   /** A static Authorization header (e.g. `"Bearer <JWT>"`), or `undefined` in self-onboard mode. */
@@ -548,6 +669,7 @@ export class SaihmProClient {
   private readonly identity: ClientIdentity;
   private readonly agentIdHashHex: string;
   private readonly seq: SeqState;
+  private readonly recallCache: RecallCache;
   private readonly requestTimeoutMs: number;
   private tier: string | undefined;
   // Self-onboard token cache (single-flight via authInFlight; never written to disk).
@@ -574,6 +696,7 @@ export class SaihmProClient {
     this.onQuotaNag = opts.onQuotaNag;
     this.discoverySource = opts.discoverySource;
     this.seq = new SeqState(this.agentIdHashHex, opts.seqStatePath);
+    this.recallCache = new RecallCache(opts.recallCachePath);
     this.requestTimeoutMs =
       typeof opts.requestTimeoutMs === 'number' && opts.requestTimeoutMs > 0
         ? opts.requestTimeoutMs
@@ -683,11 +806,13 @@ export class SaihmProClient {
     const optTier =
       process.env.SAIHM_TIER ?? (selfJoinEnabled() ? 'FREE' : undefined);
     const optSeqPath = process.env.SAIHM_SEQ_STATE_PATH;
+    const optRecallCachePath = process.env.SAIHM_RECALL_CACHE_PATH;
     const optPaymentMethod = process.env.SAIHM_PAYMENT_METHOD;
     const optDiscoverySource = process.env.SAIHM_DISCOVERY_SOURCE;
     const opts: SaihmProClientOpts = {};
     if (optTier) opts.tier = optTier;
     if (optSeqPath) opts.seqStatePath = optSeqPath;
+    if (optRecallCachePath) opts.recallCachePath = optRecallCachePath;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
@@ -1457,10 +1582,22 @@ export class SaihmProClient {
       seq,
       tier,
     });
-    const r = await this.call<RememberResult>('saihm_remember', {
-      wire: encodeEnvelope(env),
-    });
+    const wire = encodeEnvelope(env);
+    const r = await this.call<RememberResult>('saihm_remember', { wire });
     this.seq.observe(cellId, seq); // advance only after the endpoint accepted the write
+    // Delta-cache coherence: a delta recall SKIPS cellIds we already hold, so an in-place UPDATE (or a
+    // fresh create) would otherwise be invisible to this client's next recall. Cache the CANONICAL
+    // opened cell by re-opening OUR OWN just-sealed envelope — byte-identical to a future recall, with
+    // seq + commitmentHash taken from the authenticated envelope, never the endpoint's echo. The cache
+    // is a convenience: a successful write must never be reported as failed because of it, so a
+    // (practically impossible) open failure just drops the entry for the next recall to re-fetch.
+    if (this.recallCache.configured) {
+      try {
+        this.recallCache.upsert(this.openRow(cellId, wire));
+      } catch {
+        this.recallCache.remove(cellId);
+      }
+    }
     return r;
   }
 
@@ -1485,6 +1622,45 @@ export class SaihmProClient {
    * would hide data loss). `forget` such a cell to exclude it.
    */
   async recall(query?: string): Promise<RecalledCell[]> {
+    const needle = query?.toLowerCase();
+    const filter = (cells: RecalledCell[]): RecalledCell[] =>
+      needle === undefined ? cells : cells.filter((c) => c.plaintext.toLowerCase().includes(needle));
+
+    // DELTA PATH (dark; active only when a recall cache is configured). Send the endpoint the
+    // cellIds we already hold; it fans out reads over only the NEW ones (server work O(new) not
+    // O(all)) and returns `liveCellIds` so we can prune anything since forgotten. We answer the
+    // caller from the merged cache. If the endpoint's delta gate is off (or it is an older build),
+    // it returns the legacy array instead — we treat that as a full recall and rebuild the cache,
+    // so a delta-configured client is always correct against any endpoint.
+    if (this.recallCache.configured) {
+      const resp = await this.call<unknown>('saihm_recall', {
+        knownCellIds: this.recallCache.knownCellIds(),
+      });
+      const isDelta = (r: unknown): r is { mode: 'delta'; added: unknown[]; liveCellIds: string[] } =>
+        typeof r === 'object' &&
+        r !== null &&
+        !Array.isArray(r) &&
+        (r as { mode?: unknown }).mode === 'delta' &&
+        Array.isArray((r as { added?: unknown }).added) &&
+        Array.isArray((r as { liveCellIds?: unknown }).liveCellIds);
+      if (isDelta(resp)) {
+        const added = this.openRecallRows(resp.added);
+        this.recallCache.merge(added, resp.liveCellIds);
+        return filter(this.recallCache.all());
+      }
+      if (!Array.isArray(resp)) {
+        throw new SaihmEndpointError(
+          502,
+          'malformed_response',
+          'endpoint returned a malformed recall response',
+        );
+      }
+      const cells = this.openRecallRows(resp);
+      this.recallCache.replaceAll(cells);
+      return filter(cells);
+    }
+
+    // FULL PATH (default, unchanged): recall-all, open every row, filter client-side.
     const rows = await this.call<unknown>('saihm_recall', {});
     if (!Array.isArray(rows)) {
       throw new SaihmEndpointError(
@@ -1493,43 +1669,40 @@ export class SaihmProClient {
         'endpoint returned a malformed recall-all response',
       );
     }
-    const needle = query?.toLowerCase();
+    return filter(this.openRecallRows(rows));
+  }
+
+  /**
+   * Open + attribute + de-duplicate a recall row set (full recall-all OR a delta `added` list).
+   * An honest endpoint stores exactly one current envelope per (tenant, cellId), so a set never
+   * repeats a cellId. A repeat — even of two individually-authentic envelopes — is the endpoint
+   * controlling cardinality: it could re-present a superseded version next to the live one (the
+   * per-row rollback guard only rejects a DESCENDING seq) or duplicate a row to skew a caller's
+   * aggregate. Reject the whole ambiguous response (all-or-nothing), keyed on the AUTHENTICATED
+   * cellId from openRow, never the server's row label. Query-filtering is applied by the caller.
+   */
+  private openRecallRows(rows: unknown[]): RecalledCell[] {
     const out: RecalledCell[] = [];
-    // An honest endpoint stores exactly one current envelope per (tenant, cellId), so a recall-all set
-    // never repeats a cellId. A repeat — even of two individually-authentic envelopes — is the endpoint
-    // controlling cardinality: it could re-present a superseded version next to the live one (the
-    // per-row rollback guard only rejects a DESCENDING seq) or duplicate a row to skew a caller's
-    // aggregate. Reject the whole ambiguous response (all-or-nothing), keyed on the AUTHENTICATED
-    // cellId from openRow, never the server's row label.
     const seen = new Set<string>();
     for (const raw of rows) {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
         throw new SaihmEndpointError(
           502,
           'malformed_response',
-          'endpoint returned a malformed recall-all row',
+          'endpoint returned a malformed recall row',
         );
       }
-      const row = raw as {
-        cellId: string;
-        found: boolean;
-        wire?: WireEnvelope;
-      };
+      const row = raw as { cellId: string; found: boolean; wire?: WireEnvelope };
       if (!row.found || !row.wire) continue;
       const cell = this.openRow(null, row.wire); // trusts env.cellId/seq, not the server row label
       if (seen.has(cell.cellId)) {
         throw new SaihmEndpointError(
           502,
           'malformed_response',
-          `endpoint returned cell '${cell.cellId}' more than once in a recall-all response`,
+          `endpoint returned cell '${cell.cellId}' more than once in a recall response`,
         );
       }
       seen.add(cell.cellId);
-      if (
-        needle !== undefined &&
-        !cell.plaintext.toLowerCase().includes(needle)
-      )
-        continue;
       out.push(cell);
     }
     return out;
@@ -1544,7 +1717,9 @@ export class SaihmProClient {
 
   /** Crypto-shred a cell (GDPR Art.17): the endpoint destroys the wrapped DEK + tombstones. */
   async forget(cellId: string): Promise<ForgetResult> {
-    return this.call('saihm_forget', { id: cellId });
+    const r = await this.call<ForgetResult>('saihm_forget', { id: cellId });
+    this.recallCache.remove(cellId); // keep the delta cache from serving a crypto-shredded cell
+    return r;
   }
 
   /** Non-custodial status: operator-observable metadata only (no plaintext). */
