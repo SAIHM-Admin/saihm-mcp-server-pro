@@ -16,6 +16,7 @@ import {
   selfJoinEnabled,
   defaultIdentityPath,
   ensureSelfJoinIdentityEnv,
+  DEFAULT_ENDPOINT,
 } from '../src/client.js';
 
 const KEYS = [
@@ -130,6 +131,106 @@ test('bootFromEnv: flag ON + no identity => friendly "Join SAIHM" hint', () => {
   try {
     withEnv({ SAIHM_ENDPOINT_URL: 'https://x.test/mcp', SAIHM_SELF_JOIN: '1', SAIHM_HOME: home }, () => {
       assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ── SAIHM_ENDPOINT_URL defaulting ────────────────────────────────────────────
+// Regression cover for the 0.2.0 first-run dead end: every test above pins
+// SAIHM_ENDPOINT_URL, so the suite was green while a bare `npx -y
+// @saihm/mcp-server-pro` (no env at all) failed with 'SAIHM_ENDPOINT_URL env var
+// required' on the very first saihm_recall — never naming saihm_join, the free
+// path the package advertises. These three pin the genuinely-unset state.
+
+test('bootFromEnv: endpoint UNSET + no identity => join hint, NOT an endpoint error', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-ep0-'));
+  try {
+    withEnv({ SAIHM_HOME: home }, () => {
+      assert.equal(process.env.SAIHM_ENDPOINT_URL, undefined, 'precondition: genuinely unset');
+      assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
+      assert.throws(() => SaihmProClient.bootFromEnv(), (e: unknown) => {
+        assert.ok(e instanceof Error);
+        assert.ok(
+          !/SAIHM_ENDPOINT_URL env var required/.test(e.message),
+          'must not resurrect the bare endpoint dead end',
+        );
+        return true;
+      });
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('bootFromEnv: endpoint UNSET + valid secret => boots against the declared default', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-ep1-'));
+  try {
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: 'ab'.repeat(32) }, () => {
+      const c = SaihmProClient.bootFromEnv();
+      assert.equal(
+        (c as unknown as { endpoint: string }).endpoint,
+        DEFAULT_ENDPOINT,
+        'unset endpoint must resolve to the hosted operator server.json declares',
+      );
+      assert.equal(DEFAULT_ENDPOINT, 'https://saihm.coti.global/mcp');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('bootFromEnv: a bad endpoint is reported even when no identity exists', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-ep4-'));
+  try {
+    // Both of these previously surfaced the join hint, masking the real fault:
+    // boot threw on the missing identity before any client was constructed, and
+    // assertEndpointUrl only ran in the constructor.
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: '   ' }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /is not a valid URL/);
+    });
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: 'http://evil.example/mcp' }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /must use https:\/\//);
+    });
+    // Loopback http stays legal for local development.
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: 'http://127.0.0.1:3001/mcp' }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('setup hint: opted OUT must never name saihm_join (that tool is not registered)', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-ep3-'));
+  try {
+    // SAIHM_SELF_JOIN=0 => the server registers eight tools and NO saihm_join.
+    // A hint naming it would send the agent after a tool that does not exist.
+    withEnv({ SAIHM_HOME: home, SAIHM_SELF_JOIN: '0' }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), (e: unknown) => {
+        assert.ok(e instanceof Error);
+        assert.match(e.message, /SAIHM_MASTER_SECRET_HEX .*required/);
+        assert.ok(!/saihm_join/.test(e.message), 'must not name an unregistered tool');
+        assert.match(e.message, /SAIHM_MASTER_SECRET_FILE or SAIHM_MASTER_SECRET_HEX/);
+        return true;
+      });
+    });
+    // Opted IN (default): the same class of error DOES name the join tool.
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: 'zz'.repeat(32) }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /lowercase hex\..*saihm_join/);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('bootFromEnv: endpoint set but EMPTY => configuration error (not silently defaulted)', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-ep2-'));
+  try {
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: '', SAIHM_MASTER_SECRET_HEX: 'ab'.repeat(32) }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_ENDPOINT_URL is set but empty/);
+      assert.throws(() => SaihmProClient.bootFromEnv(), /saihm_join/);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });

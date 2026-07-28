@@ -7,18 +7,20 @@
     "url": "https://github.com/SAIHM-Admin/saihm-mcp-server-pro",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.2.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@saihm/mcp-server-pro",
-      "version": "0.2.0",
-      "transport": { "type": "stdio" },
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
       "environmentVariables": [
         {
           "name": "SAIHM_ENDPOINT_URL",
-          "description": "SAIHM operator endpoint. Use https://saihm.coti.global/mcp for the hosted service.",
-          "isRequired": true,
+          "description": "SAIHM operator endpoint. Optional: defaults to the hosted service at https://saihm.coti.global/mcp.",
+          "isRequired": false,
           "format": "string",
           "default": "https://saihm.coti.global/mcp"
         },

@@ -2,6 +2,57 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] — 2026-07-28
+
+First-run fix. No protocol, wire-format, or tool-surface change; the canonical
+eight tools plus the `saihm_join` bootstrap affordance are unchanged.
+
+### Fixed
+
+- **A fresh install dead-ended on its very first tool call.** With no
+  `SAIHM_ENDPOINT_URL` set — the state of every hand-written MCP config, e.g. a
+  bare `npx -y @saihm/mcp-server-pro` — `saihm_recall`, `saihm_status`, and
+  `saihm_remember` all failed with `SAIHM_ENDPOINT_URL env var required`, which
+  never mentions `saihm_join`. The shipped `saihm_session_bootstrap` prompt
+  makes this the first thing an agent hits, since it instructs a `saihm_recall`
+  before anything else. 0.2.0 already carried the actionable _"Ask me to Join
+  SAIHM first"_ message, but the endpoint check threw before execution could
+  reach it.
+
+  An unset `SAIHM_ENDPOINT_URL` now resolves to `https://saihm.coti.global/mcp`
+  — the value `server.json` already declared as this variable's `default`, so
+  code and manifest now agree and registry-driven and hand-written configs
+  behave identically. Defaulting reaches no network by itself: boot still
+  requires an identity, so an unconfigured agent gets the join hint *before* any
+  request is made, and `saihm_join` still needs explicit human approval. Setting
+  the variable to an explicit empty string remains a configuration error rather
+  than a silent opt-in to the default.
+
+- **Every remaining boot error was a bare env-var name.** All of them now carry
+  a setup hint naming `saihm_join` for the free zero-config path and
+  `SAIHM_ENDPOINT_URL` for a different operator: unreadable
+  `SAIHM_MASTER_SECRET_FILE`, unreadable self-join identity file, missing master
+  secret, non-canonical hex, and under-length secret. No secret material is
+  interpolated into any message.
+
+### Changed
+
+- `server.json`: `SAIHM_ENDPOINT_URL` is now `isRequired: false`, matching the
+  code, so registry clients stop prompting for a value that has a working
+  default.
+- README: the configuration table listed `SAIHM_ENDPOINT_URL` as required. It is
+  now documented as optional with its default.
+- `DEFAULT_ENDPOINT` is exported from the package root so an embedding consumer
+  can reference the same constant.
+
+### Notes
+
+- Regression cover added for the genuinely-unset state. Every pre-existing
+  self-join test pinned `SAIHM_ENDPOINT_URL`, so the suite was green while the
+  real first-run path was broken; three new cases assert the unset, defaulted,
+  and explicitly-empty behaviours, and pin `SAIHM_HOME` to a temp dir so a
+  developer's own `~/.saihm` identity cannot mask a failure.
+
 ## [0.2.0] — 2026-07-28
 
 Onboarding release. No protocol or wire-format change; the canonical eight

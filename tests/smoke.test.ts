@@ -13,6 +13,9 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { createServer } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { deriveIdentity, toHex, fromHex } from "@saihm/client-pro";
 import { SaihmProClient, SaihmEndpointError } from "../src/client.js";
@@ -41,8 +44,17 @@ describe("SC3: bootFromEnv validation", () => {
   it("rejects missing / short / non-hex master; accepts a valid env", () => {
     const save = { ...process.env };
     try {
-      for (const k of ["SAIHM_ENDPOINT_URL", "SAIHM_AUTH_HEADER", "SAIHM_MASTER_SECRET_HEX", "SAIHM_TIER", "SAIHM_SEQ_STATE_PATH"]) delete process.env[k];
-      assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_ENDPOINT_URL/);
+      for (const k of ["SAIHM_ENDPOINT_URL", "SAIHM_AUTH_HEADER", "SAIHM_MASTER_SECRET_HEX", "SAIHM_MASTER_SECRET_FILE", "SAIHM_SELF_JOIN", "SAIHM_TIER", "SAIHM_SEQ_STATE_PATH"]) delete process.env[k];
+      // SAIHM_HOME is pinned to an empty temp dir so this asserts the *unconfigured*
+      // path regardless of whether the machine running the suite happens to have a
+      // real ~/.saihm/free-identity.key (which would otherwise boot successfully).
+      const emptyHome = mkdtempSync(join(tmpdir(), "saihm-smoke-"));
+      process.env.SAIHM_HOME = emptyHome;
+      // A missing endpoint is NOT an error: it defaults to the hosted operator that
+      // server.json already declares, so boot proceeds to the identity check and the
+      // agent is pointed at saihm_join instead of a bare env-var dead end.
+      assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
+      rmSync(emptyHome, { recursive: true, force: true });
       process.env.SAIHM_ENDPOINT_URL = "https://saihm.coti.global/mcp";
       process.env.SAIHM_AUTH_HEADER = "Bearer test";
       process.env.SAIHM_MASTER_SECRET_HEX = "00"; // 1 byte

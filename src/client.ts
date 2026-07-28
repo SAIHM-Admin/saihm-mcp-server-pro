@@ -94,6 +94,39 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_SEQ = (1n << 64n) - 1n; // wire uint64 ceiling (mirrors client-pro wire U64_MAX)
 
+/**
+ * The hosted, non-custodial operator. `server.json` already declares this as
+ * SAIHM_ENDPOINT_URL's `default`, so registry-driven installs receive it — but a
+ * hand-written MCP config (`npx -y @saihm/mcp-server-pro` with no env) did not,
+ * and every memory tool then failed with a bare `SAIHM_ENDPOINT_URL env var
+ * required` that never mentioned `saihm_join`. Honouring the declared default in
+ * code makes the two agree and lets boot reach the join hint below.
+ *
+ * Defaulting reaches no network on its own: bootFromEnv still requires an
+ * identity, so an unconfigured agent gets the join hint *before* any request,
+ * and `saihm_join` needs explicit human approval before memory is activated.
+ */
+export const DEFAULT_ENDPOINT = 'https://saihm.coti.global/mcp';
+
+/**
+ * Appended to every remaining bootFromEnv configuration error. A bare env-var
+ * name is a dead end for the agent reading it: it cannot tell that a free,
+ * zero-config path exists one tool call away.
+ *
+ * It MUST be computed per call, not frozen into a constant: under
+ * SAIHM_SELF_JOIN=0 the server registers eight tools and no `saihm_join`, so
+ * naming that tool would send the agent after something that does not exist —
+ * a worse dead end than the bare message it replaced.
+ */
+function setupHint(): string {
+  return selfJoinEnabled()
+    ? ' To start free with no configuration, ask me to "Join SAIHM" (the saihm_join tool).' +
+        ' To use a different operator, set SAIHM_ENDPOINT_URL to its endpoint.'
+    : ' Self-join is off (SAIHM_SELF_JOIN=0), so supply a master secret via' +
+        ' SAIHM_MASTER_SECRET_FILE or SAIHM_MASTER_SECRET_HEX. Unset SAIHM_SELF_JOIN' +
+        ' to start free with no configuration instead.';
+}
+
 /** Mirrors the standards client: https only, except 127.0.0.1 / localhost over http (dev). */
 function assertEndpointUrl(endpoint: string): void {
   let url: URL;
@@ -739,9 +772,21 @@ export class SaihmProClient {
   }
 
   static bootFromEnv(): SaihmProClient {
-    const endpoint = process.env.SAIHM_ENDPOINT_URL;
+    // Unset => the hosted operator declared as this var's default in server.json.
+    // Explicitly empty is still a configuration error, not an opt-in to the default.
+    const endpoint =
+      process.env.SAIHM_ENDPOINT_URL === undefined
+        ? DEFAULT_ENDPOINT
+        : process.env.SAIHM_ENDPOINT_URL;
     const auth = process.env.SAIHM_AUTH_HEADER;
-    if (!endpoint) throw new Error('SAIHM_ENDPOINT_URL env var required');
+    if (!endpoint)
+      throw new Error('SAIHM_ENDPOINT_URL is set but empty.' + setupHint());
+    // Validate here, not only in the constructor: boot can throw on a missing
+    // identity long before a client is ever constructed, which silently masked a
+    // malformed or plain-http endpoint behind the join hint. The endpoint is
+    // never contacted either way, so this is a diagnostic fix — it reports the
+    // misconfiguration the operator actually has.
+    assertEndpointUrl(endpoint);
     // The master secret may be supplied inline via SAIHM_MASTER_SECRET_HEX, or — preferably for
     // operators / security-conscious users — as the path to a mode-600 file via
     // SAIHM_MASTER_SECRET_FILE so the root seed is never inlined into a synced/shared MCP config.
@@ -753,7 +798,8 @@ export class SaihmProClient {
         secretHex = readFileSync(secretFile, 'utf-8');
       } catch {
         throw new Error(
-          `SAIHM_MASTER_SECRET_FILE could not be read: ${secretFile}`,
+          `SAIHM_MASTER_SECRET_FILE could not be read: ${secretFile}.` +
+            setupHint(),
         );
       }
       try {
@@ -781,7 +827,9 @@ export class SaihmProClient {
         try {
           secretHex = readFileSync(p, 'utf-8');
         } catch {
-          throw new Error(`self-join identity file could not be read: ${p}`);
+          throw new Error(
+            `self-join identity file could not be read: ${p}.` + setupHint(),
+          );
         }
       }
     }
@@ -793,7 +841,8 @@ export class SaihmProClient {
           'No SAIHM memory yet on this device. Ask me to "Join SAIHM" first (the saihm_join tool) to create your free memory, then try again.',
         );
       throw new Error(
-        'SAIHM_MASTER_SECRET_HEX (or SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars)',
+        'SAIHM_MASTER_SECRET_HEX (or SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars).' +
+          setupHint(),
       );
     }
     let master: Uint8Array;
@@ -801,12 +850,14 @@ export class SaihmProClient {
       master = fromHex(secretHex.trim());
     } catch {
       throw new Error(
-        'SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex',
+        'SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex.' + setupHint(),
       );
     }
     if (master.length < 32) {
       master.fill(0);
-      throw new Error('SAIHM_MASTER_SECRET_HEX must decode to >= 32 bytes');
+      throw new Error(
+        'SAIHM_MASTER_SECRET_HEX must decode to >= 32 bytes.' + setupHint(),
+      );
     }
     const optTier =
       process.env.SAIHM_TIER ?? (selfJoinEnabled() ? 'FREE' : undefined);
