@@ -186,6 +186,9 @@ function startServer(endpoint: string, args: string[] = []): Driver {
     SAIHM_MASTER_SECRET_HEX: MASTER_HEX,
     SAIHM_TIER: 'PRO',
     SAIHM_PAYMENT_METHOD: 'stripe',
+    // This suite pins the core tool wiring; opt out of self-join (on by default)
+    // so tools/list stays the canonical eight. Self-join has its own suite.
+    SAIHM_SELF_JOIN: '0',
   };
   const proc = spawn(TSX, [SERVER, ...args], {
     env,

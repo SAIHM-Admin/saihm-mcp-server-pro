@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.SAIHM-Admin/saihm-mcp-server-pro",
+  "description": "Sovereign encrypted memory for AI agents, sealed on your own machine. Start free — just ask your agent to Join SAIHM. 8 MCP tools. GDPR erasure.",
+  "websiteUrl": "https://saihm.coti.global",
+  "repository": {
+    "url": "https://github.com/SAIHM-Admin/saihm-mcp-server-pro",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@saihm/mcp-server-pro",
+      "version": "0.2.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "SAIHM_ENDPOINT_URL",
+          "description": "SAIHM operator endpoint. Use https://saihm.coti.global/mcp for the hosted service.",
+          "isRequired": true,
+          "format": "string",
+          "default": "https://saihm.coti.global/mcp"
+        },
+        {
+          "name": "SAIHM_SELF_JOIN",
+          "description": "Self-join is ON by default: the saihm_join tool generates a non-custodial identity on this device and activates the free trial, so no master secret is needed. Set to '0' to suppress the tool.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SAIHM_MASTER_SECRET_FILE",
+          "description": "Path to a mode-600 file holding a 64+ hex-char master secret. Only needed if you opt out of self-join or are restoring an existing identity. Never transmitted.",
+          "isRequired": false,
+          "format": "file_path",
+          "isSecret": true
+        },
+        {
+          "name": "SAIHM_HOME",
+          "description": "Base dir for the self-join identity file ($SAIHM_HOME/free-identity.key, mode 600). Defaults to ~/.saihm.",
+          "isRequired": false,
+          "format": "file_path"
+        }
+      ]
+    }
+  ]
+}

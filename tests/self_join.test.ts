@@ -48,10 +48,13 @@ function withEnv(overrides: Record<string, string | undefined>, fn: () => void):
   }
 }
 
-test('selfJoinEnabled reflects SAIHM_SELF_JOIN=1 exactly', () => {
+test('selfJoinEnabled defaults ON; only SAIHM_SELF_JOIN=0 opts out', () => {
   withEnv({ SAIHM_SELF_JOIN: '1' }, () => assert.equal(selfJoinEnabled(), true));
   withEnv({ SAIHM_SELF_JOIN: '0' }, () => assert.equal(selfJoinEnabled(), false));
-  withEnv({}, () => assert.equal(selfJoinEnabled(), false));
+  withEnv({}, () => assert.equal(selfJoinEnabled(), true));
+  // Anything other than the exact opt-out string leaves self-join enabled.
+  withEnv({ SAIHM_SELF_JOIN: '' }, () => assert.equal(selfJoinEnabled(), true));
+  withEnv({ SAIHM_SELF_JOIN: 'false' }, () => assert.equal(selfJoinEnabled(), true));
 });
 
 test('defaultIdentityPath honours SAIHM_HOME, else ~/.saihm', () => {
@@ -105,10 +108,21 @@ test('ensureSelfJoinIdentityEnv yields to a configured env secret (no file writt
   }
 });
 
-test('bootFromEnv: flag OFF + no secret => generic env error (behaviour unchanged)', () => {
-  withEnv({ SAIHM_ENDPOINT_URL: 'https://x.test/mcp' }, () => {
+test('bootFromEnv: opted out + no secret => generic env error (pre-0.2 behaviour)', () => {
+  withEnv({ SAIHM_ENDPOINT_URL: 'https://x.test/mcp', SAIHM_SELF_JOIN: '0' }, () => {
     assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_MASTER_SECRET_HEX .*required/);
   });
+});
+
+test('bootFromEnv: DEFAULT (flag unset) + no identity => friendly "Join SAIHM" hint', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-uj0-'));
+  try {
+    withEnv({ SAIHM_ENDPOINT_URL: 'https://x.test/mcp', SAIHM_HOME: home }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('bootFromEnv: flag ON + no identity => friendly "Join SAIHM" hint', () => {

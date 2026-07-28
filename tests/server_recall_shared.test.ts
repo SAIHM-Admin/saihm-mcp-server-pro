@@ -115,7 +115,9 @@ function startServer(endpoint: string): Driver {
     SAIHM_TIER: 'PRO',
     SAIHM_PAYMENT_METHOD: 'stripe',
   };
-  delete env.SAIHM_SELF_JOIN;
+  // This suite exercises the master-secret boot path; opt out of self-join explicitly
+  // (it is on by default) so the tool surface stays the canonical eight.
+  env.SAIHM_SELF_JOIN = '0';
   const proc = spawn(TSX, [SERVER], { env, stdio: ['pipe', 'pipe', 'pipe'], cwd: resolve(HERE, '..') });
   let buf = '',
     stderr = '';

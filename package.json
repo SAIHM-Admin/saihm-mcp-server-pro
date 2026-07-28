@@ -1,7 +1,8 @@
 {
   "name": "@saihm/mcp-server-pro",
-  "version": "0.1.11",
-  "description": "SAIHM production thin-client. Seals client-side via @saihm/client-pro (ML-DSA-65 identity, per-cell AES-256-GCM DEK wrapped under a client KEK, ML-KEM-768 authenticated sharing) and POSTs opaque ciphertext to the blind, non-custodial SAIHM /mcp endpoint. The master secret, KEK, and plaintext never leave this process. Apache-2.0.",
+  "version": "0.2.0",
+  "mcpName": "io.github.SAIHM-Admin/saihm-mcp-server-pro",
+  "description": "Sovereign encrypted memory for AI agents, sealed on your own machine. Start free with no card and no master secret — just ask your agent to \"Join SAIHM\". Seals client-side via @saihm/client-pro (ML-DSA-65 identity, per-cell AES-256-GCM DEK wrapped under a client KEK, ML-KEM-768 authenticated sharing) and POSTs opaque ciphertext to the blind, non-custodial SAIHM /mcp endpoint. The master secret, KEK, and plaintext never leave this process. Apache-2.0.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -40,7 +41,13 @@
     "gdpr",
     "mcp",
     "model-context-protocol",
-    "mcp-server"
+    "mcp-server",
+    "memory",
+    "sovereign-memory",
+    "free-tier",
+    "claude-code",
+    "claude-desktop",
+    "cursor"
   ],
   "license": "Apache-2.0",
   "author": "SAIHM",

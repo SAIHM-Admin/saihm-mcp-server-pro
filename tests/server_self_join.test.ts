@@ -212,15 +212,31 @@ const CANONICAL_8 = [
   'saihm_status',
 ];
 
-test('saihm_join DARK: flag OFF => canonical 8 tools, no saihm_join (zero blast radius)', async () => {
+test('saihm_join OPT-OUT: SAIHM_SELF_JOIN=0 => canonical 8 tools, no saihm_join (zero blast radius)', async () => {
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   const home = mkdtempSync(join(tmpdir(), 'saihm-selfjoin-off-'));
+  const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '0' });
+  try {
+    const tools = await handshake(d);
+    assert.deepEqual(tools, CANONICAL_8, 'opt-out must not expose saihm_join');
+    assert.ok(!tools.includes('saihm_join'));
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('saihm_join DEFAULT: flag unset => saihm_join is exposed alongside the canonical 8', async () => {
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const home = mkdtempSync(join(tmpdir(), 'saihm-selfjoin-default-'));
   const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home });
   try {
     const tools = await handshake(d);
-    assert.deepEqual(tools, CANONICAL_8, 'flag off must not expose saihm_join');
-    assert.ok(!tools.includes('saihm_join'));
+    assert.ok(tools.includes('saihm_join'), 'self-join is on by default');
+    for (const t of CANONICAL_8) assert.ok(tools.includes(t), `canonical tool missing: ${t}`);
   } finally {
     d.proc.kill();
     await new Promise<void>((r) => mock.server.close(() => r()));

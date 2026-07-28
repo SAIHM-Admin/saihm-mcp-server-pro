@@ -2,6 +2,51 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-07-28
+
+Onboarding release. No protocol or wire-format change; the canonical eight
+tools are unchanged.
+
+### Changed
+
+- **`saihm_join` is now registered by default (`SAIHM_SELF_JOIN` defaults on).**
+  Previously it was opt-in via `SAIHM_SELF_JOIN=1`, which left a fresh install
+  with no in-band way to start: every other path first requires a hand-generated
+  64+ hex-char master secret, which an autonomous agent cannot produce for
+  itself. Self-join generates and persists that identity on-device instead, so
+  _"Join SAIHM"_ works out of the box. Set `SAIHM_SELF_JOIN=0` to restore the
+  previous behaviour — the tool is not registered and every self-join path is
+  inert. `saihm_join` remains a one-time onboarding bootstrap affordance, not a
+  ninth protocol tool.
+- Boot with no master secret and no persisted identity now returns the
+  actionable _"Ask me to Join SAIHM first"_ hint rather than the bare
+  `SAIHM_MASTER_SECRET_HEX ... required` error. Opting out restores the
+  original message.
+- The free allowance is described consistently as a **free trial** for testing
+  on real infrastructure — a fixed, one-time allowance, no card and nothing to
+  cancel — matching `@saihm/mcp-server`.
+
+### Added
+
+- `server.json` manifest and an MCP registry publish step, so this package is
+  discoverable in the MCP registry. Previously only the crypto-free
+  `@saihm/mcp-server` was listed, and that package cannot activate an account.
+- npm discovery keywords: `memory`, `sovereign-memory`, `free-tier`,
+  `claude-code`, `claude-desktop`, `cursor`.
+
+### Fixed
+
+- The documented `free-join` command now uses `SAIHM_MASTER_SECRET_FILE` with a
+  shown `openssl rand -hex 32` step, instead of an unexplained
+  `<your 64+ hex master secret>` placeholder.
+
+## [0.1.11] — 2026-07-19
+
+### Added
+
+- Opt-in delta recall cache (`SAIHM_RECALL_CACHE_PATH`) for faster session-start
+  recall.
+
 ## [0.1.10] — 2026-07-10
 
 ### Added

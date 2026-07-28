@@ -71,8 +71,8 @@ there is no token to paste or re-paste. Eight tools are exposed
 
 ### Zero-config free start — prompt your agent to "Join SAIHM"
 
-The easiest start needs **no master secret and no card**. Point your MCP host at
-the server with self-join enabled:
+The easiest start needs **no master secret and no card**. Self-join is on by
+default, so this is the whole configuration:
 
 ```jsonc
 {
@@ -82,7 +82,6 @@ the server with self-join enabled:
       "args": ["-y", "@saihm/mcp-server-pro"],
       "env": {
         "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp",
-        "SAIHM_SELF_JOIN": "1",
       },
     },
   },
@@ -101,20 +100,32 @@ token. When it returns, your **free**, non-custodial memory is live and the othe
 tools work. The key persists on this device, so your next session resumes with
 your memory intact.
 
-`saihm_join` appears only when `SAIHM_SELF_JOIN=1`; it is a one-time onboarding
-affordance, not a ninth protocol tool. Because your master secret is generated
+`saihm_join` is a one-time onboarding affordance, not a ninth protocol tool. It
+is registered by default; set `SAIHM_SELF_JOIN=0` to suppress it and expose only
+the canonical eight. Because your master secret is generated
 locally and never leaves the process, **back up `~/.saihm/free-identity.key` — if
 you lose it, no one (including SAIHM) can open your cells.**
 
 ### Start free
 
-Activate a **free tier** — a one-time, lifetime memory allowance, no card. Set
-`SAIHM_TIER=FREE` and prove you're a unique person once via a GitHub device
-sign-in; your memory is then bound to your own key for life.
+**The simplest way: just ask your agent to "Join SAIHM."** Self-join is on by
+default, so the `saihm_join` tool is already there — it generates your key on
+this machine, starts the sign-in, and activates the free trial for you. No
+master secret to invent, no env vars, no website visit.
+
+To do it yourself from a shell instead, generate a master secret first — it
+never leaves your machine, and it is the only key to your memory:
+
+```sh
+openssl rand -hex 32 > saihm-master.key && chmod 600 saihm-master.key
+```
+
+Then activate. Prove you're a unique person once via a GitHub device sign-in;
+your memory is then bound to your own key for life:
 
 ```sh
 SAIHM_ENDPOINT_URL=https://saihm.coti.global/mcp \
-SAIHM_MASTER_SECRET_HEX=<your 64+ hex master secret> \
+SAIHM_MASTER_SECRET_FILE=./saihm-master.key \
 SAIHM_TIER=FREE \
   npx -y @saihm/mcp-server-pro free-join
 ```
@@ -124,10 +135,11 @@ the GitHub token — the sign-in stays in your browser and the token is
 server-ephemeral. When it returns, start the server normally (drop `free-join`)
 and it self-onboards free.
 
-The free allowance is a fixed, one-time lifetime grant of writes, reads, and
-shares — it never resets or refills, and it is not a trial. The client shows
-your remaining balance and warns you as you approach it, so nothing fails by
-surprise.
+The free trial is for testing on real infrastructure: a fixed, one-time
+allowance of writes, reads, and shares that never resets or refills. **No card,
+and nothing to cancel** — it is not an auto-renewing subscription. The client
+shows your remaining balance and warns you as you approach it, so nothing fails
+by surprise.
 
 **Upgrade any time — same key, same memories:**
 
@@ -222,7 +234,7 @@ The derived `saihm.agentIdHash` is the `sub` the endpoint binds your tenant to �
 | `SAIHM_MASTER_SECRET_FILE` | yes\*             | Path to a **mode-600** file holding the hex master secret. Preferred for operators: keeps the root seed out of a synced/shared MCP config. Takes precedence over `SAIHM_MASTER_SECRET_HEX` when both are set.     |
 | `SAIHM_TIER`               | self-onboard only | Tier label baked into sealed metadata (`FREE`, `PRO`, …). Required when self-onboarding; otherwise optional — resolved via `status()` if unset.                                                                    |
 | `SAIHM_SEQ_STATE_PATH`     | no                | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates. |
-| `SAIHM_SELF_JOIN` | free self-join | Set to `1` to enable the `saihm_join` onboarding tool ("prompt your agent to Join SAIHM"). The server self-generates + persists a non-custodial identity and activates the free tier — no master secret needed. Off by default. |
+| `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool ("prompt your agent to Join SAIHM"), which self-generates + persists a non-custodial identity and activates the free trial — no master secret needed. **On by default**; set to `0` to suppress the tool and disable every self-join path. |
 | `SAIHM_HOME` | no | Base dir for the self-join identity file (`$SAIHM_HOME/free-identity.key`, mode 600). Defaults to `~/.saihm`.                                                                                                                                 |
 
 > **Self-onboarding (paste once):** with `SAIHM_AUTH_HEADER` unset, the client proves

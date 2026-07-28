@@ -417,13 +417,18 @@ export interface FreeEntitlementResult {
 }
 
 /**
- * Dark self-join flag. When `SAIHM_SELF_JOIN=1`, the pro server exposes the `saihm_join`
- * bootstrap tool and this client will (a) self-generate + persist an identity on the first
- * join and (b) re-load that persisted identity on a plain restart with no env secret. Unset
- * (the default) => every self-join path below is inert and boot behaviour is byte-identical.
+ * Self-join flag. When enabled, the pro server exposes the `saihm_join` bootstrap tool and
+ * this client will (a) self-generate + persist an identity on the first join and (b) re-load
+ * that persisted identity on a plain restart with no env secret.
+ *
+ * Default ON. A fresh install otherwise has no in-band way to start the free trial: every
+ * other path requires the operator to hand-generate a >= 64 hex-char master secret first,
+ * which an autonomous agent cannot do for itself. Set `SAIHM_SELF_JOIN=0` to opt out, which
+ * restores the previous behaviour — `saihm_join` is not registered and every self-join path
+ * below is inert.
  */
 export function selfJoinEnabled(): boolean {
-  return process.env.SAIHM_SELF_JOIN === '1';
+  return process.env.SAIHM_SELF_JOIN !== '0';
 }
 
 /** Default on-disk location of a self-generated FREE identity (written mode 600). */
