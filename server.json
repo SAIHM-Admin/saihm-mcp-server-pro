@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.SAIHM-Admin/saihm-mcp-server-pro",
-  "description": "Sovereign encrypted memory for AI agents, sealed on your own machine. Start free — just ask your agent to Join SAIHM. 8 MCP tools. GDPR erasure.",
+  "description": "Sovereign encrypted memory for AI agents. Sealed on your machine. Start free: say Join SAIHM.",
   "websiteUrl": "https://saihm.coti.global",
   "repository": {
     "url": "https://github.com/SAIHM-Admin/saihm-mcp-server-pro",
@@ -32,14 +32,14 @@
           "name": "SAIHM_MASTER_SECRET_FILE",
           "description": "Path to a mode-600 file holding a 64+ hex-char master secret. Only needed if you opt out of self-join or are restoring an existing identity. Never transmitted.",
           "isRequired": false,
-          "format": "file_path",
+          "format": "filepath",
           "isSecret": true
         },
         {
           "name": "SAIHM_HOME",
           "description": "Base dir for the self-join identity file ($SAIHM_HOME/free-identity.key, mode 600). Defaults to ~/.saihm.",
           "isRequired": false,
-          "format": "file_path"
+          "format": "filepath"
         }
       ]
     }
