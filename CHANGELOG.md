@@ -2,7 +2,14 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] — 2026-08-02
+
+Install correctness. The documented configuration now works as pasted, and the
+server no longer announces the same `serverInfo.name` as the standards client.
+No protocol, wire-format, or tool-surface change; the canonical eight tools plus
+the `saihm_join` bootstrap affordance are unchanged. A minor rather than a patch
+because `serverInfo.name` is a publicly announced identifier — anything keying on
+it sees a different value.
 
 ### Fixed
 
