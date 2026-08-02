@@ -45,7 +45,7 @@ npm install @saihm/mcp-server-pro
 The package ships a stdio MCP server. Point your MCP host (Claude Desktop,
 Claude Code, …) at it — paste this **once**:
 
-```jsonc
+```json
 {
   "mcpServers": {
     "saihm": {
@@ -55,12 +55,20 @@ Claude Code, …) at it — paste this **once**:
         "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp",
         "SAIHM_MASTER_SECRET_HEX": "<your 64+ hex master secret>",
         "SAIHM_TIER": "PRO",
-        "SAIHM_PAYMENT_METHOD": "stripe",
+        "SAIHM_PAYMENT_METHOD": "stripe"
       },
-    },
-  },
+      "timeout": 60
+    }
+  }
 }
 ```
+
+Two details worth keeping as written. **`timeout`**: hosts that don't recognise
+it ignore it, but Cline's default start-up budget is 1.5 s — too short for `npx`
+to resolve and launch the package — and a server that misses it is skipped
+**silently**, with no error in the chat. **No trailing commas**: these config
+files are parsed as strict JSON, and a stray comma doesn't just break this entry,
+it invalidates the whole file and drops every MCP server you had configured.
 
 With no `SAIHM_AUTH_HEADER`, the server **self-onboards**: it mints and
 auto-refreshes its own short-lived access token from your master secret, so
@@ -74,17 +82,18 @@ there is no token to paste or re-paste. Eight tools are exposed
 The easiest start needs **no master secret and no card**. Self-join is on by
 default, so this is the whole configuration:
 
-```jsonc
+```json
 {
   "mcpServers": {
     "saihm": {
       "command": "npx",
       "args": ["-y", "@saihm/mcp-server-pro"],
       "env": {
-        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp",
+        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp"
       },
-    },
-  },
+      "timeout": 60
+    }
+  }
 }
 ```
 

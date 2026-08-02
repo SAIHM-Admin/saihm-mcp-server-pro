@@ -25,7 +25,8 @@
   "files": [
     "dist",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "llms-install.md"
   ],
   "publishConfig": {
     "access": "public"

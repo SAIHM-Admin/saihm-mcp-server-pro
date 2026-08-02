@@ -4,6 +4,28 @@ All notable changes to `@saihm/mcp-server-pro` are documented here. This project
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pasting the documented config into Cline silently installed nothing.** Cline
+  allows an MCP server 1.5 seconds to complete `initialize`; `npx` cannot resolve
+  and launch a package that fast, so the server missed the deadline on every
+  attempt and Cline skipped it — logging to its own file but surfacing no error
+  in the chat, so the tools simply never appeared. Measured against Cline CLI
+  3.0.48: the documented block failed 4 of 4 runs, including one with a warm
+  `npx` cache, and passed once `"timeout": 60` was present. The server itself was
+  never at fault — spawned directly with a cold `HOME` it completes the handshake
+  and enumerates all nine tools. Both `mcpServers` examples in `README.md` now
+  carry `timeout`, with a note on why removing it breaks Cline specifically.
+  Hosts that do not recognise the field ignore it.
+
+### Added
+
+- **`llms-install.md`**, agent-oriented install instructions covering the
+  `timeout` requirement, verification without side effects, and the two facts a
+  user must be told before `saihm_join` runs: it claims a one-time lifetime free
+  grant, and `~/.saihm/free-identity.key` is the only copy of their key. Now part
+  of the published tarball.
+
 ### Changed
 
 - **`serverInfo.name` is now `saihm-pro`, was `saihm`.** The standards client
