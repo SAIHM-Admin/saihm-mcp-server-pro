@@ -13,3 +13,4 @@ coverage/
 # Operator-internal integration suite (imports the non-shipping operator
 # endpoint package); validated locally, not part of the public client repo.
 tests/client_pro.test.ts
+dist-mcpb/
