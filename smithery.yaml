@@ -1,0 +1,30 @@
+# Smithery configuration for @saihm/mcp-server-pro
+# Client-side-sealed, sovereign, persistent memory for AI agents.
+# https://smithery.ai/docs/config#smitheryyaml
+#
+# DELIBERATELY ZERO-SECRET. This client seals every cell in-process, so its master secret is the one
+# value that must never reach a third party — including this directory's config store. It is not
+# collected here and never should be: the client generates it locally (32 bytes CSPRNG, mode 600)
+# on first run when unset. `SAIHM_AUTH_HEADER` is likewise omitted because the client self-onboards
+# by minting and refreshing its own short-lived token from that local identity.
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required: []
+    properties:
+      saihmEndpointUrl:
+        type: string
+        description:
+          Optional. Set only to point at a different SAIHM operator; defaults to
+          https://saihm.coti.global/mcp.
+  commandFunction:
+    |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@saihm/mcp-server-pro'],
+      env: config.saihmEndpointUrl
+        ? { SAIHM_ENDPOINT_URL: config.saihmEndpointUrl }
+        : {},
+    })
