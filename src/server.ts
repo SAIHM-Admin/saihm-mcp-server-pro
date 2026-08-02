@@ -48,8 +48,10 @@ const PACKAGE_VERSION: string = (
   ) as { version: string }
 ).version;
 
+// Distinct from the standards client's `saihm`: two separately published packages must not announce
+// the same serverInfo.name, or directories that key on it conflate them.
 const server = new McpServer(
-  { name: 'saihm', version: PACKAGE_VERSION },
+  { name: 'saihm-pro', version: PACKAGE_VERSION },
   { capabilities: { tools: {}, prompts: {} } },
 );
 

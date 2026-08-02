@@ -236,11 +236,14 @@ function startServer(endpoint: string, args: string[] = []): Driver {
 }
 
 async function handshake(d: Driver): Promise<string[]> {
-  await d.rpc(1, 'initialize', {
+  const init = await d.rpc(1, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
     clientInfo: { name: 't', version: '0' },
   });
+  // Must stay distinct from the standards client's `saihm`: two separately published packages
+  // announcing one serverInfo.name lets directories that key on it conflate them.
+  assert.equal(init.result.serverInfo.name, 'saihm-pro');
   d.notify('notifications/initialized');
   const list = await d.rpc(2, 'tools/list', {});
   return (list.result.tools as { name: string }[]).map((t) => t.name).sort();

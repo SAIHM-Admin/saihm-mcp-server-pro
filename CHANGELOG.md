@@ -2,6 +2,20 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **`serverInfo.name` is now `saihm-pro`, was `saihm`.** The standards client
+  `@saihm/mcp-server` also reports `saihm`, so two separately published packages
+  were announcing one server name. Any directory, registry, or host that keys on
+  `serverInfo.name` rather than on the package identifier could conflate them.
+  No protocol, wire-format, or tool-surface change: the canonical eight tools
+  plus the `saihm_join` bootstrap affordance are unchanged, and clients key their
+  configuration on the `mcpServers` entry name, not on this field. Visible where
+  a host displays the server's self-reported name. A handshake assertion now
+  guards the value so the divergence cannot silently regress.
+
 ## [0.2.1] — 2026-07-28
 
 First-run fix. No protocol, wire-format, or tool-surface change; the canonical
