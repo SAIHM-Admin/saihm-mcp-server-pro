@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-mcpb
+.git
+.gitignore
+.github
+.backups
+.env
+.env.*
+*.log
+*.tgz
+coverage
+.DS_Store
+*.tsbuildinfo
+Dockerfile
+.dockerignore
