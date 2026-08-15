@@ -105,7 +105,27 @@ function fail(e: unknown) {
  * is absent data too, not a small one.
  */
 const DECIMAL = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?$/;
+
+/**
+ * Length ceiling applied BEFORE the grammar, so the work is bounded by the ANSWER's size rather than
+ * the input's — the same slice-first principle `safeField` was rebuilt around, which this helper did
+ * not follow. Without it a string value costs `v.trim()` (a full copy), then `DECIMAL.test` (a full
+ * scan), then `Number(v)` (another) — three passes over an endpoint-chosen string, three times per
+ * `saihm_status` call, to produce at most ~20 characters of output.
+ *
+ * MEASURED at 16 MiB of digits: 212.2 ms here against 0.006 ms for the structured bound. Stated
+ * honestly, no end-to-end impact was demonstrated — driving same-size bodies through the real server
+ * with the bulk in the numeric fields (610 ms, 574 ms) against the bulk in `tier` (582 ms, 732 ms) is
+ * within noise, because transport and `JSON.parse` dominate. This is a principle violation fixed
+ * cheaply, NOT a working denial of service, and the comment says so rather than borrowing the
+ * urgency of one.
+ *
+ * 32 characters clears every real value with room to spare: the longest finite double round-trips as
+ * `-1.7976931348623157e+308`, at 24.
+ */
+const MAX_NUMERIC_CHARS = 32;
 const numOrNull = (v: unknown): number | null => {
+  if (typeof v === 'string' && v.length > MAX_NUMERIC_CHARS) return null;
   const n = typeof v === 'number' ? v : typeof v === 'string' && DECIMAL.test(v.trim()) ? Number(v) : NaN;
   return Number.isFinite(n) ? n : null;
 };
@@ -167,6 +187,21 @@ server.registerTool(
   async ({ content, cellId }) => {
     try {
       const r = await getClient().remember(content, cellId ? { cellId } : {});
+      // Resolved ONCE, then rendered into both halves of the response.
+      //
+      // Bounding each channel separately let them state different things about the same field, which
+      // is the defect `saihm_status` was fixed for and this site kept: the text fence caps at 64 and
+      // the structured bound at 256, so an endpoint `shardId` of 100 characters rendered as 64
+      // characters plus a truncation marker in the text while `structuredContent` carried all 100,
+      // and one of 5,000 rendered as 64 plausible characters in the text while the structured half
+      // said `(malformed)`. The second is the damaging direction: the channel an agent READS showed a
+      // value the endpoint chose the front of, while the channel a program reads called it unusable.
+      //
+      // Resolving first makes the VERDICT single. If the bound rejects, both halves say
+      // `(malformed)`; if it accepts, the text shows a marked truncation of the same accepted value.
+      // The two halves can still differ in LENGTH — that is what the marker announces — but they can
+      // no longer disagree about whether the value is usable at all.
+      const shardId = boundedOrMarker(r.shardId);
       return ok(
         // `cellId`, `seq` and `commitmentHash` are the CLIENT's, though not all from one source:
         // `cellId` is caller-supplied or client-generated, `seq` is this client's monotonic counter,
@@ -180,15 +215,15 @@ server.registerTool(
         // the announcement list: this line is a RECEIPT for a write the agent explicitly requested,
         // so a memory-shaped line minted inside it arrives with the agent's own intent behind it.
         `REMEMBERED [${safeScalar(r.cellId)}] seq=${safeScalar(r.seq)} ` +
-          `shard=${safeScalar(r.shardId)} commit=${shortScalar(r.commitmentHash)}`,
+          `shard=${safeScalar(shardId)} commit=${shortScalar(r.commitmentHash)}`,
         {
           cellId: r.cellId,
           seq: String(r.seq),
           // The only endpoint-chosen value in this result, and so the only one that needs a bound.
           // Unsanitised on purpose — structured output is a named field of a declared schema, not a
           // line in a text block — but SIZE is a separate axis from injection, and it was uncapped
-          // here while the announcement channel was capped on both.
-          shardId: boundedOrMarker(r.shardId),
+          // here while the announcement channel was capped on both. Bound applied above, once.
+          shardId,
           commitmentHash: r.commitmentHash,
         },
       );
@@ -315,22 +350,36 @@ server.registerTool(
         // unfenced for the same reason inverted — it is the agent's own data, and `  ! `/`  > ` are
         // exactly the signals that distinguish the two.
         //
-        // The split covers EVERY line terminator a renderer may honour, not just the ASCII ones. An
+        // The split covers the line terminators of CPython's `str.splitlines()`: LF, CR, CRLF, VT,
+        // FF, FS, GS, RS, NEL, U+2028 and U+2029. That set is CITED, not asserted — it is a superset
+        // of ECMAScript's LineTerminator, and Python is the reference MCP SDK's language, so it is the
+        // widest set a host in this ecosystem is known to honour. Anything outside it is a gap this
+        // comment does NOT claim to have closed.
+        //
+        // The wording matters because the universal form of this claim has now been wrong twice. An
         // earlier cut split on CR, LF and CRLF alone and claimed that closed line-minting
-        // "completely"; MEASURED, it did not. U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR,
-        // U+0085 NEL, U+000B and U+000C each turned one marked line into THREE rendered lines, two of
-        // them unmarked, one matching the own-memory shape exactly. Its own argument for including a
-        // bare CR — that a host honouring it starts a fresh visual line — applies verbatim to all five,
-        // and this is the one render site where they survive, because it deliberately does not scrub.
-        // Normalising a line ending is the one alteration worth making — every other byte of the
-        // memory survives verbatim, which is the property scrubbing could not offer.
+        // "completely"; MEASURED, it did not — U+2028, U+2029, NEL, VT and FF each turned one marked
+        // line into three rendered lines, two unmarked, one matching the own-memory shape exactly.
+        // Its replacement then claimed the split covered "EVERY line terminator a renderer may
+        // honour", and measured, FS, GS and RS (U+001C-U+001E) did the same thing again: emitted as
+        // ONE marked line here, they became two lines under `str.splitlines()`, the second unmarked
+        // and matching `^ {2}\[[^\]\n]*\] seq=`. The sweep behind that word had only ever looked at
+        // the JS set. A universal quantifier over a set nobody enumerated is not a stronger claim
+        // than a cited one — it is an unfalsifiable one, and it failed the same way twice.
+        //
+        // The argument for including a bare CR — a host honouring it starts a fresh visual line —
+        // applies verbatim to all ten. This is the one render site where they survive, because it
+        // deliberately does not scrub; every other site's `safeField` replaces the whole
+        // below-U+0020 range, which is why the gap was unique to this line. Normalising a line ending
+        // is the one alteration worth making — every other byte of the memory survives verbatim,
+        // which is the property scrubbing could not offer.
         //
         // Length is deliberately NOT capped, matching the own-memory branch: truncating a memory the
         // agent explicitly requested would corrupt the answer to its own question. The residual is a
         // sharer who was already pinned choosing to store a very large cell — a cost the recipient
         // opted into, not one the endpoint can impose.
         const sharedBody = cell.plaintext
-          .split(/\r\n|[\n\r\u2028\u2029\u0085\u000b\u000c]/)
+          .split(/\r\n|[\n\r\u2028\u2029\u0085\u000b\u000c\u001c\u001d\u001e]/)
           .map((l) => `  > ${l}`)
           .join('\n');
         return ok(
