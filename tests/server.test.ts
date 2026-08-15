@@ -387,3 +387,64 @@ test('server.ts: `join` CLI prints the hosted Stripe checkout link', async () =>
     await new Promise<void>((r) => mock.server.close(() => r()));
   }
 });
+
+test('server.ts: `join` CLI cannot have extra instructions forged into it', async () => {
+  // A terminal is a rendering surface too. This block is addressed to a HUMAN and tells them to open
+  // a link and pay, so a newline in the endpoint-chosen checkout URL appends further instructions in
+  // the tool's own voice — including a fabricated `identity (agentIdHash):` line, which the operator
+  // may then publish for others to pin. `startsWith('https://')` was the only check, and a `\x1b[2K\r`
+  // additionally erases the legitimate URL on a real terminal.
+  //
+  // Written because the fence for this went in with no test: removing it from BOTH call sites left
+  // the whole suite green, which is the same "a fence indistinguishable from its own absence" this
+  // branch has now hit three times.
+  const HOSTILE =
+    'https://checkout.example/pay\r\n\r\n  SAIHM — subscribe this identity to activate your memory:' +
+    '\r\n\r\n  https://attacker.example/steal\r\n\r\n  identity (agentIdHash): ' +
+    '0'.repeat(64);
+  const mock = startMock({ checkoutUrl: HOSTILE });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const out = await new Promise<string>((res, rej) => {
+      const d = startServer(mock.base() + '/mcp', ['join']);
+      let o = '';
+      d.proc.stdout!.on('data', (c) => (o += c));
+      d.proc.on('close', () => res(o));
+      d.proc.on('error', rej);
+      setTimeout(() => {
+        d.proc.kill();
+        rej(new Error('join timeout'));
+      }, 12000);
+    });
+    // Built with escapes: a literal U+2028 in this SOURCE file is itself a line terminator and
+    // breaks the parse, which is the same property being asserted about the rendered output.
+    const RENDERED = new RegExp('\\r\\n|[\\n\\r\\u2028\\u2029\\u0085\\u000b\\u000c]');
+    const rendered = out.split(RENDERED);
+    // STRUCTURE, not vocabulary — the same distinction the render-fence tests make. A URL is
+    // free-form, so it can only be sanitised, never checked, and the attacker's text therefore
+    // survives flattened into the one line it was interpolated into. That residue is by design and
+    // is bounded. What must not survive is a LINE: a second instruction, in the tool's own voice,
+    // that a human reads as the next step.
+    assert.ok(
+      !rendered.some((l) => /^\s*https?:\/\/attacker\.example/.test(l)),
+      `an attacker-authored URL began a line of its own:\n${out}`,
+    );
+    assert.equal(
+      rendered.filter((l) => l.trimStart().startsWith('identity (agentIdHash):')).length,
+      1,
+      `the endpoint forged an extra identity line:\n${out}`,
+    );
+    // The whole payload lands on ONE line, because that is what the fence guarantees: it cannot add
+    // lines. Five separators went in; the block must still have the line count the server composed.
+    assert.ok(
+      rendered.filter((l) => l.includes('attacker.example')).length === 1,
+      `the payload was spread across lines rather than flattened into one:\n${out}`,
+    );
+    assert.ok(!out.includes('\x1b'), `an ANSI escape survived to the terminal:\n${out}`);
+    // The legitimate half still renders and is still usable — a fence that made the real URL
+    // unopenable would trade one failure for another.
+    assert.ok(out.includes('https://checkout.example/pay'), `the real URL was lost:\n${out}`);
+  } finally {
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});

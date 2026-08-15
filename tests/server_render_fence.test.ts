@@ -14,6 +14,8 @@ import { strict as assert } from 'node:assert';
 import {
   MALFORMED,
   MAX_ERROR_MESSAGE_CHARS,
+  MAX_STRUCTURED_SCALAR_CHARS,
+  boundedOrMarker,
   safeField,
   safeScalar,
   hexOrMarker,
@@ -171,6 +173,34 @@ test('failText fences a PLAIN Error and a non-Error throw too — no unfenced br
   assert.equal(failText(new Error('boom')), 'boom', 'an Error contributes its message, not its toString');
   assert.equal(failText('boom'), 'boom');
   assert.equal(failText({ toString: () => 'boom' }), 'boom', 'the String(e) arm still stringifies');
+});
+
+test('boundedOrMarker REJECTS a non-string rather than fabricating one', () => {
+  // `String(v)` here invented values that read as data the endpoint had sent: an omitted field became
+  // the string "undefined", `true` became "true", a nested array became "1,2" and an object became
+  // "[object Object]" — each entering structuredContent as a declared string, and each a malformed
+  // value normalised into a plausible one, which is the thing this module forbids.
+  for (const v of [undefined, null, true, 42, [[1], [2]], { a: 1 }, () => 1])
+    assert.equal(boundedOrMarker(v), MALFORMED, `${String(v)} must not be stringified into data`);
+  // A real value passes through untouched — including non-ASCII, because structured output is
+  // deliberately unsanitised and this is a SIZE bound, not a fence.
+  assert.equal(boundedOrMarker('PRO'), 'PRO');
+  assert.equal(boundedOrMarker('shard-ü-01'), 'shard-ü-01');
+  assert.equal(boundedOrMarker('x'.repeat(MAX_STRUCTURED_SCALAR_CHARS)), 'x'.repeat(MAX_STRUCTURED_SCALAR_CHARS));
+  assert.equal(boundedOrMarker('x'.repeat(MAX_STRUCTURED_SCALAR_CHARS + 1)), MALFORMED);
+});
+
+test('a value String() cannot survive becomes a marker, not a thrown stack overflow', () => {
+  // An 8 KB response could otherwise hold four of the eight tools unusable: `String(v)` recurses
+  // through nested arrays, and the RangeError escaped every fence to reach the agent as a bare
+  // "Maximum call stack size exceeded" with no SAIHM prefix and no attribution.
+  const deep = JSON.parse('['.repeat(4000) + '"x"' + ']'.repeat(4000)) as unknown;
+  assert.equal(safeScalar(deep), MALFORMED);
+  assert.equal(boundedOrMarker(deep), MALFORMED);
+  // A shallow one still stringifies normally — the guard must not swallow legitimate values.
+  assert.equal(safeScalar(JSON.parse('[["x"]]')), 'x');
+  // The same guard covers a value whose own toString throws.
+  assert.equal(safeScalar({ toString: () => { throw new Error('nope'); } }), MALFORMED);
 });
 
 test('the error budgets are PINNED, not merely self-consistent', () => {

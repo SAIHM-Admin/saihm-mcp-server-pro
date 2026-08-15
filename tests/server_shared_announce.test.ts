@@ -221,7 +221,19 @@ test('off-contract fields at LEGAL length are replaced by a marker, never render
     }),
   ]);
   const pointer = text.split('\n').find((l) => l.startsWith('  ! POINTER'))!;
-  assert.ok(pointer.length <= 201, `pointer line must stay bounded: ${pointer.length} chars`);
+  // EXACT, not a bound. `<= 201` could not fail here: every field in this fixture is either fixed
+  // length or already at the cap, so the line is 138 characters and nothing can move it — the
+  // assertion held whatever the renderer did, and it permitted one character more than the 200-char
+  // ceiling the same file derives and pins at the WORST CASE test below.
+  //
+  // 138 = 41 fixed + 64 cellId + 3 x 11 markers. Every checked field is off-contract at a LEGAL
+  // length, so all three render `(malformed)` and none of the endpoint's 64-character values reach
+  // the line: that substitution is the property under test, and its arithmetic is the assertion.
+  assert.equal(
+    pointer.length,
+    138,
+    `three checked fields must collapse to 11-char markers: ${pointer.length} chars: ${pointer}`,
+  );
   // cellId is free-form (a writer picks it), so it is sanitised, not checked — and at exactly the
   // field cap it renders WHOLE with no truncation marker.
   assert.match(pointer, /cell=C{64} /);
