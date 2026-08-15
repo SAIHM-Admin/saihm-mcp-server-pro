@@ -110,20 +110,31 @@ const MAX_SEQ = (1n << 64n) - 1n; // wire uint64 ceiling (mirrors client-pro wir
  * bounded `structuredContent`. Measured against this client before the field/total caps below existed:
  * a 16,753,811-byte response produced a 6,827-byte text block and a 16,754,638-byte structuredContent
  * — 2,455x — in a single successful recall. Both axes of THIS channel are now capped: measured after,
- * a 16,777,216-byte body yields at most a 3,547-byte text block and a 51,003-byte structuredContent.
+ * a 16,777,216-byte body yields at most a 3,595-byte text block and a 51,515-byte structuredContent.
  *
- * Two limits on that claim, both measured, neither hypothetical:
+ * Those two figures are worth stating as MEASURED and re-measured, because the pair that stood here
+ * before ("3,547" and "51,003") were both wrong, and wrong in ways that matter more than the digits.
+ * 3,547 was a stale ceiling: the worst case needs an OFF-CONTRACT scope, which renders the 11-char
+ * `(malformed)` marker rather than the 9-char `readwrite` the previous fixture used. 51,003 was a
+ * `String.length`, not a byte count — the exact CHARS-for-BYTES confusion the paragraph below warns
+ * about, eleven lines above the warning. Both were written from arithmetic rather than from a run.
+ *
+ * Two limits on the claim, both measured, neither hypothetical:
  *  - It is a claim about the ANNOUNCEMENT channel only. The endpoint's `error` string reaches the same
  *    tool's output through {@link SaihmEndpointError}; until it was truncated at the mint (see
  *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes — 619x the worst case here.
  *  - The budgets below count UTF-16 code units (`String.length`), NOT bytes. For the ASCII an endpoint
- *    has any reason to send the two coincide, but 64 astral or control characters per field measured
- *    111,415 UTF-8 bytes of `structuredContent` against a 32,768-unit budget (~3.4x). The text block is
- *    unaffected — the server sanitises to ASCII and caps separately — so the residue is confined to
- *    structured-output hosts and is bounded, not a flood. Named here so the next reader does not have
- *    to re-measure it, and so `CHARS` is not mistaken for `BYTES`.
+ *    has any reason to send the two coincide; for what a hostile one can send they do not. Measured
+ *    against the 32,768-unit budget: control characters, which JSON-escape to six bytes per unit,
+ *    reach ~215 KB of `structuredContent` — 6.6x, not the "~3.4x" claimed here before. (Astral
+ *    characters cannot be the worst case, and the fixture that produced the old figure could not have
+ *    existed: one astral character is TWO code units, so 64 of them exceed the 64-unit field cap and
+ *    the row is always dropped. The widest admissible astral field is 32 characters.) The text block
+ *    is unaffected — the server sanitises to ASCII and caps separately — so the residue is confined
+ *    to structured-output hosts and is bounded, not a flood. Named here so the next reader does not
+ *    have to re-measure it, and so `CHARS` is not mistaken for `BYTES`.
  */
-const MAX_SHARED_ANNOUNCEMENTS = 256;
+export const MAX_SHARED_ANNOUNCEMENTS = 256;
 /**
  * Per-field character ceiling for an announcement. Every field has a real shape at or below this — a
  * sharer is exactly 64 hex, a scope is one of two words, an epoch is a handful of digits, and a
@@ -131,10 +142,19 @@ const MAX_SHARED_ANNOUNCEMENTS = 256;
  * many bytes an unauthenticated row may spend.
  *
  * It is deliberately EQUAL to the server's per-field render budget, and that equality is the whole
- * point: it makes one invariant true end to end — every announcement this client keeps renders WHOLE
- * in the text block, so every pointer an agent is shown is a pointer it can act on. Were this cap the
- * larger of the two, rows in the gap would render truncated, and a truncated `cellId` cannot be
- * passed back to resolve the grant — an actionable-looking pointer that is not actionable.
+ * point: it makes one invariant true end to end — every announcement this client keeps renders its
+ * `cellId` WHOLE in the text block, never truncated. Were this cap the larger of the two, rows in the
+ * gap would render a cut `cellId`, which cannot be passed back to resolve the grant: an
+ * actionable-looking pointer that is not actionable.
+ *
+ * `cellId` and no other field, which an earlier cut of this comment overstated into "every pointer an
+ * agent is shown is a pointer it can act on". Only `cellId` is free-form and therefore only `cellId`
+ * goes through the length-capped sanitiser. The other three have contracts, so the renderer CHECKS
+ * them instead — and a kept row whose `sharer`, `scope` or `expiryEpoch` is off-contract but within
+ * this cap renders that field as `(malformed)`. An uppercase 64-hex sharer is the clearest case: it
+ * is admitted here, and shown as malformed there, because the shipped `fromHex` would throw on it.
+ * That is the correct outcome and the coverage says so, but it is not the outcome the old sentence
+ * described, and the gap between the two is exactly where an unusable pointer would hide.
  *
  * A row with any field longer is therefore dropped, not truncated. That costs nothing a hostile
  * endpoint does not already have (it can simply omit the row) and matches the skip-never-throw policy
@@ -148,7 +168,7 @@ export const MAX_ANNOUNCEMENT_FIELD_CHARS = 64;
  * 64KB; this binds earlier, whenever rows average more than ~32 chars per field, which is already
  * well above every real row. Exceeding it reports truncation exactly like the row cap, never silently.
  */
-const MAX_ANNOUNCEMENT_TOTAL_CHARS = 32 * 1024;
+export const MAX_ANNOUNCEMENT_TOTAL_CHARS = 32 * 1024;
 
 /**
  * The hosted, non-custodial operator. `server.json` already declares this as
@@ -325,14 +345,26 @@ async function readBodyCapped(
 }
 
 // ── Result shapes (the blind endpoint's JSON; bigint -> decimal string, bytes -> hex) ────────────
+/**
+ * The receipt for one write. Three of the four fields are LOCAL — {@link SaihmProClient.remember}
+ * composes them from the envelope this process sealed, not from the endpoint's response — so the
+ * provenance is stated per field below and is not merely a matter of what the endpoint chose to echo.
+ */
 export interface RememberResult {
-  /** The cell identifier this content was stored under (caller-supplied or client-generated). */
+  /** OURS: the cell identifier this content was stored under (caller-supplied or client-generated). */
   cellId: string;
-  /** Opaque storage-shard id (hex). */
+  /**
+   * THE ENDPOINT'S: opaque storage-shard id (hex). The only field here with no local authority — it
+   * names endpoint-side storage — so it is the only one a hostile endpoint can choose. Treat it as
+   * display-only and fence it before it reaches an agent's context.
+   */
   shardId: string;
-  /** The monotonic per-cell sequence number this write was committed at (decimal string). */
+  /** OURS: the monotonic per-cell sequence number this write was committed at (decimal string). */
   seq: string;
-  /** sha256(ciphertext) (hex) — the anchorable commitment to the stored bytes. */
+  /**
+   * OURS: sha256(ciphertext) (hex) — the anchorable commitment to the stored bytes, read off the
+   * envelope sealed in this process. An endpoint-supplied commitment would commit to nothing.
+   */
   commitmentHash: string;
 }
 
@@ -1767,7 +1799,24 @@ export class SaihmProClient {
         this.recallCache.remove(cellId);
       }
     }
-    return r;
+    // The receipt is composed from what WE authenticated, not from `r`. Returning the endpoint's echo
+    // was the wider mistake: the cache three lines up was already careful to take seq + commitmentHash
+    // "from the authenticated envelope, never the endpoint's echo", so the distinction was understood —
+    // and then the echo was handed straight to a caller that renders it into the agent's text block as
+    // a RECEIPT for a write the agent explicitly asked for. That is a more credible channel than the
+    // announcement list these caps were built for. All three values are ours already: `cellId` is
+    // caller-supplied or client-generated, `seq` is this client's monotonic counter, and
+    // `commitmentHash` is read off the envelope THIS process sealed. Taking them from the response
+    // bought nothing and let the endpoint choose them.
+    return {
+      cellId,
+      seq: seq.toString(10),
+      commitmentHash: toHex(env.publicMeta.commitmentHash),
+      // The one field with no local authority — it names endpoint-side storage, so only the endpoint
+      // can know it. Coerced to the declared type rather than cast into a lie (an omitted field would
+      // otherwise be `undefined` typed `string`), and fenced again at every render site.
+      shardId: String(r?.shardId ?? ''),
+    };
   }
 
   private async recallRawOne(
@@ -1831,7 +1880,12 @@ export class SaihmProClient {
       const resp = await this.call<unknown>('saihm_recall', {
         knownCellIds: this.recallCache.knownCellIds(),
       });
-      const isDelta = (r: unknown): r is { mode: 'delta'; added: unknown[]; liveCellIds: string[] } =>
+      // `liveCellIds` is narrowed to `unknown[]`, NOT `string[]`, because `Array.isArray` is all this
+      // predicate checks and claiming otherwise would be a type-level lie in exactly the place a
+      // reader looks for reassurance. `added` was already honestly typed `unknown[]`, which made the
+      // asymmetry read as deliberate rather than as an oversight. The elements are filtered below
+      // before they reach the cache; the claim and the check now agree.
+      const isDelta = (r: unknown): r is { mode: 'delta'; added: unknown[]; liveCellIds: unknown[] } =>
         typeof r === 'object' &&
         r !== null &&
         !Array.isArray(r) &&
@@ -1840,7 +1894,12 @@ export class SaihmProClient {
         Array.isArray((r as { liveCellIds?: unknown }).liveCellIds);
       if (isDelta(resp)) {
         const { cells: added, announcements, announcementsTruncated } = this.openRecallRows(resp.added);
-        this.recallCache.merge(added, resp.liveCellIds);
+        // Non-strings are dropped rather than coerced. `new Set([...])` on a mixed array would treat
+        // every non-string as an id that is NOT live, and `merge` prunes exactly what is missing from
+        // that set — so a response of `[null]` would evict the whole cache while looking well-formed.
+        // The endpoint can already prune by sending `[]`, so this bounds a type confusion, not a
+        // capability; it is here because the cast is what made the confusion invisible.
+        this.recallCache.merge(added, resp.liveCellIds.filter((id): id is string => typeof id === 'string'));
         return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated };
       }
       if (!Array.isArray(resp)) {
@@ -1949,10 +2008,9 @@ export class SaihmProClient {
             !(typeof row.expiryEpoch === 'string' || row.expiryEpoch == null)
           )
             continue;
-          // BYTE AXIS. Checked before the row cap, because a single row can exceed the whole budget.
-          // A row with an over-long field is dropped outright and does NOT set `truncated`: it is a
-          // malformed row like any other, and flagging it would let the endpoint make every listing
-          // claim to be incomplete.
+          // FIELD CAP. A row with an over-long field is dropped outright and does NOT set
+          // `truncated`: it is a malformed row like any other, and flagging it would let the endpoint
+          // make every listing claim to be incomplete.
           const epochChars = row.expiryEpoch == null ? 0 : row.expiryEpoch.length;
           if (
             row.sharer.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
@@ -1961,32 +2019,51 @@ export class SaihmProClient {
             epochChars > MAX_ANNOUNCEMENT_FIELD_CHARS
           )
             continue;
-          // The running total is over KEPT rows only, so duplicates and dropped rows cannot consume
-          // the budget. `continue`, never `break`: the scan must keep running to reach this agent's
-          // OWN cells, which arrive interleaved with announcements and whose loss would be silent —
-          // and, on the cached path, would then be written through to the on-disk cache by replaceAll.
-          if (announcedChars + row.sharer.length + row.cellId.length + row.scope.length + epochChars >
-              MAX_ANNOUNCEMENT_TOTAL_CHARS) {
+          // DEDUP FIRST, ahead of both caps. Injective in (sharer, cellId): a plain
+          // `${sharer}:${cellId}` collapses ("a:b","c") onto ("a","b:c"), which an endpoint choosing
+          // both fields could use to suppress an announcement. (sharer, cellId) IS the identity of a
+          // grant, so two rows differing only in scope or expiry are one pointer, not two — the
+          // resolved grant is whatever the endpoint honours at read.
+          //
+          // Ordering it first is what makes a repeat FREE. A duplicate cannot withhold anything — the
+          // grant it names is already in the list — so it must not set `truncated`, and it must not
+          // be weighed against a budget it will never be added to. Both caps used to be TESTED
+          // against it before dedup was consulted, with one measured consequence and one latent one:
+          //
+          //  - MEASURED: a repeat arriving on a full budget set `announcementsTruncated` on a listing
+          //    from which nothing had been withheld. The server renders that flag as `(LIST
+          //    TRUNCATED: the endpoint announced more)` — an assertion to the agent, in the trusted
+          //    channel, that grants exist beyond what it can see, raised at the endpoint's choosing.
+          //  - LATENT: the budget was never actually CONSUMED by a repeat, because `announcedChars +=`
+          //    has always sat after the dedup check. That made the safe behaviour an accident of
+          //    statement order rather than a property: moving that one line above this one turns a
+          //    repeated announcement into real suppression — spend the whole budget on copies of one
+          //    legal row, and every genuine grant arriving later is dropped behind that same banner.
+          //
+          // The budget is a bound on DISTINCT unauthenticated rows. Enforcing it by ORDER, and
+          // pinning both halves in tests, is what stops that from being one refactor away.
+          const key = JSON.stringify([row.sharer, row.cellId]); // opaque; never parsed back apart
+          if (seenShared.has(key)) continue;
+          const rowChars =
+            row.sharer.length + row.cellId.length + row.scope.length + epochChars;
+          // BYTE AXIS. Checked before the row cap, because a single row can exceed the whole budget.
+          // `continue`, never `break`: the scan must keep running to reach this agent's OWN cells,
+          // which arrive interleaved with announcements and whose loss would be silent — and, on the
+          // cached path, would then be written through to the on-disk cache by replaceAll.
+          if (announcedChars + rowChars > MAX_ANNOUNCEMENT_TOTAL_CHARS) {
             announcementsTruncated = true;
             continue;
           }
-          // Cap BEFORE the dedup insert, so `seenShared` is bounded by the cap and not by the row
-          // count: checking it after would let a 16MiB body of unique announcements retain ~270k keys
-          // to keep 256 of them, which is the very context/memory flood the cap exists to stop. The
-          // trade is that repeats arriving past the cap also set `truncated`; erring towards "there
-          // may be more" is the safe direction, and only a hostile endpoint sends that shape.
+          // ROW AXIS. Both caps sit BEFORE the `seenShared` insert, so the key set is bounded by what
+          // is KEPT and not by what was announced: inserting first would let a 16MiB body of unique
+          // announcements retain ~270k keys to keep 256 of them, which is the very memory flood the
+          // cap exists to stop.
           if (announcements.length >= MAX_SHARED_ANNOUNCEMENTS) {
             announcementsTruncated = true;
             continue;
           }
-          // Injective in (sharer, cellId): a plain `${sharer}:${cellId}` collapses ("a:b","c") onto
-          // ("a","b:c"), which an endpoint choosing both fields could use to suppress an announcement.
-          // (sharer, cellId) IS the identity of a grant, so two rows differing only in scope or expiry
-          // are one pointer, not two — the resolved grant is whatever the endpoint honours at read.
-          const key = JSON.stringify([row.sharer, row.cellId]); // opaque; never parsed back apart
-          if (seenShared.has(key)) continue;
           seenShared.add(key);
-          announcedChars += row.sharer.length + row.cellId.length + row.scope.length + epochChars;
+          announcedChars += rowChars;
           announcements.push({
             sharer: row.sharer,
             cellId: row.cellId,
