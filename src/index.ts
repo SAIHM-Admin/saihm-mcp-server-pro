@@ -15,5 +15,7 @@ export type {
   RememberOpts,
   ShareGrant,
   SharedReadGrant,
+  SharedAnnouncement,
+  RecallWithShared,
   SaihmProClientOpts,
 } from './client.js';

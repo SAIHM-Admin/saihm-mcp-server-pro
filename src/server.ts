@@ -29,12 +29,24 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join as pathJoin } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  MALFORMED,
+  safeField,
+  safeScalar,
+  hexOrMarker,
+  scopeOrMarker,
+  epochOrMarker,
+  failText,
+} from './render_fence.js';
+
 import { z } from 'zod';
 import {
   SaihmProClient,
   SaihmEndpointError,
   selfJoinEnabled,
   ensureSelfJoinIdentityEnv,
+  MAX_ANNOUNCEMENT_FIELD_CHARS,
+  MAX_ERROR_CODE_CHARS,
   type FreeDevicePrompt,
   type FreeEntitlementResult,
 } from './client.js';
@@ -70,13 +82,7 @@ const ok = (text: string, structuredContent?: Record<string, unknown>) => ({
 
 /** Surface any error as a typed MCP tool error (never crash the server). */
 function fail(e: unknown) {
-  const text =
-    e instanceof SaihmEndpointError
-      ? `SAIHM error [${e.code}] (status ${e.status}): ${e.message}`
-      : e instanceof Error
-        ? e.message
-        : String(e);
-  return { content: [{ type: 'text' as const, text }], isError: true as const };
+  return { content: [{ type: 'text' as const, text: failText(e) }], isError: true as const };
 }
 
 server.registerTool(
@@ -159,6 +165,31 @@ server.registerTool(
       memories: z.array(
         z.object({ cellId: z.string(), seq: z.string(), plaintext: z.string() }),
       ),
+      // MUST be declared, and MUST be emitted by every branch — both halves are load-bearing, for
+      // different reasons. DECLARED: this SDK's output validation only throws on failure (it discards
+      // the parsed value), so an undeclared key is not stripped here — but it is also not contractual,
+      // and this SDK publishes the outputSchema with `additionalProperties:false`, so a consumer
+      // validating against it rejects the whole response over an undeclared key. EMITTED EVERYWHERE:
+      // a declared key is REQUIRED, so a branch that omits it fails validation — and the failure mode
+      // is NOT a protocol error the host surfaces. `validateToolOutput` throws an McpError, the tool
+      // dispatcher re-throws only `UrlElicitationRequired`, and everything else is converted into a
+      // normal tool result with `isError: true` whose text is the validation message. So an omitted
+      // key silently degrades a successful recall into an error string handed to the MODEL, inside a
+      // 200 response — visible to the agent, invisible to any caller checking for a JSON-RPC error.
+      // Always present, `[]` when there are none — so gate-off emits a DECLARED
+      // constant rather than drifting.
+      shared: z.array(
+        z.object({
+          sharer: z.string(),
+          cellId: z.string(),
+          scope: z.string(),
+          // Decimal string, or null for a grant with no expiry (the server's default). Never a number.
+          expiryEpoch: z.string().nullable(),
+          verified: z.literal(false),
+        }),
+      ),
+      /** True when the endpoint announced more grants than the client keeps; the list above is cut. */
+      sharedTruncated: z.boolean(),
     },
     annotations: {
       title: 'Recall',
@@ -185,16 +216,23 @@ server.registerTool(
           sharerRecord,
           cellId,
         });
+        // `shared`/`sharedTruncated` are declared on the outputSchema, so this branch emits them too —
+        // an omitted key is not the same as an empty one, and a consumer must not have to distinguish
+        // "no announcements" from "this branch does not report announcements".
         if (!cell) {
           return ok('No shared cell found (no live grant to you, or content unavailable).', {
             count: 0,
             memories: [],
+            shared: [],
+            sharedTruncated: false,
           });
         }
         const mem = { cellId: cell.cellId, seq: String(cell.seq), plaintext: cell.plaintext };
         return ok(`SHARED-RECALL [${cell.cellId}] seq=${cell.seq} | ${cell.plaintext}`, {
           count: 1,
           memories: [mem],
+          shared: [],
+          sharedTruncated: false,
         });
       }
 
@@ -206,18 +244,103 @@ server.registerTool(
         );
       }
 
-      // Own-memories branch (unchanged).
-      const cells = await getClient().recall(query);
+      // Own-memories branch, plus any share announcements the SAME response carried. Both come from
+      // one call: this client is a process-wide singleton and the SDK does not serialise tool handlers,
+      // so reading announcements from client state would let two concurrent recalls cross-attribute
+      // their sets — an interleaving a hostile endpoint chooses simply by delaying one response.
+      const { cells, announcements, announcementsTruncated } =
+        await getClient().recallWithShared(query);
       const memories = cells.map((c) => ({
         cellId: c.cellId,
         seq: String(c.seq),
         plaintext: c.plaintext,
       }));
-      if (cells.length === 0) return ok('No memories stored.', { count: 0, memories });
-      const lines = [`RECALL ${cells.length} memories`];
-      for (const c of cells)
-        lines.push(`  [${c.cellId}] seq=${c.seq} | ${c.plaintext}`);
-      return ok(lines.join('\n'), { count: cells.length, memories });
+      // Pointers to cells OTHER agents granted to this one. Reported separately from `memories` and
+      // never folded into `count`: they are unauthenticated endpoint claims carrying no content, and
+      // an agent that mistook one for a held memory would be reporting something it has never read.
+      // The keyword filter is deliberately not applied — there is no plaintext here to match on.
+      const shared = announcements.map((a) => ({
+        sharer: a.sharer,
+        cellId: a.cellId,
+        scope: a.scope,
+        expiryEpoch: a.expiryEpoch,
+        verified: false as const,
+      }));
+      // Every line EXCEPT the banner is prefixed `  ! `, so no field the ENDPOINT chose can read as a
+      // memory and a replayed footer cannot appear to close the block early. The banner is
+      // server-composed and interpolates no endpoint-chosen text, so it needs no marker of its own.
+      //
+      // Scope of that guarantee, precisely: it holds against the endpoint, which is the party this
+      // block defends against. It is NOT a claim that the `  ! ` shape is unreachable in general —
+      // own-cell `plaintext` is interpolated raw below, so a memory whose CONTENT contains a newline
+      // followed by `  ! POINTER …` renders a line of this shape. That content is authenticated as
+      // this agent's own cell; authenticated means it is the agent's, not that it is trustworthy, so
+      // an agent that stored attacker-influenced text can be shown a pointer its own memory minted.
+      // The damage is bounded — resolving any pointer still needs a sharer identity record pinned
+      // OUT-OF-BAND, which a forged line cannot supply — and the general problem (stored untrusted
+      // content re-read as instruction) is neither created nor solved here.
+      //
+      // Only as many pointers as an agent can actually use are rendered here. The cap on the LIST is
+      // the client's (256); this second, tighter cap is on the CHANNEL, because the text block is what
+      // lands in the agent's context on the tool the session-bootstrap prompt calls first. It is a
+      // budget on ADVERSARY PROSE, not a display preference: `cellId` is genuinely free-form, so it
+      // can only be sanitised, never checked. MEASURED worst case at RENDER_LIMIT 16: the free-form
+      // `cellId` contributes 16 × 64 = 1,024 characters, but `sharer` and `expiry` are endpoint-chosen
+      // too, so the endpoint-supplied total is 16 × (64 + 64 + 20) = 2,368 and the whole text block
+      // tops out at 3,547 bytes. (An earlier cut of this comment claimed the cellId figure WAS the
+      // per-recall total and called it "near 1 KB" — it was counting one of the three fields.) That
+      // still lists more grants than a real agent is likely to hold; the withheld count is always
+      // stated, and `structuredContent.shared` stays complete.
+      const RENDER_LIMIT = 16;
+      const rendered = announcements.slice(0, RENDER_LIMIT);
+      const unrendered = announcements.length - rendered.length;
+      const sharedLines =
+        announcements.length === 0
+          ? []
+          : [
+              `SHARED WITH YOU: ${announcements.length} unverified pointer(s) — no content, nothing below is authenticated${
+                announcementsTruncated ? ' (LIST TRUNCATED: the endpoint announced more)' : ''
+              }`,
+              ...rendered.map(
+                (a) =>
+                  // cellId is the only free-form field — a writer picks it, so it can be any string and
+                  // must go through the sanitiser. The other three have contracts the endpoint cannot
+                  // widen, so they are CHECKED rather than sanitised: a conforming value renders whole
+                  // (the sharer in particular must render in FULL, since it IS the pin the footer tells
+                  // the agent to supply, and a truncated hash is one it cannot use), and a
+                  // non-conforming one renders as a fixed marker carrying none of the endpoint's bytes.
+                  // The render budget IS the client's per-field cap, imported rather than restated:
+                  // every kept announcement then renders WHOLE, so no pointer is ever shown truncated
+                  // and therefore unusable. safeField's own truncation stays as a backstop — this
+                  // renderer must be safe for any input, not only for what today's client admits.
+                  `  ! POINTER cell=${safeField(a.cellId, MAX_ANNOUNCEMENT_FIELD_CHARS)} sharer=${hexOrMarker(a.sharer)} ` +
+                  `scope=${scopeOrMarker(a.scope)} expires=${epochOrMarker(a.expiryEpoch)}`,
+              ),
+              // States the withheld count WITHOUT naming where the rest can be read. `structuredContent`
+              // is deliberately unsanitised, so a line in the trusted channel that sends the agent
+              // there is a server-composed instruction to go read attacker-chosen bytes — the two
+              // halves compose into the very injection the sanitising exists to prevent. The count is
+              // the honest part and is kept; the routing is not.
+              ...(unrendered > 0 ? [`  ! …and ${unrendered} more withheld from this list.`] : []),
+              "  ! To read one, supply that sharer's identity record (obtained out-of-band) as",
+              '  ! sharerPinnedAgentIdHashHex + sharerRecord + cellId. Until then these are claims, not memories.',
+            ];
+      // "No memories stored." is kept verbatim whenever there are no OWN cells, announcements or not:
+      // it is the string existing consumers and tests key on, and losing it the moment an endpoint
+      // announces a grant would be a live behaviour change triggered by a third party's action.
+      const lines =
+        cells.length === 0
+          ? ['No memories stored.']
+          : [
+              `RECALL ${cells.length} memories`,
+              ...cells.map((c) => `  [${c.cellId}] seq=${c.seq} | ${c.plaintext}`),
+            ];
+      return ok([...lines, ...sharedLines].join('\n'), {
+        count: cells.length,
+        memories,
+        shared,
+        sharedTruncated: announcementsTruncated,
+      });
     } catch (e) {
       return fail(e);
     }
@@ -243,7 +366,8 @@ server.registerTool(
     try {
       const r = await getClient().forget(id);
       return ok(
-        `FORGOTTEN [${r.cellId}] complete=${r.complete} sharesPurged=${r.sharesPurged} epoch=${r.epoch}`,
+        `FORGOTTEN [${safeScalar(r.cellId)}] complete=${safeScalar(r.complete)} ` +
+          `sharesPurged=${safeScalar(r.sharesPurged)} epoch=${safeScalar(r.epoch)}`,
       );
     } catch (e) {
       return fail(e);
@@ -279,7 +403,15 @@ server.registerTool(
     try {
       const d = await getClient().status();
       return ok(
-        `SAIHM Session\n  agent=${d.agentIdHashHex.slice(0, 16)}…  tier=${d.tier}  custody=${d.custody}\n  shards=${d.activeShardCount}  sharing=${d.activeSharingContracts}  bfsi=${d.bfsi.toFixed(3)} (R=${d.bfsi_R} M=${d.bfsi_M})  epoch=${d.snapshotEpoch}`,
+        // Every interpolated value is endpoint-chosen (`status()` is an unvalidated cast), and the
+        // `\n  ` here is OURS — which is exactly why a raw field carrying its own newline could mint
+        // a further line in this block. `bfsi` is checked rather than fenced because `.toFixed` on a
+        // non-number throws, and failing closed beats rendering a marker for a number.
+        `SAIHM Session\n  agent=${safeScalar(d.agentIdHashHex).slice(0, 16)}…  ` +
+          `tier=${safeScalar(d.tier)}  custody=${safeScalar(d.custody)}\n  ` +
+          `shards=${safeScalar(d.activeShardCount)}  sharing=${safeScalar(d.activeSharingContracts)}  ` +
+          `bfsi=${typeof d.bfsi === 'number' ? d.bfsi.toFixed(3) : MALFORMED} ` +
+          `(R=${safeScalar(d.bfsi_R)} M=${safeScalar(d.bfsi_M)})  epoch=${safeScalar(d.snapshotEpoch)}`,
         {
           agentIdHash: d.agentIdHashHex,
           tier: String(d.tier),
@@ -348,7 +480,8 @@ server.registerTool(
         ...(expiryEpoch ? { expiryEpoch: BigInt(expiryEpoch) } : {}),
       });
       return ok(
-        `SHARED cell=${r.cellId} sharer=${r.sharer.slice(0, 16)}… recipient=${r.recipient.slice(0, 16)}…`,
+        `SHARED cell=${safeScalar(r.cellId)} sharer=${safeScalar(r.sharer).slice(0, 16)}… ` +
+          `recipient=${safeScalar(r.recipient).slice(0, 16)}…`,
       );
     } catch (e) {
       return fail(e);
@@ -380,7 +513,8 @@ server.registerTool(
     try {
       const r = await getClient().revokeShare(cellId, recipientHex);
       return ok(
-        `REVOKED cell=${r.cellId} recipient=${r.recipient.slice(0, 16)}… revoked=${r.revoked}`,
+        `REVOKED cell=${safeScalar(r.cellId)} recipient=${safeScalar(r.recipient).slice(0, 16)}… ` +
+          `revoked=${safeScalar(r.revoked)}`,
       );
     } catch (e) {
       return fail(e);

@@ -92,7 +92,63 @@ import type {
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+/**
+ * Ceiling on the endpoint-chosen `error` string carried on a {@link SaihmEndpointError}. A real code
+ * is a short constant (`BLIND_SCOPE_UNSUPPORTED`); this exists so a hostile one cannot be a payload.
+ */
+export const MAX_ERROR_CODE_CHARS = 64;
 const MAX_SEQ = (1n << 64n) - 1n; // wire uint64 ceiling (mirrors client-pro wire U64_MAX)
+/**
+ * Hard ceiling on share announcements kept from one recall. Announcements are unauthenticated and
+ * cost the endpoint nothing to mint, so an uncapped list is a context-flood primitive: the 16MiB body
+ * cap divided by a ~62-byte minimal row is ~270k rows, each of which an MCP host would render. The
+ * cap is applied to the KEPT set (post-dedup) and truncation is reported, never silent.
+ *
+ * A ROW cap alone does not close that primitive, and an earlier cut of this comment wrongly implied
+ * it did. Row count and byte count are independent axes: 256 rows carrying a 40KB `cellId` each still
+ * spends the whole 16MiB budget, and while the SERVER's render cap bounds the text block, nothing
+ * bounded `structuredContent`. Measured against this client before the field/total caps below existed:
+ * a 16,753,811-byte response produced a 6,827-byte text block and a 16,754,638-byte structuredContent
+ * — 2,455x — in a single successful recall. Both axes of THIS channel are now capped: measured after,
+ * a 16,777,216-byte body yields at most a 3,547-byte text block and a 51,003-byte structuredContent.
+ *
+ * Two limits on that claim, both measured, neither hypothetical:
+ *  - It is a claim about the ANNOUNCEMENT channel only. The endpoint's `error` string reaches the same
+ *    tool's output through {@link SaihmEndpointError}; until it was truncated at the mint (see
+ *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes — 619x the worst case here.
+ *  - The budgets below count UTF-16 code units (`String.length`), NOT bytes. For the ASCII an endpoint
+ *    has any reason to send the two coincide, but 64 astral or control characters per field measured
+ *    111,415 UTF-8 bytes of `structuredContent` against a 32,768-unit budget (~3.4x). The text block is
+ *    unaffected — the server sanitises to ASCII and caps separately — so the residue is confined to
+ *    structured-output hosts and is bounded, not a flood. Named here so the next reader does not have
+ *    to re-measure it, and so `CHARS` is not mistaken for `BYTES`.
+ */
+const MAX_SHARED_ANNOUNCEMENTS = 256;
+/**
+ * Per-field character ceiling for an announcement. Every field has a real shape at or below this — a
+ * sharer is exactly 64 hex, a scope is one of two words, an epoch is a handful of digits, and a
+ * `cellId` accommodates a full sha256 hex id — so this is not a validation rule, it is a bound on how
+ * many bytes an unauthenticated row may spend.
+ *
+ * It is deliberately EQUAL to the server's per-field render budget, and that equality is the whole
+ * point: it makes one invariant true end to end — every announcement this client keeps renders WHOLE
+ * in the text block, so every pointer an agent is shown is a pointer it can act on. Were this cap the
+ * larger of the two, rows in the gap would render truncated, and a truncated `cellId` cannot be
+ * passed back to resolve the grant — an actionable-looking pointer that is not actionable.
+ *
+ * A row with any field longer is therefore dropped, not truncated. That costs nothing a hostile
+ * endpoint does not already have (it can simply omit the row) and matches the skip-never-throw policy
+ * these rows already follow. A writer who chooses a cellId longer than this loses only the pointer;
+ * the cell itself still resolves through `recallShared` once the id is known out-of-band.
+ */
+export const MAX_ANNOUNCEMENT_FIELD_CHARS = 64;
+/**
+ * Total character ceiling across all kept announcements — the byte axis stated directly, rather than
+ * left to be inferred from the row and field caps. Those two alone bound a listing at 256 x 4 x 64 =
+ * 64KB; this binds earlier, whenever rows average more than ~32 chars per field, which is already
+ * well above every real row. Exceeding it reports truncation exactly like the row cap, never silently.
+ */
+const MAX_ANNOUNCEMENT_TOTAL_CHARS = 32 * 1024;
 
 /**
  * The hosted, non-custodial operator. `server.json` already declares this as
@@ -288,6 +344,58 @@ export interface RecalledCell {
   seq: string;
   /** sha256(ciphertext) (hex), taken from the authenticated envelope. */
   commitmentHash: string;
+}
+
+/**
+ * A cell another agent has granted to this one, as ANNOUNCED by the endpoint during a recall.
+ *
+ * A POINTER, NOT A CELL, and NOT A FACT. The announcement row carries no envelope and no signature —
+ * nothing here is authenticated, and a hostile endpoint can fabricate one at will. It is a claim that
+ * `sharer` granted `cellId`; only {@link SaihmProClient.recallShared} authenticates that claim, by
+ * verifying the share signature against a sharer identity record the caller pinned OUT-OF-BAND. The
+ * endpoint holds no identity records and must never vend one, so an announcement can never be resolved
+ * from the announcement alone. Never present these as held memories and never auto-resolve them:
+ * acting on them unprompted would let the endpoint choose which fetches this client performs.
+ */
+export interface SharedAnnouncement {
+  /** The SHARER's agentIdHash (hex), as claimed by the endpoint. Pin it out-of-band before trusting it. */
+  sharer: string;
+  /** The shared cell id, as claimed. Collides freely with this agent's own cellIds — they share no namespace. */
+  cellId: string;
+  /** Grant scope as claimed by the endpoint (e.g. `"read"`). */
+  scope: string;
+  /**
+   * Expiry as CLAIMED by the endpoint: a decimal epoch STRING, or `null` for a grant that never
+   * expires — which is the server's DEFAULT, not an edge case. Parse with `BigInt`, never `Number`:
+   * the reason is the WIRE TYPE, not magnitude. The endpoint stringifies a bigint, and this field is
+   * unauthenticated, so the value is whatever the endpoint sent — `Number` would coerce `null` to 0,
+   * `''` to 0 and a non-numeric claim to NaN, each of which reads as a plausible expiry. (An earlier
+   * cut of this comment claimed an epoch "overflows exact-integer range". It does not: an MPS epoch
+   * is ~5e5 today and gains 1 per hour, some eleven orders of magnitude below MAX_SAFE_INTEGER. The
+   * mandate was right, the justification was invented — do not restore it.) Deliberately kept as the
+   * raw claimed string and NOT checked to be numeric here — expiry is enforced by the endpoint at
+   * resolution time, and rejecting a row on an unauthenticated field would only add a way to hide a
+   * live grant. So a conforming endpoint always sends digits, but a hostile one need not: guard the
+   * `BigInt` call, or check `/^[0-9]+$/` first. Display hint only; sanitise before rendering.
+   */
+  expiryEpoch: string | null;
+  /** Always `false` — a structural reminder that nothing on this row has been authenticated. */
+  verified: false;
+}
+
+/**
+ * The result of {@link SaihmProClient.recallWithShared}: this agent's own opened cells, plus whatever
+ * share announcements the SAME response carried. The two travel together so they can never be
+ * cross-attributed between concurrent recalls — see `recallWithShared`.
+ */
+export interface RecallWithShared {
+  /** This agent's own cells, opened and authenticated. Identical to what {@link SaihmProClient.recall} returns. */
+  cells: RecalledCell[];
+  /** Unauthenticated pointers — read {@link SharedAnnouncement} before surfacing any of these. */
+  announcements: SharedAnnouncement[];
+  /** `true` when the endpoint announced more than the cap and the list was cut. Surface it: a silently
+   *  truncated listing reads as "these are all your grants" when it is not. */
+  announcementsTruncated: boolean;
 }
 
 export interface ForgetResult {
@@ -1488,7 +1596,12 @@ export class SaihmProClient {
         let code: string | undefined;
         try {
           const j = JSON.parse(text) as Record<string, unknown>;
-          if (typeof j.error === 'string') code = j.error;
+          // TRUNCATED AT THE MINT. `error` is endpoint-chosen and was previously unbounded: it lands
+          // in `code` AND, below, inside `message`, so a 16MiB error body became a ~32MiB string that
+          // every consumer of this error then rendered. Bounding it here fixes it for ALL consumers
+          // rather than at one call site — a real code is a short constant, so nothing legitimate is
+          // lost. Callers that RENDER this must still sanitise: it is bounded here, not made safe.
+          if (typeof j.error === 'string') code = j.error.slice(0, MAX_ERROR_CODE_CHARS);
         } catch {
           /* non-JSON error body — leave code undefined */
         }
@@ -1678,6 +1791,26 @@ export class SaihmProClient {
    * would hide data loss). `forget` such a cell to exclude it.
    */
   async recall(query?: string): Promise<RecalledCell[]> {
+    return (await this.recallWithShared(query)).cells;
+  }
+
+  /**
+   * {@link recall}, but also returning the share announcements the SAME response carried — pointers to
+   * cells OTHER agents have granted to this one.
+   *
+   * The announcements are bound to the RESPONSE, never to the client: there is no accessor and no
+   * instance state to go stale, so concurrent recalls cannot cross-attribute their announcement sets
+   * (a hostile endpoint controls interleaving simply by delaying a response) and a FAILED recall
+   * cannot leave a previous set readable. A caller that wants only its own memories should keep
+   * calling {@link recall}, whose contract is unchanged.
+   *
+   * `announcements` is `[]` — never absent — when the endpoint announced none, which is also what an
+   * endpoint with shared discovery switched off returns and what every endpoint predating the feature
+   * returns. UNAUTHENTICATED POINTERS, NOT MEMORIES: read {@link SharedAnnouncement} before surfacing
+   * them. To actually read one, obtain the sharer's identity record out-of-band and call
+   * {@link recallShared} — that path, and only that path, authenticates the grant.
+   */
+  async recallWithShared(query?: string): Promise<RecallWithShared> {
     const needle = query?.toLowerCase();
     const filter = (cells: RecalledCell[]): RecalledCell[] =>
       needle === undefined ? cells : cells.filter((c) => c.plaintext.toLowerCase().includes(needle));
@@ -1689,6 +1822,12 @@ export class SaihmProClient {
     // it returns the legacy array instead — we treat that as a full recall and rebuild the cache,
     // so a delta-configured client is always correct against any endpoint.
     if (this.recallCache.configured) {
+      // `knownSharedKeys` is deliberately NOT sent, and the response's `liveSharedKeys` is deliberately
+      // ignored. That pair is the delta protocol for ANNOUNCEMENTS, and it presupposes a client-side
+      // shared cache — which does not exist here by design. Sending it would make the endpoint omit
+      // already-echoed announcements from `added`, leaving this client with nothing to serve them from
+      // and silently TRUNCATING the listing. Full re-announcement every recall is what makes the list
+      // complete and lets it be replaced wholesale; the cost is a few hundred bytes per grant.
       const resp = await this.call<unknown>('saihm_recall', {
         knownCellIds: this.recallCache.knownCellIds(),
       });
@@ -1700,9 +1839,9 @@ export class SaihmProClient {
         Array.isArray((r as { added?: unknown }).added) &&
         Array.isArray((r as { liveCellIds?: unknown }).liveCellIds);
       if (isDelta(resp)) {
-        const added = this.openRecallRows(resp.added);
+        const { cells: added, announcements, announcementsTruncated } = this.openRecallRows(resp.added);
         this.recallCache.merge(added, resp.liveCellIds);
-        return filter(this.recallCache.all());
+        return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated };
       }
       if (!Array.isArray(resp)) {
         throw new SaihmEndpointError(
@@ -1711,9 +1850,9 @@ export class SaihmProClient {
           'endpoint returned a malformed recall response',
         );
       }
-      const cells = this.openRecallRows(resp);
+      const { cells, announcements, announcementsTruncated } = this.openRecallRows(resp);
       this.recallCache.replaceAll(cells);
-      return filter(cells);
+      return { cells: filter(cells), announcements, announcementsTruncated };
     }
 
     // FULL PATH (default, unchanged): recall-all, open every row, filter client-side.
@@ -1725,21 +1864,36 @@ export class SaihmProClient {
         'endpoint returned a malformed recall-all response',
       );
     }
-    return filter(this.openRecallRows(rows));
+    const { cells, announcements, announcementsTruncated } = this.openRecallRows(rows);
+    return { cells: filter(cells), announcements, announcementsTruncated };
   }
 
   /**
-   * Open + attribute + de-duplicate a recall row set (full recall-all OR a delta `added` list).
+   * Open + attribute + de-duplicate a recall row set (full recall-all OR a delta `added` list),
+   * splitting it into this agent's OWN opened cells and the endpoint's SHARE ANNOUNCEMENTS.
+   *
    * An honest endpoint stores exactly one current envelope per (tenant, cellId), so a set never
    * repeats a cellId. A repeat — even of two individually-authentic envelopes — is the endpoint
    * controlling cardinality: it could re-present a superseded version next to the live one (the
    * per-row rollback guard only rejects a DESCENDING seq) or duplicate a row to skew a caller's
    * aggregate. Reject the whole ambiguous response (all-or-nothing), keyed on the AUTHENTICATED
    * cellId from openRow, never the server's row label. Query-filtering is applied by the caller.
+   *
+   * That rejection covers OWN cells only. Announcement rows are a separate, unauthenticated channel
+   * and are handled under weaker rules — see the comment at the `row.shared` branch. The two streams
+   * never share a key: a shared cellId may equal one this agent owns, and both must survive.
    */
-  private openRecallRows(rows: unknown[]): RecalledCell[] {
+  private openRecallRows(rows: unknown[]): {
+    cells: RecalledCell[];
+    announcements: SharedAnnouncement[];
+    announcementsTruncated: boolean;
+  } {
     const out: RecalledCell[] = [];
+    const announcements: SharedAnnouncement[] = [];
+    let announcementsTruncated = false;
+    let announcedChars = 0; // running total across KEPT announcements; see MAX_ANNOUNCEMENT_TOTAL_CHARS
     const seen = new Set<string>();
+    const seenShared = new Set<string>();
     for (const raw of rows) {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
         throw new SaihmEndpointError(
@@ -1748,9 +1902,106 @@ export class SaihmProClient {
           'endpoint returned a malformed recall row',
         );
       }
-      const row = raw as { cellId: string; found: boolean; wire?: WireEnvelope };
+      const row = raw as {
+        cellId: string;
+        found?: boolean;
+        wire?: WireEnvelope;
+        shared?: boolean;
+        sharer?: string;
+        scope?: string;
+        // DECIMAL STRING or null — never a number. The endpoint stringifies the epoch and defaults it
+        // to null (a grant with no expiry). Typing this `number` made the whole feature inert.
+        expiryEpoch?: string | null;
+      };
+
+      // SHARE ANNOUNCEMENT — must be taken BEFORE the found/wire skip below, because an announcement
+      // row carries NEITHER field and would otherwise be dropped on `!row.found`. It is metadata only:
+      // a claim that `sharer` granted `cellId`, with no envelope and no signature to check it against.
+      // It is deliberately NOT opened, NOT cached and NOT counted as a cell — resolving it requires a
+      // sharer identity record pinned out-of-band (see `recallShared`), which no announcement supplies.
+      //
+      // A malformed or repeated announcement is SKIPPED, never thrown on: these rows are unauthenticated
+      // by construction, so letting one abort the response would hand a hostile endpoint a way to deny
+      // this agent its OWN memories. The all-or-nothing rejection below is reserved for own cells, whose
+      // rows ARE authenticated and where ambiguous cardinality is a real integrity signal.
+      // ONE EXCEPTION, deliberate: a `shared:true` row that ALSO carries `wire` is not an announcement
+      // at all, so it falls through to be handled as an own cell. If it also carries `found`, it is
+      // opened — and an own cell that fails to open does throw; if `found` is absent or false it is
+      // dropped by the `!row.found` skip below, silently, like any other unusable row. (An earlier
+      // cut of this comment stated the throw unconditionally; it holds only on the `found` path.)
+      // Either way that grants no new denial capability — the identical row without the flag behaves
+      // identically — and it is the price of making the two streams unconflatable.
+      if (row.shared === true) {
+        // An announcement carries NO envelope. Refusing a row that has one is what keeps the two
+        // streams unconflatable: without this, appending `shared:true` to a GENUINE {found, wire} row
+        // would divert an authenticated own-cell into the announcement list, making it VANISH — and on
+        // the cached full path replaceAll would then delete it from the on-disk cache too, a route from
+        // this unauthenticated branch into PERSISTED own-cell state. Fall through instead, so such a
+        // row is opened and counted as the own cell it actually is.
+        if (row.wire === undefined) {
+          // `expiryEpoch` is a DECIMAL STRING or null — the endpoint stringifies it and null is its
+          // DEFAULT (no expiry). Absent normalises to null so an older endpoint that omits the field
+          // still announces. Never coerced to a number — see `SharedAnnouncement.expiryEpoch`.
+          if (
+            typeof row.sharer !== 'string' ||
+            typeof row.cellId !== 'string' ||
+            typeof row.scope !== 'string' ||
+            !(typeof row.expiryEpoch === 'string' || row.expiryEpoch == null)
+          )
+            continue;
+          // BYTE AXIS. Checked before the row cap, because a single row can exceed the whole budget.
+          // A row with an over-long field is dropped outright and does NOT set `truncated`: it is a
+          // malformed row like any other, and flagging it would let the endpoint make every listing
+          // claim to be incomplete.
+          const epochChars = row.expiryEpoch == null ? 0 : row.expiryEpoch.length;
+          if (
+            row.sharer.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
+            row.cellId.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
+            row.scope.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
+            epochChars > MAX_ANNOUNCEMENT_FIELD_CHARS
+          )
+            continue;
+          // The running total is over KEPT rows only, so duplicates and dropped rows cannot consume
+          // the budget. `continue`, never `break`: the scan must keep running to reach this agent's
+          // OWN cells, which arrive interleaved with announcements and whose loss would be silent —
+          // and, on the cached path, would then be written through to the on-disk cache by replaceAll.
+          if (announcedChars + row.sharer.length + row.cellId.length + row.scope.length + epochChars >
+              MAX_ANNOUNCEMENT_TOTAL_CHARS) {
+            announcementsTruncated = true;
+            continue;
+          }
+          // Cap BEFORE the dedup insert, so `seenShared` is bounded by the cap and not by the row
+          // count: checking it after would let a 16MiB body of unique announcements retain ~270k keys
+          // to keep 256 of them, which is the very context/memory flood the cap exists to stop. The
+          // trade is that repeats arriving past the cap also set `truncated`; erring towards "there
+          // may be more" is the safe direction, and only a hostile endpoint sends that shape.
+          if (announcements.length >= MAX_SHARED_ANNOUNCEMENTS) {
+            announcementsTruncated = true;
+            continue;
+          }
+          // Injective in (sharer, cellId): a plain `${sharer}:${cellId}` collapses ("a:b","c") onto
+          // ("a","b:c"), which an endpoint choosing both fields could use to suppress an announcement.
+          // (sharer, cellId) IS the identity of a grant, so two rows differing only in scope or expiry
+          // are one pointer, not two — the resolved grant is whatever the endpoint honours at read.
+          const key = JSON.stringify([row.sharer, row.cellId]); // opaque; never parsed back apart
+          if (seenShared.has(key)) continue;
+          seenShared.add(key);
+          announcedChars += row.sharer.length + row.cellId.length + row.scope.length + epochChars;
+          announcements.push({
+            sharer: row.sharer,
+            cellId: row.cellId,
+            scope: row.scope,
+            expiryEpoch: row.expiryEpoch ?? null,
+            verified: false,
+          });
+          continue;
+        }
+      }
+
       if (!row.found || !row.wire) continue;
       const cell = this.openRow(null, row.wire); // trusts env.cellId/seq, not the server row label
+      // Own cells only. An announcement never reaches this set, which is precisely why a shared cellId
+      // may collide with one this agent owns without tripping the duplicate check.
       if (seen.has(cell.cellId)) {
         throw new SaihmEndpointError(
           502,
@@ -1761,7 +2012,7 @@ export class SaihmProClient {
       seen.add(cell.cellId);
       out.push(cell);
     }
-    return out;
+    return { cells: out, announcements, announcementsTruncated };
   }
 
   /** Recall + open a single cell. Returns `null` if it does not exist. */
