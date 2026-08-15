@@ -122,7 +122,8 @@ const MAX_SEQ = (1n << 64n) - 1n; // wire uint64 ceiling (mirrors client-pro wir
  * Two limits on the claim, both measured, neither hypothetical:
  *  - It is a claim about the ANNOUNCEMENT channel only. The endpoint's `error` string reaches the same
  *    tool's output through {@link SaihmEndpointError}; until it was truncated at the mint (see
- *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes — 619x the worst case here.
+ *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes — ~609x the 55,112-byte worst case
+ *    here (both channels maximised in one response; an earlier cut divided by 54,216 and said 619x).
  *  - The budgets below count UTF-16 code units (`String.length`), NOT bytes. For the ASCII an endpoint
  *    has any reason to send the two coincide; for what a hostile one can send they do not. Measured
  *    against the 32,768-unit budget: control characters, which JSON-escape to six bytes per unit,
@@ -1813,9 +1814,18 @@ export class SaihmProClient {
       seq: seq.toString(10),
       commitmentHash: toHex(env.publicMeta.commitmentHash),
       // The one field with no local authority — it names endpoint-side storage, so only the endpoint
-      // can know it. Coerced to the declared type rather than cast into a lie (an omitted field would
+      // can know it. Brought to the declared type rather than cast into a lie (an omitted field would
       // otherwise be `undefined` typed `string`), and fenced again at every render site.
-      shardId: String(r?.shardId ?? ''),
+      //
+      // A `typeof` TEST, not `String(v)`, because `String` is not total: it recurses through nested
+      // arrays, so a JSON array nested 4,000 deep — an 8 KB response body that `JSON.parse` accepts
+      // without complaint — throws `RangeError: Maximum call stack size exceeded` from inside this
+      // expression. That escaped the tool handler as a bare stack-overflow string with no SAIHM
+      // prefix and no attribution, reading to the agent as a bug in its own client. The render fence
+      // guards its own coercion for the same reason; this one is upstream of it and needed its own.
+      // A shard id that is not a string is not a shard id, so there is nothing to salvage by
+      // stringifying it.
+      shardId: typeof r?.shardId === 'string' ? r.shardId : '',
     };
   }
 
