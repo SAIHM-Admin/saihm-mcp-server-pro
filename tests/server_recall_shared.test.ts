@@ -438,8 +438,15 @@ test('saihm_recall shared-read: a SHARER cannot mint a line in own-memory shape'
     // Lossless: every byte of the memory is still there, marker aside. A sanitiser would have taken
     // the umlaut, the brackets and the pipe with it, and this content is not the endpoint's to mangle.
     assert.ok(r.text.includes('  > real note ünïcode [kept] | kept'), `content was altered:\n${r.text}`);
-    // structuredContent is deliberately unsanitised and carries the plaintext exactly as stored — a
-    // named field of a declared schema cannot masquerade as a memory line.
+    // structuredContent is deliberately unsanitised and carries the plaintext exactly as stored,
+    // because sanitising it would destroy data a consumer may need verbatim.
+    //
+    // NOT because "a named field of a declared schema cannot masquerade as a memory" — that sentence
+    // is recorded as FALSE in render_fence.ts, and this assertion is its counterexample: the field
+    // being read here is literally named `memories`, and the plaintext in it belongs to ANOTHER
+    // agent. The text block distinguishes the two with a SHARED-RECALL header and a `  > ` prefix;
+    // structuredContent carries no discriminator at all, which is raised separately as a
+    // published-schema change. What this line pins is losslessness, and only that.
     assert.equal((r.structured.memories as { plaintext: string }[])[0].plaintext, hostile);
   } finally {
     d.proc.kill();
@@ -447,17 +454,24 @@ test('saihm_recall shared-read: a SHARER cannot mint a line in own-memory shape'
   }
 });
 
-test('saihm_recall shared-read: EVERY line terminator a renderer honours is marked, not just LF', async () => {
-  // The first cut of this fence split on CR, LF and CRLF and its comment claimed that closed
-  // line-minting "completely". It did not. U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are
-  // ECMAScript line terminators and start fresh lines in JS-based renderers; U+0085 NEL, U+000B and
-  // U+000C do so in various terminals. MEASURED against the old split: each turned one marked line
-  // into three rendered lines, two unmarked, one matching the own-memory shape exactly.
+test('saihm_recall shared-read: every CITED line terminator is marked, not just LF', async () => {
+  // The set under test is CPython's `str.splitlines()`, named because it is enumerable — a superset
+  // of ECMAScript's LineTerminator, in the reference MCP SDK's language. The title used to say
+  // "EVERY line terminator a renderer honours" and that was the bug: the first cut split on CR, LF
+  // and CRLF and claimed completeness (refuted by U+2028, U+2029, NEL, VT, FF); the second widened to
+  // those five and claimed completeness again (refuted by FS, GS and RS). Each refutation cost a
+  // round. A cited set can be checked against its source; an absolute claim can only be disproved.
+  //
+  // MEASURED against each superseded split: one marked line became several rendered lines, all but
+  // the first unmarked, one matching the own-memory shape exactly.
   //
   // Built with fromCharCode so this SOURCE FILE stays free of literal U+2028 — a literal one is a
   // line terminator in JS source and would not parse, which is the same property being defended.
   const CH = (n: number): string => String.fromCharCode(n);
-  const RENDERED = new RegExp('\\r\\n|[\\n\\r\\u2028\\u2029\\u0085\\u000b\\u000c]', 'g');
+  const RENDERED = new RegExp(
+    '\\r\\n|[\\n\\r\\u2028\\u2029\\u0085\\u000b\\u000c\\u001c\\u001d\\u001e]',
+    'g',
+  );
   const OWN = /^ {2}\[[^\]\n]*\] seq=/;
   const seps: [string, string][] = [
     ['U+2028 LS', CH(0x2028)],
@@ -465,6 +479,9 @@ test('saihm_recall shared-read: EVERY line terminator a renderer honours is mark
     ['U+0085 NEL', CH(0x85)],
     ['VT', CH(0x0b)],
     ['FF', CH(0x0c)],
+    ['FS', CH(0x1c)],
+    ['GS', CH(0x1d)],
+    ['RS', CH(0x1e)],
   ];
   let seed = 80;
   for (const [name, sep] of seps) {

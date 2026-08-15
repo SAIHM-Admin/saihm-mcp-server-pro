@@ -608,7 +608,10 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
     const cacheDir = mkdtempSync(join(tmpdir(), 'saihm-ann-bytes-'));
     const cachePath = join(cacheDir, 'recall_cache.json');
     const bigSharer = 'ab'.repeat(32); // 64 chars
-    const flood = Array.from({ length: 250 }, (_, i) =>
+    // MORE rows than the row cap, deliberately. With 250 the row cap could never fire, so
+    // `kept < MAX_SHARED_ANNOUNCEMENTS` held whatever the client did — see the note on that
+    // assertion below. At 300 both caps are reachable and the comparison discriminates between them.
+    const flood = Array.from({ length: 300 }, (_, i) =>
       announce(String(i).padStart(64, '0'), bigSharer, 'readwrite'),
     );
     try {
@@ -628,12 +631,21 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
           // The BUDGET is what stopped it, not the row cap — otherwise this duplicates the test below
           // and the branch it exists for stays uncovered.
           //
-          // This used to read `r.announcements.length < 256` with 250 rows injected, so it held
-          // whatever the client did and could not fail. The mutation it was written to catch WAS
-          // caught, but by the `announcementsTruncated` assertion above, not by the line whose message
-          // claimed to catch it — which is worse than an absent test, because the message asserts
-          // coverage that is not there. Both statements below are falsifiable: rows were dropped, and
-          // the scan stopped where one more would not have fit rather than early.
+          // This has now been unfalsifiable TWICE, the second time in the commit that removed the
+          // first. It began as `r.announcements.length < 256` against 250 injected rows: 250 < 256
+          // whatever the client does. That was rewritten to `< flood.length`, which IS falsifiable —
+          // and the `< MAX_SHARED_ANNOUNCEMENTS` line was re-added alongside it against the SAME
+          // 250-row fixture, reproducing the identical tautology three lines under a comment
+          // asserting "Both statements below are falsifiable". Replacing a dead assertion and
+          // restating it as live in the same edit is worse than leaving it, because the prose now
+          // vouches for coverage that is not there.
+          //
+          // The fixture is what made it dead, not the comparison: with fewer rows than the row cap,
+          // the row cap cannot fire, so nothing distinguishes "the budget stopped it" from "nothing
+          // stopped it". At 300 rows both caps are reachable and the two assertions now say
+          // different things — rows were dropped, AND the count sits below the row cap, which it can
+          // only do if the budget bound first. Remove the budget check and the client keeps 256 by
+          // the row cap; this line then fails, which is the whole point of it.
           assert.ok(
             r.announcements.length < flood.length,
             `expected rows to be dropped, kept all ${r.announcements.length}`,
@@ -791,6 +803,53 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
             assert.equal(r.announcements.length, flood.length - 1, 'exactly the over-budget row is cut');
             assert.equal(r.announcementsTruncated, true, 'and the cut must be reported');
           }
+        },
+        {
+          transform: (method, text) => {
+            if (method !== 'saihm_recall') return text;
+            const body = JSON.parse(text) as unknown;
+            if (Array.isArray(body)) return JSON.stringify([...flood, ...body]);
+            return text;
+          },
+        },
+      );
+    }
+  });
+
+  it('a set landing EXACTLY on the row cap is kept, and one row more is not', async () => {
+    // The byte axis has had a both-sides boundary fixture since the mutation pass that found `+1` and
+    // `>=` surviving on it. The ROW axis had only 300- and 400-row floods, which overshoot by dozens:
+    // nothing pinned that offering exactly MAX_SHARED_ANNOUNCEMENTS rows keeps all of them and raises
+    // no truncation flag. An off-by-one there reports a complete listing as truncated, or drops a row
+    // while calling the listing complete — and both directions were green.
+    //
+    // Rows are deliberately TINY (~20 chars against the ~132 of a real row) so this exercises the row
+    // cap alone: 257 of them spend well under the 32 KiB budget, so the byte axis cannot fire and
+    // steal the result. That separation is the point — it is why the two axes need separate fixtures.
+    for (const [count, expectTruncated] of [
+      [MAX_SHARED_ANNOUNCEMENTS, false],
+      [MAX_SHARED_ANNOUNCEMENTS + 1, true],
+    ] as const) {
+      const flood = Array.from({ length: count }, (_, i) => announce(`c${i}`, 'ab', 'read'));
+      await withStack(
+        async (ctx) => {
+          const c = mkClient(ctx, masterOf(120 + (count % 2)));
+          const r = await c.recallWithShared();
+          const spent = r.announcements.reduce((n, a) => n + rowChars(a), 0);
+          assert.ok(
+            spent < MAX_ANNOUNCEMENT_TOTAL_CHARS,
+            `the byte axis must not fire in a ROW-cap fixture, spent ${spent}`,
+          );
+          assert.equal(
+            r.announcements.length,
+            MAX_SHARED_ANNOUNCEMENTS,
+            `offering ${count} rows must keep exactly the cap`,
+          );
+          assert.equal(
+            r.announcementsTruncated,
+            expectTruncated,
+            `offering ${count} rows must report truncated=${expectTruncated}`,
+          );
         },
         {
           transform: (method, text) => {

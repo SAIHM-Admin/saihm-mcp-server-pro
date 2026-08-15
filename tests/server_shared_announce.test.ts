@@ -206,8 +206,10 @@ test('HOSTILE: an endpoint cannot forge a memory line through announcement field
   assert.ok(!text.includes('seq=9'), 'the forged seq must not survive');
   assert.ok(!text.includes('] seq=1 |'), 'the cellId payload must not reconstruct the memory shape');
   assert.equal(structured.count, 0, 'a forged header must not move the authoritative count');
-  // Structured output is deliberately NOT sanitised — there the value sits in a named field where it
-  // cannot masquerade as a memory, and mangling it would corrupt data a consumer may need verbatim.
+  // Structured output is deliberately NOT sanitised, because mangling it would corrupt data a
+  // consumer may need verbatim. The reason once given alongside that — "there the value sits in a
+  // named field where it cannot masquerade as a memory" — is recorded as FALSE in render_fence.ts,
+  // and is not what this assertion rests on.
   assert.equal(structured.shared[0].scope, evil);
 });
 

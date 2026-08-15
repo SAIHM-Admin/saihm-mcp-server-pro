@@ -366,12 +366,22 @@ test('saihm_status: a non-numeric count degrades to a marker INSIDE a successful
         return send(200, {
           agentIdHashHex: 'ignored',
           tier: 'PRO',
-          // Non-decimal numeric literals and out-of-range counts, not just obvious junk. `Number()`
-          // applies the whole JS numeric grammar, so `"0x7fffffff"` became 2147483647, `"0o777"`
-          // became 511 and `"0b1111"` became 15 — measured, and forms JSON round-tripping never
-          // produces. A hex literal rendered as a plausible shard count is the "inventing plausible
-          // counts out of missing data" the helper's own docstring says it prevents.
-          activeShardCount: '0x7fffffff',
+          // Three DIFFERENT rejection routes, one per field, because a fixture of obvious junk
+          // exercises only the first and lets the other two rot — a mutation pass already caught that
+          // once, when the decimal grammar and the range check were both removed with nothing red.
+          //
+          //   activeShardCount      LENGTH — 40 digits, past the 32-character ceiling. The ceiling
+          //                         exists so the work is bounded by the answer's size rather than
+          //                         the input's; without it a value is copied, scanned and parsed in
+          //                         full, three times per call, to yield at most ~20 characters.
+          //   activeSharingContracts RANGE — a count is a non-negative integer, so -1 is absent data,
+          //                         not a small count.
+          //   bfsi                  GRAMMAR — `Number()` applies the whole JS numeric grammar, so
+          //                         "0x7fffffff" became 2147483647, "0o777" became 511 and "0b1111"
+          //                         became 15: forms JSON round-tripping never produces, rendered as
+          //                         plausible counts. That is the "inventing plausible counts out of
+          //                         missing data" the helper's own docstring says it prevents.
+          activeShardCount: '9'.repeat(40),
           activeSharingContracts: '-1',
           bfsi: '0b1111',
           bfsi_R: '1',
@@ -415,8 +425,32 @@ test('saihm_remember: the receipt is the CLIENT’s, and the one endpoint field 
     // line in the whole surface, and the endpoint gets to choose only what it alone can know.
     assert.match(r.text, /^REMEMBERED \[[0-9a-f]{32}\] seq=1 shard=\S/);
     assert.match(r.text, /commit=[0-9a-f]{16}…$/, 'the commitment must come from the sealed envelope');
-    // `shardId` names endpoint-side storage, so it IS the endpoint's — present, and fenced.
-    assert.match(r.text, /shard=A\?RECALL/);
+    // `shardId` names endpoint-side storage, so it IS the endpoint's — and the two halves of the
+    // response must reach the SAME verdict about it. This payload is far past the structured bound,
+    // so the bound rejects it and BOTH channels say so. This assertion used to read
+    // `/shard=A\?RECALL/`: the text showed 64 plausible characters the endpoint chose the front of
+    // while `structuredContent` called the same field malformed, and the suite pinned both halves of
+    // that disagreement as correct.
+    assert.match(r.text, /shard=\(malformed\)/);
+  });
+});
+
+test('saihm_remember: an ACCEPTED shardId is the same value in both halves', async () => {
+  // The other side of the boundary, and the reason the fix is "resolve once" rather than "bound
+  // harder". A value the structured bound ACCEPTS must not be rejected in the text, or the fix would
+  // have traded one disagreement for its mirror image. 100 characters is inside the 256-character
+  // structured bound and outside the 64-character text fence, so the text carries a marked
+  // truncation of exactly the value the structured half carries whole — different LENGTH, which the
+  // marker announces, but the same verdict on whether the field is usable at all.
+  const shard = 'S'.repeat(100);
+  await withHostileServer({ hostile: shard }, async (d) => {
+    const r = await d.rpc(3, 'tools/call', { name: 'saihm_remember', arguments: { content: 'x' } });
+    assert.equal(r.result.structuredContent.shardId, shard, 'inside the bound: carried whole');
+    const text = r.result.content[0].text as string;
+    assert.ok(!text.includes('(malformed)'), `an accepted value must not render as a marker:\n${text}`);
+    assert.match(text, /shard=S{64}…/, 'the text shows a MARKED truncation of the accepted value');
+    // The client's own three fields stay local even when the endpoint echoes something plausible.
+    assert.match(r.result.structuredContent.cellId, /^[0-9a-f]{32}$/);
   });
 });
 
@@ -487,10 +521,17 @@ test('every hostile scalar is capped at MAX_SCALAR_CHARS, marker included', asyn
 
 test('structuredContent is BOUNDED on the two tools that had no cap at all', async () => {
   // The announcement channel is capped on both rows and bytes. These two tools were capped on
-  // neither: a 16 MiB response produced a 33,554,457-byte `saihm_remember` result and a
-  // 16,777,377-byte `saihm_status` one, through fields DECLARED as short scalars, in successful
-  // calls. Not an injection — a value in a named field of a declared schema cannot masquerade as a
-  // memory — but a flood, on the axis the text-block cap does not cover.
+  // neither: measured with only this bound removed, a 16,777,074-byte response yields a
+  // 16,777,414-byte `saihm_remember` result and a 16,777,482-byte `saihm_status` one, through fields
+  // DECLARED as short scalars, in successful calls. (An earlier cut of this comment said 33,554,457
+  // and 16,777,377; both were superseded when the figures were re-measured with one bound removed
+  // rather than two, and src/render_fence.ts has carried the corrected pair since.)
+  //
+  // Not an injection but a flood, on the axis the text-block cap does not cover. Note this is NOT
+  // because "a value in a named field of a declared schema cannot masquerade as a memory" — that
+  // sentence is recorded as FALSE in render_fence.ts, since the shared-read branch puts a foreign
+  // plaintext in a field named `memories`. It is not an injection here because a SIZE bound and a
+  // line fence answer different attacks.
   //
   // The 5,000-character payload is well past the ceiling and well short of 16 MiB: this asserts the
   // bound engages, and keeps the suite fast. `structuredContent` stays UNSANITISED — the payload's
