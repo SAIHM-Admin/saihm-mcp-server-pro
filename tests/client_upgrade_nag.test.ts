@@ -719,7 +719,11 @@ describe('UN13: with no onQuotaNag callback, telemetry + 429 are harmless', () =
       async (m) => {
         const c = freeClient(m.base, 47); // no callback
         const r = await c.remember('ok');
-        assert.equal(r.cellId, 'cell1');
+        // The receipt is the CLIENT's, not the endpoint's echo of `cell1`: a write's cellId, seq and
+        // commitment all have a local, authenticated source, so only `shardId` is the endpoint's.
+        // What this test is about is that quota telemetry does not disturb the receipt at all.
+        assert.match(r.cellId, /^[0-9a-f]{32}$/);
+        assert.equal(r.seq, '1');
       },
       { rememberQuota: [{ used: '250', limit: '250' }] },
     );
@@ -756,7 +760,7 @@ describe('UN14: unusable telemetry never nags', () => {
         const nags: QuotaNag[] = [];
         const c = freeClient(m.base, 50, (n) => nags.push(n));
         const r = await c.remember('u');
-        assert.equal(r.cellId, 'cell1');
+        assert.match(r.cellId, /^[0-9a-f]{32}$/); // the client's own id, never the endpoint's echo
         assert.equal(nags.length, 0);
       },
       { rememberQuota: [{ used: 'lots', limit: 'many' } as unknown as QuotaTelem] },
@@ -783,7 +787,7 @@ describe('UN15: a throwing nag callback cannot break the operation', () => {
           throw new Error('callback blew up');
         });
         const r = await c.remember('resilient');
-        assert.equal(r.cellId, 'cell1', 'the write result is returned despite the throw');
+        assert.match(r.cellId, /^[0-9a-f]{32}$/, 'the write result is returned despite the throw');
       },
       { rememberQuota: [{ used: '250', limit: '250' }] },
     );

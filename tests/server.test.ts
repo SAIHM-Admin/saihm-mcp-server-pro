@@ -281,10 +281,16 @@ test('server.ts: handshake, tools/list, core tool wiring + fail() path', async (
     assert.match(st.text, /tier=PRO/);
     assert.match(st.text, /shards=2/);
     assert.equal(st.isError, false);
-    assert.match(
-      (await callText(d, 4, 'saihm_remember', { content: 'hello world' })).text,
-      /REMEMBERED \[abc123\] seq=1 shard=sh1/,
-    );
+    // The mock echoes `cellId: 'abc123'` and `seq: 1`; this asserts the receipt shows NEITHER.
+    // It used to assert the opposite — that the echo reached the agent — which is precisely the
+    // defect: three of the four receipt fields have a local, authenticated source (the cellId this
+    // client generated, its own monotonic seq, the commitment read off the envelope it sealed) and
+    // taking them from the response let the endpoint name any cell it liked on a write the agent
+    // explicitly asked for. `shardId` alone is still the endpoint's, because only the endpoint knows
+    // where it stored the bytes.
+    const rem = (await callText(d, 4, 'saihm_remember', { content: 'hello world' })).text;
+    assert.match(rem, /^REMEMBERED \[[0-9a-f]{32}\] seq=1 shard=sh1 commit=[0-9a-f]{16}…$/);
+    assert.ok(!rem.includes('abc123'), "the endpoint's echoed cellId must not reach the receipt");
     assert.match(
       (await callText(d, 5, 'saihm_forget', { id: 'abc123' })).text,
       /FORGOTTEN \[abc123\] complete=true/,

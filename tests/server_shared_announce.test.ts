@@ -413,8 +413,11 @@ test('the text block renders at most 16 pointers and says how many it withheld',
   const { text, structured } = await recallWith(rows);
   const pointers = text.split('\n').filter((l) => l.startsWith('  ! POINTER'));
   assert.equal(pointers.length, 16, 'the CHANNEL cap bounds what lands in the agent context');
-  // The banner counts every grant ANNOUNCED, not every grant rendered. Reporting the rendered count
-  // would contradict the withheld line directly below it and under-report how many grants exist.
+  // The banner counts every grant the client KEPT, not the 16 it rendered — reporting the rendered
+  // count would contradict the withheld line directly below it. Kept and announced coincide here
+  // because all 100 rows survive both caps; where they diverge, `sharedTruncated` is what says so,
+  // and the WORST CASE test below covers that. (An earlier cut of this comment said "every grant
+  // ANNOUNCED", which is a different number and is not the one on the line.)
   assert.match(text, /^SHARED WITH YOU: 100 unverified pointer\(s\)/m);
   // ANCHORED, and asserting the `  ! ` marker. An unanchored match here matched with OR without the
   // marker, so the withheld line — one of the four line kinds in this block — was the only one whose
@@ -447,12 +450,25 @@ test('WORST CASE: a maximal flood of maximal rows cannot flood the agent context
   // ellipsis); sharer = 64; scope ≤ 11 (`(malformed)` is longer than `readwrite`); expiry ≤ 20 digits.
   // So a pointer line is ≤ 200 chars, and 16 of them ≤ 3200, plus a banner, a withheld-count line and
   // two footers (< 400). 4000 leaves headroom for wording changes while still failing loudly if a cap
-  // is dropped — with RENDER_LIMIT alone removed this text is ~51k chars.
+  // is dropped — with RENDER_LIMIT alone removed this text is 44,351 chars, measured on this fixture
+  // against this tree. (An earlier cut said "~51k chars"; 51,003 is the STRUCTUREDCONTENT figure from
+  // client.ts, transplanted onto the text block. No input reaches 51k on this channel: the byte budget
+  // admits 219 of these rows, and 219 × 200 is the ceiling.)
+  //
+  // The scope is OFF-CONTRACT deliberately, and that is what makes this fixture maximal. A legal
+  // `readwrite` renders 9 characters; the `(malformed)` marker renders 11. The earlier version of this
+  // test used `readwrite` and so topped out at 198-character lines and a 3,563-byte block, leaving the
+  // `<= 200` assertion two characters of slack it never touched and the real ceiling (200 / 3,595)
+  // unexercised. A worst-case test that is not the worst case is the most expensive kind of green.
+  //
+  // The cellId length is derived from the cap rather than written as 64: hard-coding it meant the
+  // cap could be widened without this test noticing, which a mutation pass confirmed by taking it to
+  // 4096 with the whole suite green.
   const rows = Array.from({ length: 400 }, (_, i) =>
     ann({
-      cellId: `${i}`.padEnd(64, 'C'),
+      cellId: `${i}`.padEnd(MAX_ANNOUNCEMENT_FIELD_CHARS, 'C'),
       sharer: 'ab'.repeat(32),
-      scope: 'readwrite',
+      scope: 'z',
       expiryEpoch: '9'.repeat(20),
     }),
   );
@@ -460,6 +476,14 @@ test('WORST CASE: a maximal flood of maximal rows cannot flood the agent context
   const pointers = text.split('\n').filter((l) => l.startsWith('  ! POINTER'));
   assert.equal(pointers.length, 16, 'the channel cap holds under the worst case');
   for (const l of pointers) assert.ok(l.length <= 200, `pointer line over budget (${l.length}): ${l}`);
+  // The bound is REACHED, not merely respected. Without this, `<= 200` passes on a fixture that tops
+  // out at 198 and the last two characters of the derivation above go untested — which is how the
+  // ceiling came to be recorded as 3,547 bytes when it is 3,595.
+  assert.equal(
+    Math.max(...pointers.map((l) => l.length)),
+    200,
+    'the worst case must actually reach the derived maximum, not sit two characters under it',
+  );
   for (const l of pointers)
     assert.ok(!l.includes('…'), `a cellId at the cap must render whole, untruncated: ${l}`);
   assert.ok(text.length < 4000, `worst-case text block must stay bounded: ${text.length} chars`);

@@ -30,7 +30,53 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WireEnvelope } from '@saihm/client-pro';
-import { SaihmProClient, SaihmEndpointError } from '../src/client.js';
+import {
+  SaihmProClient,
+  SaihmEndpointError,
+  MAX_ANNOUNCEMENT_FIELD_CHARS,
+  MAX_ANNOUNCEMENT_TOTAL_CHARS,
+  MAX_SHARED_ANNOUNCEMENTS,
+} from '../src/client.js';
+
+/**
+ * What ONE announcement spends against the total budget — the same four fields, counted the same way
+ * the client counts them. Derived here rather than restated as a number so a test cannot drift from
+ * the implementation it is measuring; the VALUES of the caps are pinned separately and deliberately.
+ */
+const rowChars = (a: {
+  sharer: string;
+  cellId: string;
+  scope: string;
+  expiryEpoch: string | null;
+}): number => a.sharer.length + a.cellId.length + a.scope.length + (a.expiryEpoch?.length ?? 0);
+
+/**
+ * Distinct, individually-legal announcements whose sizes sum to EXACTLY the total budget, plus
+ * `extra` characters on the final row.
+ *
+ * Built from the caps rather than from arithmetic done once and written down: `extra: 0` lands on the
+ * boundary and `extra: 1` steps one character past it, which is what pins a `>` comparison from both
+ * sides. Every row is under the per-field cap, so nothing is dropped for the wrong reason.
+ */
+const budgetFillingRows = (extra: number): Record<string, unknown>[] => {
+  const sharer = 'ba'.repeat(32); // exactly the 64-char shape a real sharer has
+  const out: Record<string, unknown>[] = [];
+  let spent = 0;
+  for (let i = 0; ; i++) {
+    const cellLen = Math.min(
+      MAX_ANNOUNCEMENT_FIELD_CHARS,
+      MAX_ANNOUNCEMENT_TOTAL_CHARS - spent - sharer.length - 'read'.length,
+    );
+    if (cellLen < 1) break;
+    out.push(announce(String(i).padStart(cellLen, 'f'), sharer, 'read', null));
+    spent += sharer.length + cellLen + 'read'.length;
+  }
+  // One final row spends whatever is left, plus `extra`. Sharer and scope are empty so its whole cost
+  // is the cellId, which keeps the arithmetic exact whatever remainder the loop leaves.
+  const left = MAX_ANNOUNCEMENT_TOTAL_CHARS - spent + extra;
+  if (left > 0) out.push(announce('z'.repeat(left), '', '', null));
+  return out;
+};
 
 const masterOf = (b: number): Uint8Array => new Uint8Array(32).fill(b);
 
@@ -581,15 +627,30 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
           assert.equal(r.announcementsTruncated, true, 'a budget-cut listing must say so');
           // The BUDGET is what stopped it, not the row cap — otherwise this duplicates the test below
           // and the branch it exists for stays uncovered.
+          //
+          // This used to read `r.announcements.length < 256` with 250 rows injected, so it held
+          // whatever the client did and could not fail. The mutation it was written to catch WAS
+          // caught, but by the `announcementsTruncated` assertion above, not by the line whose message
+          // claimed to catch it — which is worse than an absent test, because the message asserts
+          // coverage that is not there. Both statements below are falsifiable: rows were dropped, and
+          // the scan stopped where one more would not have fit rather than early.
           assert.ok(
-            r.announcements.length < 256,
-            `expected the byte budget to bite before the 256-row cap, kept ${r.announcements.length}`,
+            r.announcements.length < flood.length,
+            `expected rows to be dropped, kept all ${r.announcements.length}`,
           );
-          const spent = r.announcements.reduce(
-            (n, a) => n + a.sharer.length + a.cellId.length + a.scope.length,
-            0,
+          assert.ok(
+            r.announcements.length < MAX_SHARED_ANNOUNCEMENTS,
+            `the byte budget must bite BEFORE the ${MAX_SHARED_ANNOUNCEMENTS}-row cap, kept ${r.announcements.length}`,
           );
-          assert.ok(spent <= 32 * 1024, `kept set must fit the budget, spent ${spent}`);
+          const spent = r.announcements.reduce((n, a) => n + rowChars(a), 0);
+          assert.ok(
+            spent <= MAX_ANNOUNCEMENT_TOTAL_CHARS,
+            `kept set must fit the budget, spent ${spent}`,
+          );
+          assert.ok(
+            spent + rowChars(r.announcements[0]) > MAX_ANNOUNCEMENT_TOTAL_CHARS,
+            `the budget must be the binding constraint — one more row of the same shape still fits (spent ${spent})`,
+          );
           const cached = JSON.parse(readFileSync(cachePath, 'utf-8')) as Record<string, unknown>;
           assert.deepEqual(Object.keys(cached), ['byte-survivor'], 'the cache keeps exactly the own cell');
         },
@@ -605,6 +666,153 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
     } finally {
       rmSync(cacheDir, { recursive: true, force: true });
     }
+  });
+
+  it('a REPEATED announcement is free: it neither spends budget nor claims the list was cut', async () => {
+    // Two distinct properties, and being precise about which is which matters, because only one of
+    // them was ever a live defect.
+    //
+    // THIS test covers the budget: a repeat must not CONSUME it. That was never broken — the `+=` has
+    // always sat after the dedup check — but nothing asserted it, so moving one statement above one
+    // line turned it into real suppression: repeat a single legal announcement, exhaust the 32 KiB
+    // budget, and every GENUINE grant arriving later is dropped behind a `LIST TRUNCATED` banner the
+    // agent reads as the endpoint having more to offer rather than as the endpoint hiding something.
+    // A one-line refactor away from a suppression primitive is not a property to leave unpinned.
+    //
+    // The sibling test below covers the FLAG, which was genuinely wrong.
+    //
+    // The fixture is the attack, not an analogue of it: one row repeated enough times to spend the
+    // budget several times over, then one real grant that must still arrive.
+    const dupSharer = 'cd'.repeat(32);
+    const dupCell = 'D'.repeat(MAX_ANNOUNCEMENT_FIELD_CHARS);
+    const one = announce(dupCell, dupSharer, 'read', '9'.repeat(20));
+    const perRow = dupSharer.length + dupCell.length + 'read'.length + 20;
+    const copies = Math.ceil((MAX_ANNOUNCEMENT_TOTAL_CHARS / perRow) * 3);
+    const real = announce('e'.repeat(64), 'ef'.repeat(32), 'readwrite', null);
+    await withStack(
+      async (ctx) => {
+        const c = mkClient(ctx, masterOf(94));
+        await c.remember('unaffected by the repeat flood', { cellId: 'dup-survivor' });
+
+        const r = await c.recallWithShared();
+        assert.ok(
+          copies * perRow > MAX_ANNOUNCEMENT_TOTAL_CHARS,
+          'the fixture must actually exceed the budget if repeats were charged for',
+        );
+        assert.equal(r.announcements.length, 2, `the duplicate collapses to one, and the real grant survives`);
+        assert.deepEqual(
+          r.announcements.map((a) => a.cellId).sort(),
+          [dupCell, 'e'.repeat(64)].sort(),
+          'the genuine grant announced LAST must not be suppressed by the repeats before it',
+        );
+        // Nothing was withheld, so the flag must not claim otherwise. A truncation flag that a hostile
+        // endpoint can raise at will is a lie it gets to tell in the trusted channel.
+        assert.equal(
+          r.announcementsTruncated,
+          false,
+          'a duplicate withholds nothing — it must not set the truncation flag',
+        );
+        assert.equal(r.cells.length, 1, 'own cells are unaffected');
+      },
+      {
+        transform: (method, text) => {
+          if (method !== 'saihm_recall') return text;
+          const body = JSON.parse(text) as unknown;
+          if (Array.isArray(body))
+            return JSON.stringify([...Array.from({ length: copies }, () => one), real, ...body]);
+          return text;
+        },
+      },
+    );
+  });
+
+  it('a repeat arriving on a FULL budget must not raise the truncation flag', async () => {
+    // The flag half, and the half that was genuinely wrong. Fill the budget exactly, then send an
+    // exact repeat of a row already kept. The budget comparison used to run before the dedup check,
+    // so the repeat's size was weighed against a full budget, the comparison tripped, and
+    // `announcementsTruncated` was set — on a listing from which NOTHING was withheld.
+    //
+    // A truncation flag a hostile endpoint can raise at will is a lie it gets to tell in the trusted
+    // channel: the server renders `(LIST TRUNCATED: the endpoint announced more)` from it, which is
+    // an assertion to the agent that grants exist beyond what it can see.
+    const flood = budgetFillingRows(0);
+    const withRepeat = [...flood, flood[0]];
+    await withStack(
+      async (ctx) => {
+        const c = mkClient(ctx, masterOf(97));
+        const r = await c.recallWithShared();
+        assert.equal(r.announcements.length, flood.length, 'the repeat collapses; every real row stays');
+        assert.equal(
+          r.announcements.reduce((n, a) => n + rowChars(a), 0),
+          MAX_ANNOUNCEMENT_TOTAL_CHARS,
+          'the budget is exactly full — the repeat is tested against the hardest case',
+        );
+        assert.equal(
+          r.announcementsTruncated,
+          false,
+          'nothing was withheld, so the listing must not claim it was cut',
+        );
+      },
+      {
+        transform: (method, text) => {
+          if (method !== 'saihm_recall') return text;
+          const body = JSON.parse(text) as unknown;
+          if (Array.isArray(body)) return JSON.stringify([...withRepeat, ...body]);
+          return text;
+        },
+      },
+    );
+  });
+
+  it('a kept set landing EXACTLY on the byte budget is kept, and one character more is not', async () => {
+    // The boundary the `>` comparison turns on, unexercised until now: `+1` and `>=` both survived a
+    // mutation pass because every fixture overshot the budget by hundreds of characters. Two runs of
+    // the same shape, differing by ONE character, pin the comparison from both sides.
+    for (const [extra, shouldFit] of [
+      [0, true],
+      [1, false],
+    ] as const) {
+      const flood = budgetFillingRows(extra);
+      await withStack(
+        async (ctx) => {
+          const c = mkClient(ctx, masterOf(95 + extra));
+          const r = await c.recallWithShared();
+          const spent = r.announcements.reduce((n, a) => n + rowChars(a), 0);
+          if (shouldFit) {
+            assert.equal(
+              spent,
+              MAX_ANNOUNCEMENT_TOTAL_CHARS,
+              'a set landing exactly ON the budget must be kept whole',
+            );
+            assert.equal(r.announcements.length, flood.length, 'no row may be dropped at the boundary');
+            assert.equal(r.announcementsTruncated, false, 'nothing was withheld at exactly the budget');
+          } else {
+            assert.ok(spent < MAX_ANNOUNCEMENT_TOTAL_CHARS, `one char over must not be admitted: ${spent}`);
+            assert.equal(r.announcements.length, flood.length - 1, 'exactly the over-budget row is cut');
+            assert.equal(r.announcementsTruncated, true, 'and the cut must be reported');
+          }
+        },
+        {
+          transform: (method, text) => {
+            if (method !== 'saihm_recall') return text;
+            const body = JSON.parse(text) as unknown;
+            if (Array.isArray(body)) return JSON.stringify([...flood, ...body]);
+            return text;
+          },
+        },
+      );
+    }
+  });
+
+  it('the announcement caps are PINNED, not merely self-consistent', () => {
+    // Every other test in this file derives its expectations from these constants — deliberately, so
+    // the client and the server's render budget cannot drift apart. The cost of that choice is that
+    // nothing pins the VALUES: a mutation pass widened MAX_ANNOUNCEMENT_FIELD_CHARS from 64 to 4096
+    // with this entire suite green, and 4096 turns 16 rendered pointers into ~66 KB of endpoint-chosen
+    // prose per recall. Coupling and value are two different properties and each needs its own test.
+    assert.equal(MAX_ANNOUNCEMENT_FIELD_CHARS, 64);
+    assert.equal(MAX_SHARED_ANNOUNCEMENTS, 256);
+    assert.equal(MAX_ANNOUNCEMENT_TOTAL_CHARS, 32 * 1024);
   });
 
   it('a row claiming found:true with NO envelope is skipped, not fatal to the whole recall', async () => {

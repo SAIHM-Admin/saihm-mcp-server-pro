@@ -36,15 +36,29 @@ test('safeField TRUNCATES over-budget input and marks it — the half the client
   assert.equal(safeField('c'.repeat(65), 64), `${'c'.repeat(64)}…`);
 });
 
-test('safeField sanitises BEFORE truncating, so the cap can never split a surrogate pair', () => {
-  // Every astral character is 2 UTF-16 code units. Slicing first could cut one in half and emit a
-  // lone surrogate; scrubbing first makes the string pure ASCII, so `.length` is a character count.
+test('the cap can never emit a lone surrogate, whichever side of the slice the scrub runs', () => {
+  // The title and comment here used to claim that scrubbing BEFORE truncating is what prevents a
+  // split surrogate pair, and that slicing first "could cut one in half and emit a lone surrogate".
+  // That is false, and it was refuted by the proof that led to `safeField` being reordered: neither
+  // regex carries the `u` flag, so both operate on CODE UNITS, and a lone surrogate left by a cut is
+  // itself non-ASCII and becomes `?` like everything else. The two orderings are byte-identical
+  // (700,000 differential comparisons, zero differences), so the code now slices FIRST — for cost, to
+  // stop a 16 MiB field from being scrubbed in full before 64 characters of it are kept.
+  //
+  // The assertions were always right; only the reason given for them was wrong. They are what
+  // actually matters, and they hold under either ordering — which is exactly why the causal claim
+  // could sit in the title, refuted, without a single test going red.
   const astral = '😀'.repeat(100); // 200 code units, 0 of them ASCII
   const out = safeField(astral, 64);
   assert.equal(out, `${'?'.repeat(64)}…`);
   for (const ch of out) assert.ok(ch === '?' || ch === '…', `unexpected ${JSON.stringify(ch)}`);
   // No unpaired surrogate survived.
   assert.ok(!/[\uD800-\uDFFF]/.test(out), 'a lone surrogate must never reach the block');
+  // The cut landing INSIDE a pair is the case the old claim was about, so it gets its own input: an
+  // odd budget puts the boundary between the two units of one emoji.
+  const odd = safeField(astral, 63);
+  assert.equal(odd, `${'?'.repeat(63)}…`);
+  assert.ok(!/[\uD800-\uDFFF]/.test(odd), 'a cut through a surrogate pair must still emit no surrogate');
 });
 
 test('safeField neutralises the characters that give a memory line its shape', () => {
@@ -151,4 +165,20 @@ test('failText fences a PLAIN Error and a non-Error throw too — no unfenced br
   assert.ok(!mints(failText(new Error(payload))));
   assert.ok(!mints(failText(payload)), 'the String(e) branch is fenced as well');
   assert.ok(failText(new Error('z'.repeat(5000))).length <= MAX_ERROR_MESSAGE_CHARS + 1);
+  // The Error arm is DISTINCT from the String(e) arm, and nothing said so: collapsing the two is
+  // safe (both are fenced and bounded) and therefore invisible to every assertion above, but it
+  // silently changes every one of our own diagnostics from `boom` to `Error: boom`. Cheap to pin.
+  assert.equal(failText(new Error('boom')), 'boom', 'an Error contributes its message, not its toString');
+  assert.equal(failText('boom'), 'boom');
+  assert.equal(failText({ toString: () => 'boom' }), 'boom', 'the String(e) arm still stringifies');
+});
+
+test('the error budgets are PINNED, not merely self-consistent', () => {
+  // Both assertions that bound these values compute their ceiling FROM the constants, so widening one
+  // keeps the suite green — a mutation pass took MAX_ERROR_MESSAGE_CHARS from 256 to 900 and
+  // MAX_ERROR_CODE_CHARS from 64 to 65 with nothing red. The only incidental brake was
+  // `text.length < huge.length / 1000` above, which permits ~1,000 characters of drift. Coupling and
+  // VALUE are separate properties; the tests above pin the first, these two lines pin the second.
+  assert.equal(MAX_ERROR_CODE_CHARS, 64);
+  assert.equal(MAX_ERROR_MESSAGE_CHARS, 256);
 });
