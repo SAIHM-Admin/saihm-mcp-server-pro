@@ -96,19 +96,41 @@ function fail(e: unknown) {
  * it turns `undefined` into `NaN`, `null` and `''` into `0`, and `[]` into `0` — inventing plausible
  * counts out of missing data. A numeric STRING is accepted because JSON round-tripping a large integer
  * legitimately produces one; anything else is reported as absent rather than guessed at.
+ *
+ * The string branch is DECIMAL-ONLY, and was not: `Number()` applies the whole JS numeric grammar, so
+ * `"0x7fffffff"` became 2147483647, `"0o777"` became 511 and `"0b1111"` became 15 — measured, and
+ * forms JSON round-tripping never produces. That is the same "inventing plausible counts" the
+ * paragraph above rejects, arriving through the branch meant to permit one narrow legitimate case.
+ * The range check goes with it: a count is a non-negative integer, so a negative or fractional value
+ * is absent data too, not a small one.
  */
+const DECIMAL = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?$/;
 const numOrNull = (v: unknown): number | null => {
-  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+  const n = typeof v === 'number' ? v : typeof v === 'string' && DECIMAL.test(v.trim()) ? Number(v) : NaN;
   return Number.isFinite(n) ? n : null;
+};
+/** A count: {@link numOrNull} plus the range a count actually has. */
+const countOrNull = (v: unknown): number | null => {
+  const n = numOrNull(v);
+  return n !== null && n >= 0 && Number.isInteger(n) ? n : null;
 };
 
 /**
  * The device-flow code lifetime in whole minutes, for a line a human reads.
  *
- * `Math.max(1, Math.round(x / 60))` does NOT clamp a bad input: `Math.max(1, NaN)` is `NaN`, so an
- * absent or non-numeric `expiresIn` from the bridge printed "expires in about NaN min" in the middle
- * of otherwise correct instructions. Falls back to the RFC 8628 default lifetime rather than to a
- * number pulled from nowhere, and is capped so the line cannot claim an implausible validity window.
+ * A GUARD AT THE RENDER SITE, and today an unreachable one — stated plainly, because an earlier cut
+ * of this comment claimed the opposite as observed fact. It said a non-numeric `expiresIn` "printed
+ * 'expires in about NaN min'"; it could not have. `acquireFreeEntitlement` already clamps the
+ * bridge's value into [60, 1800] with a 900 fallback before either caller sees it, and that clamp
+ * predates this helper by two commits. `Math.max(1, NaN)` really is `NaN` and the old inline
+ * expression really would have rendered it — but nothing could deliver a NaN to it, so the symptom
+ * was reasoned, not seen, and writing it as seen is the error this review round exists to catch.
+ *
+ * Kept anyway, because the clamp lives in the client and this is the render site: whether a rendered
+ * value is a number is not a property the renderer should have to take on trust from elsewhere. The
+ * 900-second fallback is THIS codebase's convention (client.ts), not a default from RFC 8628 — §3.2
+ * makes `expires_in` REQUIRED and gives it no default, and the only §3.2 parameter with an RFC
+ * default is `interval`. An earlier cut credited the RFC for a number it does not contain.
  */
 const expiryMins = (seconds: unknown): number => {
   const n = numOrNull(seconds);
@@ -146,8 +168,10 @@ server.registerTool(
     try {
       const r = await getClient().remember(content, cellId ? { cellId } : {});
       return ok(
-        // `cellId`, `seq` and `commitmentHash` are the CLIENT's — composed from the envelope this
-        // process sealed, not from the endpoint's response — so the fence here is defence in depth
+        // `cellId`, `seq` and `commitmentHash` are the CLIENT's, though not all from one source:
+        // `cellId` is caller-supplied or client-generated, `seq` is this client's monotonic counter,
+        // and only `commitmentHash` is read off the envelope this process sealed. All three are
+        // local, which is what the security claim rests on — so the fence here is defence in depth
         // rather than the only thing standing between the endpoint and this line. `shardId` is the
         // exception: it names endpoint-side storage, so it is genuinely endpoint-chosen and the fence
         // is load-bearing for it. Fencing all four keeps the renderer's stated property — safe for ANY
@@ -291,10 +315,14 @@ server.registerTool(
         // unfenced for the same reason inverted — it is the agent's own data, and `  ! `/`  > ` are
         // exactly the signals that distinguish the two.
         //
-        // The split covers CR, LF and CRLF, so line endings are normalised to LF and nothing else is
-        // touched. A lone CR has to be in the set: splitting on LF alone would let `\r  [id] seq=1 | …`
-        // ride inside a marked line, and a host that honours CR still starts a fresh visual line from
-        // it. Normalising a line ending is the one alteration worth making — every other byte of the
+        // The split covers EVERY line terminator a renderer may honour, not just the ASCII ones. An
+        // earlier cut split on CR, LF and CRLF alone and claimed that closed line-minting
+        // "completely"; MEASURED, it did not. U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR,
+        // U+0085 NEL, U+000B and U+000C each turned one marked line into THREE rendered lines, two of
+        // them unmarked, one matching the own-memory shape exactly. Its own argument for including a
+        // bare CR — that a host honouring it starts a fresh visual line — applies verbatim to all five,
+        // and this is the one render site where they survive, because it deliberately does not scrub.
+        // Normalising a line ending is the one alteration worth making — every other byte of the
         // memory survives verbatim, which is the property scrubbing could not offer.
         //
         // Length is deliberately NOT capped, matching the own-memory branch: truncating a memory the
@@ -302,7 +330,7 @@ server.registerTool(
         // sharer who was already pinned choosing to store a very large cell — a cost the recipient
         // opted into, not one the endpoint can impose.
         const sharedBody = cell.plaintext
-          .split(/\r\n|\r|\n/)
+          .split(/\r\n|[\n\r\u2028\u2029\u0085\u000b\u000c]/)
           .map((l) => `  > ${l}`)
           .join('\n');
         return ok(
@@ -516,28 +544,34 @@ server.registerTool(
       // Endpoint-supplied counts, resolved ONCE so the text and the structured output can never
       // disagree about whether a value was usable — the text saying `(malformed)` while
       // `structuredContent` carried a number would be worse than either alone.
-      const shards = numOrNull(d.activeShardCount);
-      const sharing = numOrNull(d.activeSharingContracts);
+      const shards = countOrNull(d.activeShardCount);
+      const sharing = countOrNull(d.activeSharingContracts);
       const bfsi = numOrNull(d.bfsi);
+      // The three STRINGS resolve once for the same reason the three numbers do. Bounding only the
+      // structured copy let the two channels disagree about one field in one response: a 16 MiB
+      // `tier` rendered as 64 characters plus the truncation marker in the text — precisely "a
+      // plausible-looking value the endpoint chose the front of" — while structuredContent said
+      // `(malformed)`. Resolving first and fencing the RESULT means the text can only ever be a
+      // display-truncation of the same value the structured channel carries.
+      const tier = boundedOrMarker(d.tier);
+      const custody = boundedOrMarker(d.custody);
+      const snapshotEpoch = boundedOrMarker(d.snapshotEpoch);
       return ok(
         // Every remaining interpolated value is endpoint-chosen, and the `\n  ` here is OURS — which
         // is exactly why a raw field carrying its own newline could mint a further line in this block.
         `SAIHM Session\n  agent=${shortScalar(agentIdHash)}  ` +
-          `tier=${safeScalar(d.tier)}  custody=${safeScalar(d.custody)}\n  ` +
+          `tier=${safeScalar(tier)}  custody=${safeScalar(custody)}\n  ` +
           `shards=${shards ?? MALFORMED}  sharing=${sharing ?? MALFORMED}  ` +
           `bfsi=${bfsi === null ? MALFORMED : bfsi.toFixed(3)} ` +
-          `(R=${safeScalar(d.bfsi_R)} M=${safeScalar(d.bfsi_M)})  epoch=${safeScalar(d.snapshotEpoch)}`,
+          `(R=${safeScalar(d.bfsi_R)} M=${safeScalar(d.bfsi_M)})  epoch=${safeScalar(snapshotEpoch)}`,
         {
           agentIdHash,
-          // Bounded for the reason given on `saihm_remember`'s receipt: these are unsanitised by
-          // design and unbounded by omission. A tier name, a custody label and a decimal epoch are
-          // all an order of magnitude under the ceiling, so the bound only ever catches a flood.
-          tier: boundedOrMarker(d.tier),
-          custody: boundedOrMarker(d.custody),
+          tier,
+          custody,
           activeShardCount: shards,
           activeSharingContracts: sharing,
           bfsi,
-          snapshotEpoch: boundedOrMarker(d.snapshotEpoch),
+          snapshotEpoch,
         },
       );
     } catch (e) {
@@ -739,7 +773,9 @@ server.registerPrompt(
 );
 
 // ============================================================================
-// saihm_join — self-join bootstrap tool (DARK: registered only when SAIHM_SELF_JOIN=1).
+// saihm_join — self-join bootstrap tool (registered BY DEFAULT; SAIHM_SELF_JOIN=0 opts out).
+// This line read "DARK: registered only when SAIHM_SELF_JOIN=1" and was false: selfJoinEnabled()
+// is `!== '0'`. The correct statement was already 38 lines below, in the same block.
 // Lets an agent activate FREE memory straight from a chat prompt with no prior website
 // visit and no pre-provisioned key: it self-generates the sovereign key on this device,
 // runs the Sybil-safe device flow (one human approval), and brings the memory tools
@@ -896,7 +932,7 @@ async function runJoin(): Promise<void> {
       '',
       'SAIHM — subscribe this identity to activate your memory:',
       '',
-      '  ' + url,
+      '  ' + safeField(url, MAX_JOIN_FIELD_CHARS),
       '',
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
@@ -967,7 +1003,7 @@ async function runUpgrade(): Promise<void> {
       '',
       `SAIHM — upgrade this identity to ${target} (monthly). Your memories stay on this same key:`,
       '',
-      '  ' + url,
+      '  ' + safeField(url, MAX_JOIN_FIELD_CHARS),
       '',
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
@@ -997,6 +1033,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  process.stderr.write(String(e instanceof Error ? e.message : e) + '\n');
+  // failText, not String(e.message): this message embeds `res.statusText` and the endpoint's own
+  // `error` field, so raw it carried real newlines, intact `[`/`]`/`|` and live ANSI escapes to the
+  // operator's terminal — the one endpoint-derived path in this file that bypassed the fence every
+  // other error path uses.
+  process.stderr.write(failText(e) + '\n');
   process.exit(1);
 });
