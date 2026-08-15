@@ -65,29 +65,56 @@ export const MAX_SCALAR_CHARS = 64;
 
 /**
  * Fence for ANY endpoint-chosen value interpolated into a text block outside the announcement
- * renderer — the receipt, status and onboarding lines of `saihm_remember`, `saihm_forget`,
- * `saihm_share`, `saihm_revoke_share`, `saihm_status`, `saihm_recall`'s shared-read branch and
- * `saihm_join`.
+ * renderer. Two families, and naming only the first is how this list has gone stale every time:
  *
- * That enumeration is deliberately exhaustive and has twice not been: an earlier cut named four tools,
- * having been written from the list of paths already fenced rather than from a sweep, and missed
- * three. Its replacement claimed to derive from "a complete classification of every `${}` in
- * `server.ts`" — and a `${}` sweep cannot see `'  ' + url`, which is how two CLI sites stayed
- * unfenced through a review that believed itself exhaustive. AN ENUMERATION IS ONLY AS COMPLETE AS
- * ITS PATTERN: sweep for the concept (any value reaching a rendered surface), never for one syntax.
- * When this list and the code disagree the list is what gets believed, so extend it in the same
- * commit as any new render site.
+ *   TOOL RESULTS  — `saihm_remember`, `saihm_forget`, `saihm_share`, `saihm_revoke_share`,
+ *                   `saihm_status`, `saihm_recall`'s shared-read branch, `saihm_join`.
+ *   CLI / STDIO   — `runJoin`, `runFreeJoin`, `runUpgrade` and `main().catch`, which write to
+ *                   `process.stdout`/`stderr` rather than returning a tool result.
+ *
+ * That enumeration has now been wrong THREE times, each time in a different way, and the pattern in
+ * the failures is more useful than the list itself. First cut: written from the paths already fenced
+ * rather than from a sweep — named four tools, missed three. Second: claimed to derive from "a
+ * complete classification of every `${}` in `server.ts`", and a `${}` sweep cannot see `'  ' + url`,
+ * which is how two CLI sites stayed unfenced through a review that believed itself exhaustive. Third:
+ * rewritten twice AFTER `runFreeJoin` became a direct call site and still omitting it and every other
+ * stdio surface, because both rewrites edited the prose without re-running the sweep.
+ *
+ * AN ENUMERATION IS ONLY AS COMPLETE AS ITS PATTERN: sweep for the CONCEPT — any value reaching a
+ * rendered surface, by any syntax, through any writer — never for one syntax. When this list and the
+ * code disagree the list is what gets believed, so extend it in the same commit as any new render
+ * site, and re-run the sweep rather than editing the sentence.
  *
  * Those results are `this.call<T>` casts with no runtime validation, so every field is endpoint-chosen
  * in practice whatever its declared type says, and a declared `boolean` may arrive as a string. The
  * announcement renderer was fenced first because that path is unauthenticated by design; these paths
  * are just as interpolable, and a forged line minted inside a REMEMBERED or SHARED receipt reads as a
  * confirmation of something the agent actually asked for — a strictly more credible channel than an
- * unsolicited pointer list. {@link coerce} before sanitising is what makes a non-string value safe
- * rather than a hole.
+ * unsolicited pointer list.
+ *
+ * A value that is not a PRIMITIVE becomes {@link MALFORMED} rather than a stringification of itself,
+ * matching {@link boundedOrMarker} exactly. Those two functions render the same endpoint field into
+ * the two halves of one response, and they disagreed about what an unusable value looks like: the
+ * bound below rejected `undefined`, `{}` and `[[1],[2]]` outright — its own doc calls that fabrication
+ * "the 'normalised into a plausible one' this module forbids" — while this function stringified them
+ * into the channel an LLM reads as instructions. MEASURED against an endpoint returning `{}`:
+ * `FORGOTTEN [c1] complete=undefined sharesPurged=undefined`, `REVOKED cell=c1 recipient=r1
+ * revoked=undefined`, and `bfsi=(malformed) (R=undefined M=undefined)` — one line carrying BOTH
+ * markers for one failure class, and `complete=undefined` standing as the receipt for an irreversible
+ * erasure. `undefined` reads as a value the endpoint sent; `(malformed)` reads as what it is.
+ *
+ * Primitives still stringify, because a number or boolean IS the value. {@link coerce} remains the
+ * guard for the one thing a primitive cannot do — `String()` throwing — and stays in use unchanged on
+ * the error path, where an `Error` object must reach {@link failText} as its message, not as a marker.
+ *
+ * RESIDUAL, stated rather than hidden: `remember`'s `shardId` can still render as `''`, because the
+ * CLIENT normalises a non-string to the empty string before the server ever sees it. That is a local
+ * decision on a locally-composed receipt, not endpoint fabrication, and unifying it means changing
+ * what `remember()` returns — a different commit. Until then that one field has a third spelling.
  */
+const PRIMITIVE: ReadonlySet<string> = new Set(['string', 'number', 'boolean', 'bigint']);
 export const safeScalar = (v: unknown, max: number = MAX_SCALAR_CHARS): string =>
-  safeField(coerce(v), max);
+  PRIMITIVE.has(typeof v) ? safeField(coerce(v), max) : MALFORMED;
 
 /**
  * Turn an endpoint-chosen value of ANY shape into a string, or into {@link MALFORMED} if it will not
