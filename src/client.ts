@@ -144,9 +144,18 @@ export const MAX_SHARED_ANNOUNCEMENTS = 256;
  *
  * It is deliberately EQUAL to the server's per-field render budget, and that equality is the whole
  * point: it makes one invariant true end to end — every announcement this client keeps renders its
- * `cellId` WHOLE in the text block, never truncated. Were this cap the larger of the two, rows in the
- * gap would render a cut `cellId`, which cannot be passed back to resolve the grant: an
+ * `cellId` at FULL LENGTH in the text block, never truncated. Were this cap the larger of the two,
+ * rows in the gap would render a cut `cellId`, which cannot be passed back to resolve the grant: an
  * actionable-looking pointer that is not actionable.
+ *
+ * "Full length" is the exact claim, and it is narrower than usable. The cap equality closes the
+ * TRUNCATION route to an unusable pointer; it does not close the SANITISER route. `cellId` is
+ * free-form, so a writer may choose one containing a non-ASCII character or a bracket, and
+ * `safeField` replaces each with `?` — `notes-über` renders as `notes-?ber`, full length, no
+ * truncation marker, and just as unusable when fed back. That is the same outcome this equality
+ * exists to prevent, reached through the scrubber instead of the cap, and it is a residual rather
+ * than a bug: the alternative is rendering an unescaped free-form field into a text block, which is
+ * the hole the fence exists to close. A writer who wants a resolvable pointer picks an ASCII id.
  *
  * `cellId` and no other field, which an earlier cut of this comment overstated into "every pointer an
  * agent is shown is a pointer it can act on". Only `cellId` is free-form and therefore only `cellId`
@@ -166,8 +175,21 @@ export const MAX_ANNOUNCEMENT_FIELD_CHARS = 64;
 /**
  * Total character ceiling across all kept announcements — the byte axis stated directly, rather than
  * left to be inferred from the row and field caps. Those two alone bound a listing at 256 x 4 x 64 =
- * 64KB; this binds earlier, whenever rows average more than ~32 chars per field, which is already
- * well above every real row. Exceeding it reports truncation exactly like the row cap, never silently.
+ * 64KB; this binds earlier, whenever rows average more than ~32 chars per field.
+ *
+ * That threshold is BELOW a real row, not above it, and an earlier cut of this comment had it exactly
+ * backwards — it said ~32 was "already well above every real row", which would make this cap a
+ * defence against pathological input only. MEASURED against the row shape the paragraph above
+ * defines (a 64-hex sharer, a full sha256 `cellId`): 64+64+`read` = 132 chars = 33.00 per field, 248
+ * rows kept; with `readwrite` = 137 = 34.25, 239 rows; plus a 10-digit epoch = 147 = 36.75, 222 rows.
+ * Every real-shaped row is above the threshold, so for a LEGITIMATE listing it is this cap and not
+ * the 256-row cap that binds — an agent holding 222 or more grants sees `(LIST TRUNCATED)` from the
+ * byte axis. The repo's own coverage already said so (`client_announce.test.ts` trips the budget at
+ * row ~239, `server_shared_announce.test.ts` admits 219 of its rows) while this sentence claimed the
+ * opposite. Exceeding it reports truncation exactly like the row cap, never silently.
+ *
+ * The consequence is a real limit on grant listings, not a rounding detail: past ~222 grants the
+ * pointer list is partial by design, and the count of what was withheld is what makes that honest.
  */
 export const MAX_ANNOUNCEMENT_TOTAL_CHARS = 32 * 1024;
 
