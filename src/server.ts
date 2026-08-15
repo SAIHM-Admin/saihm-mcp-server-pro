@@ -31,8 +31,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   MALFORMED,
+  MAX_JOIN_FIELD_CHARS,
+  boundedOrMarker,
   safeField,
   safeScalar,
+  shortScalar,
   hexOrMarker,
   scopeOrMarker,
   epochOrMarker,
@@ -85,6 +88,33 @@ function fail(e: unknown) {
   return { content: [{ type: 'text' as const, text: failText(e) }], isError: true as const };
 }
 
+/**
+ * An endpoint-supplied count or score, resolved to the number it actually is, or to `null`.
+ *
+ * The declared TypeScript type of these fields is `number`, but they arrive through an unvalidated
+ * cast, so the declaration is an expectation and not a guarantee. `Number(v)` alone is not the answer:
+ * it turns `undefined` into `NaN`, `null` and `''` into `0`, and `[]` into `0` — inventing plausible
+ * counts out of missing data. A numeric STRING is accepted because JSON round-tripping a large integer
+ * legitimately produces one; anything else is reported as absent rather than guessed at.
+ */
+const numOrNull = (v: unknown): number | null => {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * The device-flow code lifetime in whole minutes, for a line a human reads.
+ *
+ * `Math.max(1, Math.round(x / 60))` does NOT clamp a bad input: `Math.max(1, NaN)` is `NaN`, so an
+ * absent or non-numeric `expiresIn` from the bridge printed "expires in about NaN min" in the middle
+ * of otherwise correct instructions. Falls back to the RFC 8628 default lifetime rather than to a
+ * number pulled from nowhere, and is capped so the line cannot claim an implausible validity window.
+ */
+const expiryMins = (seconds: unknown): number => {
+  const n = numOrNull(seconds);
+  return n === null || n <= 0 ? 15 : Math.min(1440, Math.max(1, Math.round(n / 60)));
+};
+
 server.registerTool(
   'saihm_remember',
   {
@@ -116,11 +146,25 @@ server.registerTool(
     try {
       const r = await getClient().remember(content, cellId ? { cellId } : {});
       return ok(
-        `REMEMBERED [${r.cellId}] seq=${r.seq} shard=${r.shardId} commit=${r.commitmentHash.slice(0, 16)}…`,
+        // `cellId`, `seq` and `commitmentHash` are the CLIENT's — composed from the envelope this
+        // process sealed, not from the endpoint's response — so the fence here is defence in depth
+        // rather than the only thing standing between the endpoint and this line. `shardId` is the
+        // exception: it names endpoint-side storage, so it is genuinely endpoint-chosen and the fence
+        // is load-bearing for it. Fencing all four keeps the renderer's stated property — safe for ANY
+        // input — true independently of what the client happens to guarantee today, which is what a
+        // later refactor of `remember()` would otherwise silently break. It matters more here than in
+        // the announcement list: this line is a RECEIPT for a write the agent explicitly requested,
+        // so a memory-shaped line minted inside it arrives with the agent's own intent behind it.
+        `REMEMBERED [${safeScalar(r.cellId)}] seq=${safeScalar(r.seq)} ` +
+          `shard=${safeScalar(r.shardId)} commit=${shortScalar(r.commitmentHash)}`,
         {
           cellId: r.cellId,
           seq: String(r.seq),
-          shardId: String(r.shardId),
+          // The only endpoint-chosen value in this result, and so the only one that needs a bound.
+          // Unsanitised on purpose — structured output is a named field of a declared schema, not a
+          // line in a text block — but SIZE is a separate axis from injection, and it was uncapped
+          // here while the announcement channel was capped on both.
+          shardId: boundedOrMarker(r.shardId),
           commitmentHash: r.commitmentHash,
         },
       );
@@ -228,12 +272,49 @@ server.registerTool(
           });
         }
         const mem = { cellId: cell.cellId, seq: String(cell.seq), plaintext: cell.plaintext };
-        return ok(`SHARED-RECALL [${cell.cellId}] seq=${cell.seq} | ${cell.plaintext}`, {
-          count: 1,
-          memories: [mem],
-          shared: [],
-          sharedTruncated: false,
-        });
+        // A FOREIGN plaintext, rendered so it cannot be read as one of the agent's OWN memories.
+        //
+        // This content is authenticated — `recallShared` verifies the envelope's ML-DSA signature
+        // against the sharer pinned OUT-OF-BAND and rejects a cellId that is not the one asked for —
+        // so the writer here is the SHARER, not the endpoint. That is a real trust boundary and not a
+        // reason to skip the fence: pinning an identity to read ONE cell they offered is not a
+        // decision to let them mint lines shaped like the agent's own authenticated memory, which the
+        // old single-line `[id] seq=n | text` form let any embedded newline do exactly.
+        //
+        // The fence is a per-line PREFIX, not a sanitiser, and that choice is the point. Scrubbing
+        // would be the wrong tool twice over: it is someone's memory, so collapsing non-ASCII would
+        // destroy any content not written in English and strip the `|` or `[` from a legitimate note,
+        // and unlike an announcement `cellId` there is no adversary-prose budget to defend — the agent
+        // asked for this cell by id. Marking every PHYSICAL line closes line-minting completely and
+        // losslessly: an embedded newline can only ever produce another marked line, never a top-level
+        // one, and no byte of the memory is altered. Own-cell plaintext below stays unmarked and
+        // unfenced for the same reason inverted — it is the agent's own data, and `  ! `/`  > ` are
+        // exactly the signals that distinguish the two.
+        //
+        // The split covers CR, LF and CRLF, so line endings are normalised to LF and nothing else is
+        // touched. A lone CR has to be in the set: splitting on LF alone would let `\r  [id] seq=1 | …`
+        // ride inside a marked line, and a host that honours CR still starts a fresh visual line from
+        // it. Normalising a line ending is the one alteration worth making — every other byte of the
+        // memory survives verbatim, which is the property scrubbing could not offer.
+        //
+        // Length is deliberately NOT capped, matching the own-memory branch: truncating a memory the
+        // agent explicitly requested would corrupt the answer to its own question. The residual is a
+        // sharer who was already pinned choosing to store a very large cell — a cost the recipient
+        // opted into, not one the endpoint can impose.
+        const sharedBody = cell.plaintext
+          .split(/\r\n|\r|\n/)
+          .map((l) => `  > ${l}`)
+          .join('\n');
+        return ok(
+          `SHARED-RECALL [${safeScalar(cell.cellId)}] seq=${safeScalar(cell.seq)} — content below is ` +
+            `ANOTHER AGENT'S, not your own memory\n${sharedBody}`,
+          {
+            count: 1,
+            memories: [mem],
+            shared: [],
+            sharedTruncated: false,
+          },
+        );
       }
 
       // Partial shared-read args (record/cellId but no sharer pin) => fail loud rather than silently
@@ -287,8 +368,12 @@ server.registerTool(
       // can only be sanitised, never checked. MEASURED worst case at RENDER_LIMIT 16: the free-form
       // `cellId` contributes 16 × 64 = 1,024 characters, but `sharer` and `expiry` are endpoint-chosen
       // too, so the endpoint-supplied total is 16 × (64 + 64 + 20) = 2,368 and the whole text block
-      // tops out at 3,547 bytes. (An earlier cut of this comment claimed the cellId figure WAS the
-      // per-recall total and called it "near 1 KB" — it was counting one of the three fields.) That
+      // tops out at 3,595 bytes over a 200-character worst-case pointer line. Reaching either number
+      // requires an OFF-CONTRACT scope: `(malformed)` is 11 characters where `readwrite` is 9, so a
+      // fixture using a legal scope stops at 3,563 bytes and 198 characters and leaves the ceiling
+      // untested. (Two earlier cuts of this comment were wrong in the other direction: one called the
+      // cellId figure the per-recall total, at "near 1 KB", counting one of three fields; its
+      // replacement said 3,547, which was the legal-scope fixture mistaken for the ceiling.) That
       // still lists more grants than a real agent is likely to hold; the withheld count is always
       // stated, and `structuredContent.shared` stays complete.
       const RENDER_LIMIT = 16;
@@ -366,7 +451,14 @@ server.registerTool(
     try {
       const r = await getClient().forget(id);
       return ok(
-        `FORGOTTEN [${safeScalar(r.cellId)}] complete=${safeScalar(r.complete)} ` +
+        // The cell NAMED here is the one the agent asked to erase, not the one the endpoint echoed
+        // back. The echo is an unvalidated cast, so `forget('cellA')` answered with `cellId:'cellB'`
+        // used to print `FORGOTTEN [cellB]` — and this is a DESTRUCTIVE, irreversible tool, so the
+        // agent would come away believing it had erased a cell it had not touched and spared one it
+        // had just destroyed. Fencing the echo makes it harmless to render; not rendering it makes
+        // the line correct. The remaining three fields are outcomes only the endpoint can report,
+        // so they stay its own — fenced, because that is exactly what an unvalidated cast needs.
+        `FORGOTTEN [${safeScalar(id)}] complete=${safeScalar(r.complete)} ` +
           `sharesPurged=${safeScalar(r.sharesPurged)} epoch=${safeScalar(r.epoch)}`,
       );
     } catch (e) {
@@ -386,9 +478,21 @@ server.registerTool(
       agentIdHash: z.string(),
       tier: z.string(),
       custody: z.string(),
-      activeShardCount: z.number(),
-      activeSharingContracts: z.number(),
-      bfsi: z.number(),
+      // NULLABLE, and that is a deliberate widening of a shipped contract. `status()` is an
+      // unvalidated cast, so these three arrive as whatever the endpoint sent. Declaring them
+      // strictly `z.number()` did not make them numbers — it made ONE non-numeric character enough to
+      // fail output validation, and this SDK converts that failure into `isError: true` carrying
+      // `MCP error -32602 Output validation error` IN PLACE OF the whole composed result. The fenced
+      // text, markers and all, is discarded; the agent sees what reads like a bug in its own client,
+      // and the endpoint can hold `saihm_status` in that state indefinitely. That is the exact
+      // degradation the note on `saihm_recall`'s outputSchema warns about, and it was reintroduced
+      // here. `null` says "the endpoint did not supply a usable number" and says it INSIDE a
+      // successful result; a sentinel like `0` or `-1` would be worse than either, since a malformed
+      // value must never be normalised into a plausible one. A consumer that was validating strictly
+      // was already receiving an error for these inputs, so nothing that worked stops working.
+      activeShardCount: z.number().nullable(),
+      activeSharingContracts: z.number().nullable(),
+      bfsi: z.number().nullable(),
       snapshotEpoch: z.string(),
     },
     annotations: {
@@ -401,25 +505,39 @@ server.registerTool(
   },
   async () => {
     try {
-      const d = await getClient().status();
+      const client = getClient();
+      const d = await client.status();
+      // The identity is READ LOCALLY, never from the response. `status()` is an unvalidated cast, so
+      // `d.agentIdHashHex` is simply what the endpoint chose to say this agent is — and the agent's
+      // own identity is the last value that should come from a party it does not trust: reported
+      // wrongly, it is the hash the agent then publishes for others to pin. The client derives it from
+      // its own key material, so there is a local answer and no reason to ask.
+      const agentIdHash = client.agentIdHash;
+      // Endpoint-supplied counts, resolved ONCE so the text and the structured output can never
+      // disagree about whether a value was usable — the text saying `(malformed)` while
+      // `structuredContent` carried a number would be worse than either alone.
+      const shards = numOrNull(d.activeShardCount);
+      const sharing = numOrNull(d.activeSharingContracts);
+      const bfsi = numOrNull(d.bfsi);
       return ok(
-        // Every interpolated value is endpoint-chosen (`status()` is an unvalidated cast), and the
-        // `\n  ` here is OURS — which is exactly why a raw field carrying its own newline could mint
-        // a further line in this block. `bfsi` is checked rather than fenced because `.toFixed` on a
-        // non-number throws, and failing closed beats rendering a marker for a number.
-        `SAIHM Session\n  agent=${safeScalar(d.agentIdHashHex).slice(0, 16)}…  ` +
+        // Every remaining interpolated value is endpoint-chosen, and the `\n  ` here is OURS — which
+        // is exactly why a raw field carrying its own newline could mint a further line in this block.
+        `SAIHM Session\n  agent=${shortScalar(agentIdHash)}  ` +
           `tier=${safeScalar(d.tier)}  custody=${safeScalar(d.custody)}\n  ` +
-          `shards=${safeScalar(d.activeShardCount)}  sharing=${safeScalar(d.activeSharingContracts)}  ` +
-          `bfsi=${typeof d.bfsi === 'number' ? d.bfsi.toFixed(3) : MALFORMED} ` +
+          `shards=${shards ?? MALFORMED}  sharing=${sharing ?? MALFORMED}  ` +
+          `bfsi=${bfsi === null ? MALFORMED : bfsi.toFixed(3)} ` +
           `(R=${safeScalar(d.bfsi_R)} M=${safeScalar(d.bfsi_M)})  epoch=${safeScalar(d.snapshotEpoch)}`,
         {
-          agentIdHash: d.agentIdHashHex,
-          tier: String(d.tier),
-          custody: String(d.custody),
-          activeShardCount: Number(d.activeShardCount),
-          activeSharingContracts: Number(d.activeSharingContracts),
-          bfsi: d.bfsi,
-          snapshotEpoch: String(d.snapshotEpoch),
+          agentIdHash,
+          // Bounded for the reason given on `saihm_remember`'s receipt: these are unsanitised by
+          // design and unbounded by omission. A tier name, a custody label and a decimal epoch are
+          // all an order of magnitude under the ceiling, so the bound only ever catches a flood.
+          tier: boundedOrMarker(d.tier),
+          custody: boundedOrMarker(d.custody),
+          activeShardCount: shards,
+          activeSharingContracts: sharing,
+          bfsi,
+          snapshotEpoch: boundedOrMarker(d.snapshotEpoch),
         },
       );
     } catch (e) {
@@ -472,16 +590,23 @@ server.registerTool(
     expiryEpoch,
   }) => {
     try {
-      const r = await getClient().share({
+      const client = getClient();
+      await client.share({
         cellId,
         recipientRecord,
         recipientPinnedAgentIdHashHex,
         ...(scope ? { scope } : {}),
         ...(expiryEpoch ? { expiryEpoch: BigInt(expiryEpoch) } : {}),
       });
+      // Every value on this line is known locally, so none of it is read back from the response: the
+      // cell and the recipient are the agent's own arguments, and the sharer is this client. The
+      // endpoint's echo named all three, which let a grant to one recipient be reported as a grant to
+      // another — the one confirmation an agent has that it shared with who it meant to. `share()`
+      // already throws on any failure, so reaching this line IS the endpoint's acknowledgement; there
+      // is nothing its echo could add that is not either already known or not to be trusted.
       return ok(
-        `SHARED cell=${safeScalar(r.cellId)} sharer=${safeScalar(r.sharer).slice(0, 16)}… ` +
-          `recipient=${safeScalar(r.recipient).slice(0, 16)}…`,
+        `SHARED cell=${safeScalar(cellId)} sharer=${shortScalar(client.agentIdHash)} ` +
+          `recipient=${shortScalar(recipientPinnedAgentIdHashHex)}`,
       );
     } catch (e) {
       return fail(e);
@@ -513,7 +638,10 @@ server.registerTool(
     try {
       const r = await getClient().revokeShare(cellId, recipientHex);
       return ok(
-        `REVOKED cell=${safeScalar(r.cellId)} recipient=${safeScalar(r.recipient).slice(0, 16)}… ` +
+        // Cell and recipient are the agent's own arguments, for the reason given on `saihm_share`;
+        // `revoked` is the endpoint's report of what it did, which only it can know, so it is the one
+        // value here that has to be taken on trust — and therefore the one that has to be fenced.
+        `REVOKED cell=${safeScalar(cellId)} recipient=${shortScalar(recipientHex)} ` +
           `revoked=${safeScalar(r.revoked)}`,
       );
     } catch (e) {
@@ -640,14 +768,24 @@ async function waitForJoinSignal(ms: number): Promise<void> {
 
 function joinPendingText(s: JoinState): string {
   const p = s.prompt as FreeDevicePrompt;
-  const mins = Math.max(1, Math.round(p.expiresIn / 60));
+  const mins = expiryMins(p.expiresIn);
   const keyNote = s.createdKey
     ? `A new memory key was created and saved to ${s.keyPath} — keep this file safe; it is the only key to your memory and cannot be recovered.`
     : `Using your existing memory key (${s.keyPath}).`;
+  // Both values come from the onboarding bridge, which is the SAME ORIGIN as the memory endpoint —
+  // one hostile operator controls both — and the client type-checks them only as non-empty strings.
+  // Rendered raw they were the softest target in the server: this block exists to be RELAYED TO A
+  // HUMAN as numbered instructions, so a newline inside `verificationUri` appends steps 3 and 4 in
+  // the same authoritative voice, and the reader has been told to follow them. `saihm_join` is
+  // registered by DEFAULT, so this is reachable before any memory tool has been called once.
+  //
+  // A URI is fenced, not validated to a scheme, on purpose: the operator legitimately chooses its own
+  // verification host, so there is no allowlist to check against, and a mangled-but-visible URI is a
+  // failure the user can see and report. What the fence removes is the ability to add LINES.
   return [
     'To activate your free SAIHM memory, in a browser:',
-    `  1. open   ${p.verificationUri}`,
-    `  2. enter  ${p.userCode}`,
+    `  1. open   ${safeField(p.verificationUri, MAX_JOIN_FIELD_CHARS)}`,
+    `  2. enter  ${safeScalar(p.userCode)}`,
     `The code expires in about ${mins} min. Approve it, then ask me to "Join SAIHM" again and I will finish.`,
     keyNote,
   ].join('\n');
@@ -786,10 +924,14 @@ async function runFreeJoin(): Promise<void> {
           '',
           'SAIHM — activate your FREE memory. In a browser:',
           '',
-          `  1. open   ${p.verificationUri}`,
-          `  2. enter  ${p.userCode}`,
+          // Fenced for the same reason as the MCP copy in `joinPendingText`, even though this one
+          // goes to a terminal rather than to an agent: the bridge chooses both strings, and a bare
+          // CR here lets it overwrite the code it just printed with a different one while the human
+          // watches. A terminal is a rendering surface too.
+          `  1. open   ${safeField(p.verificationUri, MAX_JOIN_FIELD_CHARS)}`,
+          `  2. enter  ${safeScalar(p.userCode)}`,
           '',
-          `  (code expires in ~${Math.max(1, Math.round(p.expiresIn / 60))} min) — waiting for authorization…`,
+          `  (code expires in ~${expiryMins(p.expiresIn)} min) — waiting for authorization…`,
           '',
         ].join('\n'),
       ),
