@@ -8,14 +8,24 @@
 //   - regression: no sharer params => the base recall(query) path is unchanged; tool count stays 8.
 // Runner: npx tsx --test tests/server_recall_shared.test.ts
 import { test } from 'node:test';
-import assert from 'node:assert';
+import { strict as assert } from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
-import { deriveIdentity, encodeIdentityRecord, toHex, fromHex } from '@saihm/client-pro';
+import {
+  deriveIdentity,
+  encodeIdentityRecord,
+  toHex,
+  fromHex,
+  utf8,
+  sealCell,
+  shareCell,
+  encodeEnvelope,
+  encodeShareEnvelope,
+} from '@saihm/client-pro';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, '../src/server.ts');
@@ -23,14 +33,62 @@ const TSX = resolve(HERE, '../node_modules/.bin/tsx');
 const MASTER_HEX = '33'.repeat(32); // the recipient server boots from this
 const b64url = (o: unknown): string => Buffer.from(JSON.stringify(o)).toString('base64url');
 
+/**
+ * The identity the server under test derives from MASTER_HEX. Recomputed here (same derivation, same
+ * input) so a share can be addressed to the real recipient — a share built for anyone else is rejected
+ * by recallShared's `foreign_share` check, so this equality is load-bearing, not incidental.
+ */
+const RECIPIENT = deriveIdentity(fromHex(MASTER_HEX));
+
 interface Rpc {
   id?: number | string;
   result?: any;
   error?: any;
 }
 
-/** Mock endpoint: onboard challenge/verify + a /mcp that records the last saihm_recall params. */
-function startMock(): { server: Server; base: () => string; lastRecall: () => any } {
+/**
+ * Build a REAL share of a REAL sealed cell, from a synthetic sharer to the server-under-test.
+ *
+ * Every byte here is produced by the shipped crypto, not hand-written: `recallShared` verifies the
+ * sharer pin, the share signature, the recipient binding, the sharer's envelope signature and the
+ * AEAD tag, so a fixture cannot fake its way past it. The reply shape is grounded on the endpoint's
+ * emitting line, which returns `{found: true, wire, contentWire}` where `contentWire` is the SHARER's
+ * own envelope — sharer-KEK-wrapped DEK included, opaque to the recipient — which is precisely what
+ * `sealCell` under the sharer's KEK produces here.
+ */
+function buildShare(sharerSeed: number, cellId: string, plaintext: string, seq = 1n) {
+  const A = deriveIdentity(new Uint8Array(32).fill(sharerSeed));
+  const envelope = sealCell({
+    plaintext: utf8(plaintext),
+    kek: A.kek,
+    mldsaSecretKey: A.mldsaSecretKey,
+    mldsaPubKey: A.mldsaPubKey,
+    agentIdHash: A.agentIdHash,
+    cellId,
+    seq,
+    tier: 'PRO',
+  });
+  const share = shareCell({
+    envelope,
+    sharerKek: A.kek,
+    sharerMldsaSecretKey: A.mldsaSecretKey,
+    sharerAgentIdHash: A.agentIdHash,
+    recipientRecord: RECIPIENT.identityRecord,
+    recipientPinnedAgentIdHash: RECIPIENT.agentIdHash,
+  });
+  return {
+    sharer: A,
+    reply: { found: true, wire: encodeShareEnvelope(share), contentWire: encodeEnvelope(envelope) },
+  };
+}
+
+/**
+ * Mock endpoint: onboard challenge/verify + a /mcp that records the last saihm_recall params.
+ * `sharedReply` overrides the shared-read reply (default: no live grant).
+ */
+function startMock(
+  sharedReply?: unknown,
+): { server: Server; base: () => string; lastRecall: () => any } {
   let lastNonce = '';
   let lastRecallParams: any = null;
   const server = createServer((req, res) => {
@@ -85,8 +143,8 @@ function startMock(): { server: Server; base: () => string; lastRecall: () => an
         }
         if (m === 'saihm_recall') {
           lastRecallParams = params;
-          // A shared-read carries {sharer, cellId}; report no live grant (null path).
-          if (params.sharer) return send(200, { found: false });
+          // A shared-read carries {sharer, cellId}; default to no live grant (null path).
+          if (params.sharer) return send(200, sharedReply ?? { found: false });
           // Own recall-all => empty.
           return send(200, []);
         }
@@ -165,6 +223,26 @@ async function handshake(d: Driver): Promise<string[]> {
   const list = await d.rpc(2, 'tools/list', {});
   return (list.result.tools as { name: string }[]).map((t) => t.name).sort();
 }
+/**
+ * Call a tool and expose the WHOLE result. An outputSchema violation (e.g. a branch that omits a
+ * declared key) is not an `isError` result — the SDK raises it as a JSON-RPC error, so `result` is
+ * absent entirely. Surfacing that as a readable assertion failure rather than a TypeError on
+ * `result.content` is the point of this helper.
+ */
+const callFull = async (
+  d: Driver,
+  id: number,
+  name: string,
+  args: unknown,
+): Promise<{ text: string; isError: boolean; structured: any }> => {
+  const r = await d.rpc(id, 'tools/call', { name, arguments: args });
+  assert.ok(r.result, `tools/call ${name} returned a JSON-RPC error: ${JSON.stringify(r.error)}`);
+  return {
+    text: r.result.content[0].text as string,
+    isError: r.result.isError === true,
+    structured: r.result.structuredContent,
+  };
+};
 const callText = async (d: Driver, id: number, name: string, args: unknown): Promise<{ text: string; isError: boolean }> => {
   const r = await d.rpc(id, 'tools/call', { name, arguments: args });
   return { text: r.result.content[0].text as string, isError: r.result.isError === true };
@@ -228,6 +306,43 @@ test('saihm_recall shared-read: sharer pin without record/cellId is rejected cle
   }
 });
 
+test('saihm_recall shared-read: EACH partial-arg shape is rejected before any network call', async () => {
+  // The guard is `!sharerRecord || !cellId`. The pin-alone case leaves BOTH operands falsy, so it
+  // cannot distinguish `||` from `&&` — with `&&`, the two shapes below sail through to the endpoint
+  // carrying `cellId: undefined` and surface a misleading malformed_response instead of the
+  // actionable message. Each partial is therefore asserted on its own.
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp');
+  try {
+    await handshake(d);
+    const A = deriveIdentity(new Uint8Array(32).fill(62));
+    const pin = toHex(A.agentIdHash);
+    const record = encodeIdentityRecord(A.identityRecord);
+
+    const noCellId = await callText(d, 3, 'saihm_recall', {
+      sharerPinnedAgentIdHashHex: pin,
+      sharerRecord: record,
+    });
+    assert.equal(noCellId.isError, true);
+    assert.match(noCellId.text, /sharerPinnedAgentIdHashHex, sharerRecord, and cellId together/);
+
+    const noRecord = await callText(d, 4, 'saihm_recall', {
+      sharerPinnedAgentIdHashHex: pin,
+      cellId: 'cellShared7',
+    });
+    assert.equal(noRecord.isError, true);
+    assert.match(noRecord.text, /sharerPinnedAgentIdHashHex, sharerRecord, and cellId together/);
+
+    // Neither partial may reach the network — the guard is before the client call, and a leaked
+    // request would also mean the endpoint learned which cell this agent was reaching for.
+    assert.equal(mock.lastRecall(), null, 'a partial shared-read must not call the endpoint');
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
 test('saihm_recall shared-read: record/cellId WITHOUT the sharer pin fails loud (no silent own-recall)', async () => {
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
@@ -245,18 +360,85 @@ test('saihm_recall shared-read: record/cellId WITHOUT the sharer pin fails loud 
   }
 });
 
+test('saihm_recall shared-read SUCCESS: a real grant opens, and the branch emits its declared keys', async () => {
+  const { sharer, reply } = buildShare(70, 'cellSharedOK', 'shared payload OK');
+  const mock = startMock(reply);
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp');
+  try {
+    await handshake(d);
+    const r = await callFull(d, 3, 'saihm_recall', {
+      sharerPinnedAgentIdHashHex: toHex(sharer.agentIdHash),
+      sharerRecord: encodeIdentityRecord(sharer.identityRecord),
+      cellId: 'cellSharedOK',
+    });
+    assert.equal(r.isError, false, `shared-read errored: ${r.text}`);
+    // The whole chain ran: pin check, share sig, recipient binding, envelope sig, AEAD open.
+    assert.equal(r.text, 'SHARED-RECALL [cellSharedOK] seq=1 | shared payload OK');
+    // `shared`/`sharedTruncated` are DECLARED on the outputSchema, so this branch must emit them —
+    // omitting either turns a successful shared read into a hard JSON-RPC error, which callFull
+    // would report above. Assert the values, not merely that the call survived.
+    assert.equal(r.structured.count, 1);
+    assert.deepEqual(r.structured.memories, [
+      { cellId: 'cellSharedOK', seq: '1', plaintext: 'shared payload OK' },
+    ]);
+    assert.deepEqual(r.structured.shared, []);
+    assert.equal(r.structured.sharedTruncated, false);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('saihm_recall shared-read: grant live but content undelivered => not found, declared keys still emitted', async () => {
+  // A real endpoint state, not a hypothetical: contentWire is `undefined` when content delivery is
+  // unwired or the cell was forgotten (fail-closed, no plaintext). recallShared returns null, so the
+  // tool takes its `!cell` branch — which must still emit the declared keys.
+  const { sharer, reply } = buildShare(71, 'cellNoContent', 'never delivered');
+  const mock = startMock({ found: reply.found, wire: reply.wire });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp');
+  try {
+    await handshake(d);
+    const r = await callFull(d, 3, 'saihm_recall', {
+      sharerPinnedAgentIdHashHex: toHex(sharer.agentIdHash),
+      sharerRecord: encodeIdentityRecord(sharer.identityRecord),
+      cellId: 'cellNoContent',
+    });
+    assert.equal(r.isError, false, `shared-read errored: ${r.text}`);
+    assert.match(r.text, /No shared cell found/i);
+    assert.doesNotMatch(r.text, /never delivered/, 'must not leak plaintext it never opened');
+    assert.equal(r.structured.count, 0);
+    assert.deepEqual(r.structured.memories, []);
+    assert.deepEqual(r.structured.shared, []);
+    assert.equal(r.structured.sharedTruncated, false);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
 test('saihm_recall base path unchanged: no sharer params => own recall(query)', async () => {
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   const d = startServer(mock.base() + '/mcp');
   try {
     await handshake(d);
-    const r = await callText(d, 3, 'saihm_recall', { query: 'anything' });
+    const r = await callFull(d, 3, 'saihm_recall', { query: 'anything' });
     assert.equal(r.isError, false);
     assert.match(r.text, /No memories stored\./);
-    // Own recall must NOT send a sharer field to the endpoint.
+    // The own-memories branch emits the same declared keys — an announcement-free response is `[]`,
+    // never an absent key, so a consumer never has to distinguish "none" from "not reported".
+    assert.equal(r.structured.count, 0);
+    assert.deepEqual(r.structured.memories, []);
+    assert.deepEqual(r.structured.shared, []);
+    assert.equal(r.structured.sharedTruncated, false);
+    // Own recall must NOT send a sharer field to the endpoint. Asserted in two steps on purpose: a
+    // single `!p || p.sharer === undefined` passes vacuously if the recall never reached the endpoint
+    // at all, turning "the property held" into "the property held OR was never tested".
     const p = mock.lastRecall();
-    assert.ok(!p || p.sharer === undefined, 'own recall must not carry a sharer param');
+    assert.ok(p, 'own recall must actually have reached the endpoint');
+    assert.equal(p.sharer, undefined, 'own recall must not carry a sharer param');
   } finally {
     d.proc.kill();
     await new Promise<void>((r) => mock.server.close(() => r()));
