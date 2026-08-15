@@ -24,18 +24,31 @@ import { SaihmEndpointError, MAX_ERROR_CODE_CHARS } from './client.js';
  * of a declared schema, where it cannot masquerade as a memory, and mangling it would corrupt data.
  */
 export const safeField = (s: string, max: number): string => {
-  // The replace runs BEFORE the slice, so `flat` is pure ASCII and .length is a character count.
-  // Precisely: neither regex carries the `u` flag, so both match CODE UNITS and substitute 1:1 —
-  // the scrub is length-preserving, and a lone surrogate is itself non-ASCII and becomes `?`. So
-  // slicing first would give byte-identical output (verified across boundary-straddling astral
-  // inputs); the ordering is chosen because it makes `.length` mean characters rather than because
-  // the alternative leaks a split pair. Add a `u` flag to either regex and that stops holding — an
-  // astral char would collapse to ONE `?`, lengths would diverge, and the slice would need re-
-  // examining. The `…` marker is appended after sanitising and is
-  // server-controlled, so it is the one non-ASCII character this function can emit, and an endpoint
-  // that supplies its own `…` gets it collapsed to `?`: the truncation marker is unforgeable.
-  const flat = s.replace(/[^\x20-\x7E]/g, '?').replace(/[[\]|]/g, '?');
-  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+  // SLICE FIRST, then scrub — and that ordering is load-bearing for COST, not for correctness.
+  //
+  // Correctness first, because it is what licenses the reordering: neither regex carries the `u` flag,
+  // so both match CODE UNITS and substitute 1:1. The scrub is therefore length-preserving and
+  // positionwise independent — each unit maps to itself or to `?` regardless of its neighbours — so
+  // scrub-then-slice and slice-then-scrub are byte-identical, and `s.length > max` is the same test as
+  // `scrub(s).length > max`. A lone surrogate left by the cut is itself non-ASCII and becomes `?`, so
+  // the cut can never emit one. (Verified by differential fuzzing over astral, lone-surrogate, bracket
+  // and newline inputs straddling the boundary at max in {1..6,64}: zero differing outputs.)
+  // Add a `u` flag to either regex and ALL of that stops holding — an astral char would collapse to
+  // ONE `?`, lengths would diverge, and the two orderings would genuinely differ.
+  //
+  // Cost is why the order is this one and not the other. Scrubbing the FULL input bounded the OUTPUT
+  // but not the WORK: a 16 MiB non-ASCII field reduced to a 189-byte line, having spent 9.2s of a
+  // single-threaded event loop that every concurrent tool call shares — measured 50-64x the ASCII
+  // cost for the same output. Cutting to `max` first makes the work proportional to what is kept.
+  //
+  // The `…` marker is appended after sanitising and is server-controlled, so it is the one non-ASCII
+  // character this function can emit, and an endpoint that supplies its own `…` gets it collapsed to
+  // `?`: the truncation marker is unforgeable.
+  const over = s.length > max;
+  const flat = (over ? s.slice(0, max) : s)
+    .replace(/[^\x20-\x7E]/g, '?')
+    .replace(/[[\]|]/g, '?');
+  return over ? `${flat}…` : flat;
 };
 
 /** Budget for a single endpoint-chosen scalar in a receipt/status line. These are short by nature. */
@@ -43,18 +56,81 @@ export const MAX_SCALAR_CHARS = 64;
 
 /**
  * Fence for ANY endpoint-chosen value interpolated into a text block outside the announcement
- * renderer — the receipt and status lines of `saihm_forget`, `saihm_share`, `saihm_revoke_share` and
- * `saihm_status`.
+ * renderer — the receipt, status and onboarding lines of `saihm_remember`, `saihm_forget`,
+ * `saihm_share`, `saihm_revoke_share`, `saihm_status`, `saihm_recall`'s shared-read branch and
+ * `saihm_join`.
+ *
+ * That enumeration is deliberately exhaustive and was NOT so before: an earlier cut named four tools,
+ * having been written from a list of the paths already fenced rather than from a sweep of every
+ * interpolation site. Three sites were missing. When this list and the code disagree the list is the
+ * one that gets believed, so it is now derived from a complete classification of every `${}` in
+ * `server.ts` — extend it in the same call as any new render site.
  *
  * Those results are `this.call<T>` casts with no runtime validation, so every field is endpoint-chosen
  * in practice whatever its declared type says, and a declared `boolean` may arrive as a string. The
  * announcement renderer was fenced first because that path is unauthenticated by design; these paths
- * are just as interpolable, and a forged line minted inside a FORGOTTEN or SHARED receipt reads as a
- * confirmation of something the agent actually asked for. `String(v)` before sanitising is what makes
- * a non-string value safe rather than a hole.
+ * are just as interpolable, and a forged line minted inside a REMEMBERED or SHARED receipt reads as a
+ * confirmation of something the agent actually asked for — a strictly more credible channel than an
+ * unsolicited pointer list. `String(v)` before sanitising is what makes a non-string value safe
+ * rather than a hole.
  */
 export const safeScalar = (v: unknown, max: number = MAX_SCALAR_CHARS): string =>
   safeField(typeof v === 'string' ? v : String(v), max);
+
+/**
+ * Budget for an onboarding field a HUMAN has to act on — the device-flow verification URI.
+ *
+ * Wider than {@link MAX_SCALAR_CHARS} because the operator legitimately picks its own verification
+ * host and path, and a URI cut at 64 characters is one nobody can open: the same "actionable-looking
+ * but not actionable" outcome the announcement caps are shaped to avoid. Wide enough for any real
+ * device-flow URI (they run well under 100 characters), narrow enough that the field cannot become a
+ * paragraph of prose addressed to the user.
+ */
+export const MAX_JOIN_FIELD_CHARS = 256;
+
+/** How much of a hash or opaque id a receipt line shows. Enough to recognise, too little to flood. */
+export const ABBREV_CHARS = 16;
+
+/**
+ * Fence a scalar AND abbreviate it for display — the combination every receipt line wants.
+ *
+ * The marker is emitted ONLY when something was actually cut. Writing `${safeScalar(v).slice(0, 16)}…`
+ * at the call site instead appends it unconditionally, which quietly costs the marker its meaning:
+ * `…` is the one character an endpoint cannot forge (safeField collapses a supplied one to `?`), and
+ * it is worth keeping as a reliable signal that content was withheld rather than as decoration on a
+ * value that happened to be short. Fencing runs first, so the marker appended here is still ours.
+ */
+export const shortScalar = (v: unknown, keep: number = ABBREV_CHARS): string => {
+  const s = safeScalar(v);
+  return s.length > keep ? `${s.slice(0, keep)}…` : s;
+};
+
+/**
+ * Ceiling on an endpoint-chosen string entering STRUCTURED output. Deliberately generous — every
+ * real value on these paths is a tier name, a custody label, a decimal epoch or an opaque shard id,
+ * all far under it — because its job is to kill a flood, not to validate a shape.
+ */
+export const MAX_STRUCTURED_SCALAR_CHARS = 256;
+
+/**
+ * Bound an endpoint-chosen value entering `structuredContent`.
+ *
+ * NOT {@link safeScalar}: structured output is deliberately unsanitised, and that is right. A value
+ * there sits in a named field of a declared schema where it cannot masquerade as a memory line, and
+ * scrubbing it to ASCII would corrupt legitimate data for no security gain. What structured output
+ * still needs is a SIZE bound, which is a different axis and was missing: the announcement channel is
+ * capped on both rows and bytes, while `saihm_remember` and `saihm_status` were capped on neither.
+ * Measured before this: a 16 MiB response produced a 33,554,457-byte `saihm_remember` result and a
+ * 16,777,377-byte `saihm_status` one, in successful calls, through fields declared as short scalars.
+ *
+ * An over-long value becomes {@link MALFORMED} rather than a truncated version of itself, following
+ * the same rule as the checked announcement fields: a value this far outside its contract is not a
+ * long tier name, and half of one is a plausible-looking value the endpoint chose the front of.
+ */
+export const boundedOrMarker = (v: unknown, max: number = MAX_STRUCTURED_SCALAR_CHARS): string => {
+  const s = typeof v === 'string' ? v : String(v);
+  return s.length > max ? MALFORMED : s;
+};
 
 /**
  * The three announcement fields that have a CONTRACT the endpoint cannot widen. Sanitising is the
