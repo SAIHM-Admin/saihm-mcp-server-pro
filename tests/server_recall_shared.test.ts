@@ -473,7 +473,16 @@ test('saihm_recall shared-read: every CITED line terminator is marked, not just 
     'g',
   );
   const OWN = /^ {2}\[[^\]\n]*\] seq=/;
+  // CR, LF and CRLF lead this list because leaving them OUT is a defect this very test committed.
+  // Each refutation widened the array to the newly-found separators and dropped the ones already
+  // covered, so the case the split was originally written for stopped being exercised at all: a
+  // mutation deleting `\r\n|[\n\r` from RENDERED survived the whole suite. Regression by omission —
+  // widening a test in response to a refutation quietly narrowed it. A list that grows by replacement
+  // is not a list that grows.
   const seps: [string, string][] = [
+    ['CR', CH(0x0d)],
+    ['LF', CH(0x0a)],
+    ['CRLF', CH(0x0d) + CH(0x0a)],
     ['U+2028 LS', CH(0x2028)],
     ['U+2029 PS', CH(0x2029)],
     ['U+0085 NEL', CH(0x85)],

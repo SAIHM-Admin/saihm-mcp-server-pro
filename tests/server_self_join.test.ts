@@ -337,7 +337,11 @@ test('saihm_join ON: a hostile bridge cannot add steps to the human instructions
     // unopenable would trade one failure for another.
     assert.match(first.text, /^ {2}1\. open {3}https:\/\/device\.test\/activate\?/m);
     assert.match(first.text, /^ {2}2\. enter {2}ABCD-1234\?/m);
-    // Falls back to the RFC 8628 default rather than printing a number pulled from nowhere.
+    // Falls back to a fixed number rather than printing one pulled from nowhere. NOT "the RFC 8628
+    // default", which is what this line used to say and what `src/server.ts` records as false: §3.2
+    // makes `expires_in` REQUIRED and gives it no default, and `interval` is the only §3.2 parameter
+    // that has one. 15 is this codebase's convention, and citing a standard for it made a local
+    // choice look externally mandated — the kind of provenance claim nothing goes red over.
     assert.match(first.text, /expires in about 15 min/);
   } finally {
     d.proc.kill();
@@ -370,5 +374,76 @@ test('saihm_join ON: the persisted key is reusable on a fresh boot (restart-safe
     d.proc.kill();
     await new Promise<void>((r) => mock.server.close(() => r()));
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The expiry line is rendered from a bridge-chosen number, and BOTH halves of its guard survived a
+ * mutation pass — because the only fixtures that ever reached it were a good value (900) and a
+ * non-numeric one ('soon'). Between those two sits every numeric value an adversary would actually
+ * pick, and neither existing case touches it.
+ *
+ * Driven end-to-end rather than by calling the helper, because `expiryMins` is module-private and the
+ * property is about what a HUMAN is told, not about what a function returns.
+ */
+const expiryLine = async (expiresIn: unknown): Promise<string> => {
+  const mock = startMock({ pendingBeforeGrant: 20, expiresIn });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const home = mkdtempSync(join(tmpdir(), 'saihm-expiry-'));
+  const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '1' });
+  try {
+    await handshake(d);
+    const first = await callText(d, 3, 'saihm_join', {});
+    assert.equal(first.isError, false, `phase-1 errored: ${first.text}`);
+    const line = first.text.split('\n').find((l) => l.includes('expires in about'));
+    assert.ok(line, `no expiry line was rendered:\n${first.text}`);
+    return line;
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+};
+
+test('saihm_join: no bridge-chosen expiry reaches the human unbounded', async () => {
+  // MEASURED, and not what this test was first written to assert. The obvious reading of
+  // `expiryMins` is that its `n <= 0` fallback and its 1440-minute ceiling are what bound this line,
+  // so the first cut drove 0, -3600 and a decade of seconds and expected 15 and 1440. The decade
+  // rendered "about 30 min", which is 1800/60 — the CLIENT's clamp, not the server's. Every value
+  // below is already inside [60s, 1800s] by the time `expiryMins` runs, so the server's own bounds
+  // are unreachable from here and a test written against them passes with them deleted.
+  //
+  // What actually holds the line is `acquireFreeEntitlement`'s clamp, and the server's guards are
+  // defence in depth at the render site — which is what `src/server.ts` already says about the
+  // sibling NaN branch ("a guard at the render site, and today an unreachable one"). Asserted here as
+  // the END-TO-END property, against the layer that really enforces it, so it fails when that layer
+  // is weakened rather than when a comment is edited.
+  //
+  // MEASURED, one mutation at a time against this file: deleting the server's `n <= 0` half SURVIVES
+  // and deleting its 1440 ceiling SURVIVES — neither is reachable once the client has clamped —
+  // while making the whole helper inert is KILLED, and deleting the CLIENT's [60s, 1800s] clamp is
+  // KILLED by this test. That is the split worth recording: the guards are real code with no reachable
+  // input, so the honest coverage claim is about the clamp, not about them.
+  //
+  // The first run of that battery reported both server mutations KILLED, and it was measuring nothing:
+  // this test was still red at the time, so every mutant "failed" the suite for the same unrelated
+  // reason. A mutation verdict read against a non-green baseline is not a verdict.
+  //
+  // The threat is a claim, not digits: "expires in about 5256000 min" tells a person the code is good
+  // for a decade, so a dead code never gets re-requested and the join silently never completes.
+  // "about 0 min" tells them not to start. Both are a bridge suppressing its own onboarding through a
+  // sentence, with nothing to point at as a failure.
+  // Each case costs a real server spawn, so the fixtures are chosen one-per-branch rather than swept:
+  // a non-positive number, a non-numeric value, the lower clamp, the upper clamp, and one legitimate
+  // value that must pass through untouched.
+  const mins = (l: string): number => Number(/expires in about (\d+) min/.exec(l)?.[1]);
+  for (const [label, v, want] of [
+    ['non-positive falls back to the 900s default', -3600, 15],
+    ['non-numeric falls back the same way', 'soon', 15],
+    ['below the floor is raised to 60s', 1, 1],
+    ['a decade of seconds is cut to the 1800s ceiling', 86400 * 365 * 10, 30],
+    ['a legitimate window passes through untouched', 600, 10],
+  ] as const) {
+    assert.equal(mins(await expiryLine(v)), want, `${label}: expiresIn=${JSON.stringify(v)}`);
   }
 });

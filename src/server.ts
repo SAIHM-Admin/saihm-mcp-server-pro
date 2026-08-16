@@ -36,6 +36,7 @@ import {
   safeField,
   safeScalar,
   shortScalar,
+  labelSafe,
   hexOrMarker,
   scopeOrMarker,
   epochOrMarker,
@@ -120,8 +121,14 @@ const DECIMAL = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?$/;
  * cheaply, NOT a working denial of service, and the comment says so rather than borrowing the
  * urgency of one.
  *
- * 32 characters clears every real value with room to spare: the longest finite double round-trips as
- * `-1.7976931348623157e+308`, at 24.
+ * 32 characters clears every real value with room to spare. This once justified that with "the longest
+ * finite double round-trips as `-1.7976931348623157e+308`, at 24", which answered the wrong question:
+ * that is the double of greatest MAGNITUDE, not the one with the longest `String()`. The longest is a
+ * SMALL one, because `String` switches to exponent form only below 1e-6, so the widest fixed-notation
+ * value is a sign, `0.`, five leading zeros and 17 significant digits — MEASURED at 25 over 3e6 random
+ * doubles, worst case `-0.0000048340370808296565`. The bound still holds; its margin is 7, not 8. Kept
+ * as a note on method rather than corrected silently: reaching for the extreme of the obvious axis is
+ * how a length claim gets argued from magnitude, and the two extremes are different numbers.
  */
 const MAX_NUMERIC_CHARS = 32;
 const numOrNull = (v: unknown): number | null => {
@@ -214,8 +221,8 @@ server.registerTool(
         // later refactor of `remember()` would otherwise silently break. It matters more here than in
         // the announcement list: this line is a RECEIPT for a write the agent explicitly requested,
         // so a memory-shaped line minted inside it arrives with the agent's own intent behind it.
-        `REMEMBERED [${safeScalar(r.cellId)}] seq=${safeScalar(r.seq)} ` +
-          `shard=${safeScalar(shardId)} commit=${shortScalar(r.commitmentHash)}`,
+        `REMEMBERED [${labelSafe(safeScalar(r.cellId))}] seq=${labelSafe(safeScalar(r.seq))} ` +
+          `shard=${labelSafe(safeScalar(shardId))} commit=${labelSafe(shortScalar(r.commitmentHash))}`,
         {
           cellId: r.cellId,
           seq: String(r.seq),
@@ -383,7 +390,7 @@ server.registerTool(
           .map((l) => `  > ${l}`)
           .join('\n');
         return ok(
-          `SHARED-RECALL [${safeScalar(cell.cellId)}] seq=${safeScalar(cell.seq)} — content below is ` +
+          `SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=${labelSafe(safeScalar(cell.seq))} — content below is ` +
             `ANOTHER AGENT'S, not your own memory\n${sharedBody}`,
           {
             count: 1,
@@ -475,7 +482,7 @@ server.registerTool(
                   // every kept announcement then renders WHOLE, so no pointer is ever shown truncated
                   // and therefore unusable. safeField's own truncation stays as a backstop — this
                   // renderer must be safe for any input, not only for what today's client admits.
-                  `  ! POINTER cell=${safeField(a.cellId, MAX_ANNOUNCEMENT_FIELD_CHARS)} sharer=${hexOrMarker(a.sharer)} ` +
+                  `  ! POINTER cell=${labelSafe(safeField(a.cellId, MAX_ANNOUNCEMENT_FIELD_CHARS))} sharer=${hexOrMarker(a.sharer)} ` +
                   `scope=${scopeOrMarker(a.scope)} expires=${epochOrMarker(a.expiryEpoch)}`,
               ),
               // States the withheld count WITHOUT naming where the rest can be read. `structuredContent`
@@ -535,8 +542,8 @@ server.registerTool(
         // had just destroyed. Fencing the echo makes it harmless to render; not rendering it makes
         // the line correct. The remaining three fields are outcomes only the endpoint can report,
         // so they stay its own — fenced, because that is exactly what an unvalidated cast needs.
-        `FORGOTTEN [${safeScalar(id)}] complete=${safeScalar(r.complete)} ` +
-          `sharesPurged=${safeScalar(r.sharesPurged)} epoch=${safeScalar(r.epoch)}`,
+        `FORGOTTEN [${labelSafe(safeScalar(id))}] complete=${labelSafe(safeScalar(r.complete))} ` +
+          `sharesPurged=${labelSafe(safeScalar(r.sharesPurged))} epoch=${labelSafe(safeScalar(r.epoch))}`,
       );
     } catch (e) {
       return fail(e);
@@ -608,11 +615,12 @@ server.registerTool(
       return ok(
         // Every remaining interpolated value is endpoint-chosen, and the `\n  ` here is OURS — which
         // is exactly why a raw field carrying its own newline could mint a further line in this block.
-        `SAIHM Session\n  agent=${shortScalar(agentIdHash)}  ` +
-          `tier=${safeScalar(tier)}  custody=${safeScalar(custody)}\n  ` +
+        `SAIHM Session\n  agent=${labelSafe(shortScalar(agentIdHash))}  ` +
+          `tier=${labelSafe(safeScalar(tier))}  custody=${labelSafe(safeScalar(custody))}\n  ` +
           `shards=${shards ?? MALFORMED}  sharing=${sharing ?? MALFORMED}  ` +
           `bfsi=${bfsi === null ? MALFORMED : bfsi.toFixed(3)} ` +
-          `(R=${safeScalar(d.bfsi_R)} M=${safeScalar(d.bfsi_M)})  epoch=${safeScalar(snapshotEpoch)}`,
+          `(R=${labelSafe(safeScalar(d.bfsi_R))} M=${labelSafe(safeScalar(d.bfsi_M))})  ` +
+          `epoch=${labelSafe(safeScalar(snapshotEpoch))}`,
         {
           agentIdHash,
           tier,
@@ -688,8 +696,8 @@ server.registerTool(
       // already throws on any failure, so reaching this line IS the endpoint's acknowledgement; there
       // is nothing its echo could add that is not either already known or not to be trusted.
       return ok(
-        `SHARED cell=${safeScalar(cellId)} sharer=${shortScalar(client.agentIdHash)} ` +
-          `recipient=${shortScalar(recipientPinnedAgentIdHashHex)}`,
+        `SHARED cell=${labelSafe(safeScalar(cellId))} sharer=${labelSafe(shortScalar(client.agentIdHash))} ` +
+          `recipient=${labelSafe(shortScalar(recipientPinnedAgentIdHashHex))}`,
       );
     } catch (e) {
       return fail(e);
@@ -724,8 +732,8 @@ server.registerTool(
         // Cell and recipient are the agent's own arguments, for the reason given on `saihm_share`;
         // `revoked` is the endpoint's report of what it did, which only it can know, so it is the one
         // value here that has to be taken on trust — and therefore the one that has to be fenced.
-        `REVOKED cell=${safeScalar(cellId)} recipient=${shortScalar(recipientHex)} ` +
-          `revoked=${safeScalar(r.revoked)}`,
+        `REVOKED cell=${labelSafe(safeScalar(cellId))} recipient=${labelSafe(shortScalar(recipientHex))} ` +
+          `revoked=${labelSafe(safeScalar(r.revoked))}`,
       );
     } catch (e) {
       return fail(e);

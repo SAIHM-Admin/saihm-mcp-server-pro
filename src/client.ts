@@ -981,9 +981,14 @@ export class SaihmProClient {
     } else {
       secretHex = process.env.SAIHM_MASTER_SECRET_HEX;
     }
-    // Dark self-join fallback (SAIHM_SELF_JOIN=1 only): a prior `saihm_join` persists the
-    // self-generated identity to the default key file, so a plain restart with no env secret
-    // re-loads it. Off by default => this block is inert and boot behaviour is unchanged.
+    // Self-join fallback (ON by default; `SAIHM_SELF_JOIN=0` opts out): a prior `saihm_join`
+    // persists the self-generated identity to the default key file, so a plain restart with no
+    // env secret re-loads it. Under `SAIHM_SELF_JOIN=0` this block is inert.
+    // This read "SAIHM_SELF_JOIN=1 only ... Off by default => this block is inert and boot
+    // behaviour is unchanged" and was false: `selfJoinEnabled()` is `!== '0'` (measured across
+    // unset/''/'1'/'anything' => true, '0' => false). The identical sentence was already found
+    // and corrected in server.ts:826 and the correction was never propagated to this second
+    // copy — the same fix-one-of-N-sites defect the shardId resolve-twice mutation exposed.
     if (!secretHex && selfJoinEnabled()) {
       const p = defaultIdentityPath();
       if (existsSync(p)) {
@@ -1459,9 +1464,17 @@ export class SaihmProClient {
         let code: string | undefined;
         try {
           const j = JSON.parse(text) as Record<string, unknown>;
-          if (typeof j.error === 'string') code = j.error;
+          // TRUNCATED AT THE MINT, exactly as `doCall` does — see the longer note there. There are
+          // TWO mints for `SaihmEndpointError.code` and the bound was added to only one of them, so
+          // the onboarding path stayed uncapped: `code` lands in `code` AND inside `message` below,
+          // so a 16MiB error body became a ~32MiB string on every join/upgrade. `render_fence.ts`
+          // meanwhile justified importing the budget rather than restating it with "the client
+          // truncates `code` at the mint" — true of the mint its author was looking at, false of the
+          // tree. Third instance this review of one fix landing at one of N sites; the durable
+          // defence is to grep for the SIBLING before calling such a fix done.
+          if (typeof j.error === 'string') code = j.error.slice(0, MAX_ERROR_CODE_CHARS);
         } catch {
-          /* non-JSON error body */
+          /* non-JSON error body — leave code undefined */
         }
         throw new SaihmEndpointError(
           res.status,

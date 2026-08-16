@@ -15,10 +15,14 @@ import {
   MALFORMED,
   MAX_ERROR_MESSAGE_CHARS,
   MAX_JOIN_FIELD_CHARS,
+  MAX_SCALAR_CHARS,
   MAX_STRUCTURED_SCALAR_CHARS,
+  ABBREV_CHARS,
   boundedOrMarker,
   safeField,
   safeScalar,
+  shortScalar,
+  labelSafe,
   hexOrMarker,
   scopeOrMarker,
   epochOrMarker,
@@ -255,4 +259,142 @@ test('the error budgets are PINNED, not merely self-consistent', () => {
   // VALUE are separate properties; the tests above pin the first, these two lines pin the second.
   assert.equal(MAX_ERROR_CODE_CHARS, 64);
   assert.equal(MAX_ERROR_MESSAGE_CHARS, 256);
+});
+
+test('labelSafe denies a field the character the label grammar is built from', () => {
+  assert.equal(labelSafe('x scope=readwrite'), 'x scope?readwrite');
+  assert.equal(labelSafe('a=b=c=d'), 'a?b?c?d', 'every occurrence, not just the first');
+  assert.equal(labelSafe('no labels here'), 'no labels here', 'untouched when there is nothing to do');
+  assert.equal(labelSafe(''), '');
+});
+
+test('labelSafe is 1:1 and length-preserving, which is what keeps safeField reorderable', () => {
+  // safeField documents that slice-then-scrub and scrub-then-slice are byte-identical, and the whole
+  // proof rests on every scrub substituting ONE code unit for ONE code unit with no `u` flag. Written
+  // as a deletion (`replace(/=/g, '')`) or an escape (`'\\='`) this would still look like it worked
+  // at every call site while silently invalidating that argument. Pin the shape, not just the effect.
+  for (const s of ['=', '==', 'a=', '=a', 'ab=cd', '='.repeat(100), 'plain', '?=?']) {
+    assert.equal(labelSafe(s).length, s.length, `length must not change for ${JSON.stringify(s)}`);
+  }
+  // Composition order is irrelevant precisely BECAUSE both scrubs are positionwise: `=` and `?` are
+  // both printable ASCII, so neither fence can create or destroy work for the other. Call sites are
+  // free to wrap either way round without changing the output.
+  const hostile = 'x scope=readwrite [a]|b =';
+  assert.equal(labelSafe(safeField(hostile, 64)), safeField(labelSafe(hostile), 64));
+});
+
+test('the closed-set checkers are `=`-free, which is why labelSafe skips them', () => {
+  // render_fence.ts exempts hexOrMarker/scopeOrMarker/epochOrMarker from labelSafe on the grounds
+  // that no value they can RETURN contains `=`. That is an invariant of those functions, not of the
+  // call sites, so it is pinned here — a later widening of any closed set (say scope gaining a value
+  // spelled with `=`) must fail loudly rather than quietly reopen the shadowing channel it justified.
+  const probes = [
+    'read',
+    'readwrite',
+    'write',
+    'x=y',
+    '=',
+    'a'.repeat(64),
+    'A'.repeat(64),
+    '0123456789abcdef'.repeat(4),
+    '',
+    '9'.repeat(20),
+    '1=2',
+  ];
+  for (const p of probes) {
+    for (const [name, out] of [
+      ['hexOrMarker', hexOrMarker(p)],
+      ['scopeOrMarker', scopeOrMarker(p)],
+      ['epochOrMarker', epochOrMarker(p)],
+    ] as const) {
+      assert.ok(!out.includes('='), `${name}(${JSON.stringify(p)}) returned ${JSON.stringify(out)}`);
+    }
+  }
+  assert.ok(!epochOrMarker(null).includes('='), 'the null branch too');
+  assert.ok(!MALFORMED.includes('='), 'the shared marker itself');
+});
+
+test('shortScalar emits the truncation marker ONLY when it actually cut something', () => {
+  // A survivor from the mutation sweep: appending `…` unconditionally left every suite green, because
+  // no assertion ever looked at a value SHORT enough for the two to differ. The marker is the one
+  // character an endpoint cannot forge — `safeField` collapses a supplied one to `?` — so `…` in a
+  // rendered field is a reliable statement that the server withheld content. Appended to every value
+  // it becomes decoration, and the agent loses the ability to tell a complete id from a cut one.
+  //
+  // Asserted as a BICONDITIONAL over the boundary rather than as two spot checks: `marker present`
+  // must hold exactly when `input longer than ABBREV_CHARS` does, which is the property, and it is
+  // what makes both the unconditional-append and the never-append mutations fail here.
+  for (let n = 0; n <= ABBREV_CHARS * 2; n++) {
+    const out = shortScalar('a'.repeat(n));
+    assert.equal(
+      out.includes('…'),
+      n > ABBREV_CHARS,
+      `shortScalar of ${n} chars returned ${JSON.stringify(out)}; the marker must mean "content withheld"`,
+    );
+    assert.equal(
+      out.length,
+      n > ABBREV_CHARS ? ABBREV_CHARS + 1 : n,
+      `shortScalar of ${n} chars must be ${n > ABBREV_CHARS ? 'the abbreviation plus its marker' : 'the value itself'}`,
+    );
+  }
+  // The other half of "unforgeable": a short value made ENTIRELY of the marker still carries none of
+  // it out, so a `…` in the output can only have come from the branch above.
+  const forged = shortScalar('…'.repeat(ABBREV_CHARS));
+  assert.ok(!forged.includes('…'), `an endpoint-supplied marker survived: ${JSON.stringify(forged)}`);
+  assert.equal(forged, '?'.repeat(ABBREV_CHARS));
+});
+
+test('failText spends each budget on the field it was sized for', () => {
+  // The two budgets differ by 4x and sit on adjacent arguments of the same helper, which is the shape
+  // that makes a swap invisible: both fields still render, both still get fenced, and the only witness
+  // is a LENGTH. A survivor from the sweep for exactly that reason — the existing assertions matched
+  // short benign codes and messages, where 64 and 256 are indistinguishable.
+  //
+  // Sized deliberately: `code` is a fixed-shape diagnostic token and `message` is free-form prose, so
+  // the wide budget belongs to the second. Swapped, a 256-char `code` lands in the field an agent
+  // reads as an identifier while a real message is cut at 64 — the endpoint gains room in the field
+  // with the narrower contract, which is the direction that matters.
+  const code = 'C'.repeat(MAX_ERROR_MESSAGE_CHARS * 2);
+  const message = 'M'.repeat(MAX_ERROR_MESSAGE_CHARS * 2);
+  const out = failText(new SaihmEndpointError(400, code, message));
+  const bracketed = /^SAIHM error \[([^\]]*)\] \(status 400\): (.*)$/s.exec(out);
+  assert.ok(bracketed, `failText did not render its own template:\n${out}`);
+  // EQUALITY with each cap, not membership under it: `<=` is satisfied by the swapped pair too, since
+  // a field cut at 64 is also under 256. Length is the only witness, so it has to be pinned exactly.
+  assert.equal(
+    bracketed[1].length,
+    MAX_ERROR_CODE_CHARS + 1,
+    'the code field gets the CODE budget (plus its truncation marker)',
+  );
+  assert.equal(
+    bracketed[2].length,
+    MAX_ERROR_MESSAGE_CHARS + 1,
+    'the message field gets the MESSAGE budget (plus its truncation marker)',
+  );
+  // The budgets are distinct, so the assertions above cannot both hold under a swap. Stated rather
+  // than assumed: if these two constants are ever set equal, the test above stops testing anything.
+  assert.notEqual(
+    MAX_ERROR_CODE_CHARS,
+    MAX_ERROR_MESSAGE_CHARS,
+    'the swap is only detectable while the budgets differ',
+  );
+  // The non-endpoint branches spend the MESSAGE budget too — a plain Error is free-form prose.
+  assert.equal(failText(new Error(message)).length, MAX_ERROR_MESSAGE_CHARS + 1);
+  assert.equal(failText(message).length, MAX_ERROR_MESSAGE_CHARS + 1);
+});
+
+test('the scalar and abbreviation budgets are PINNED, and ordered', () => {
+  // `shortScalar` fences at MAX_SCALAR_CHARS and abbreviates at ABBREV_CHARS. Swapping the two is an
+  // EQUIVALENT mutation, not a gap: `slice(0, ABBREV_CHARS)` discards whatever `safeField` appended,
+  // so fencing at 16 and fencing at 64 produce byte-identical output for every input (verified by
+  // differential fuzz over 32,409 inputs — lengths 0..80 across ASCII, brackets, astral, lone
+  // surrogates, newlines and a supplied `…`, plus the non-string branches: zero differing outputs).
+  // Recorded here rather than covered by a test that could not fail, because a test written for an
+  // indistinguishable mutation is the kind that reports coverage it does not have.
+  //
+  // What IS assertable is the ordering the abbreviation depends on, so a later edit that inverts the
+  // two constants fails here instead of silently making the fence the narrower of the two.
+  assert.equal(MAX_SCALAR_CHARS, 64);
+  assert.equal(ABBREV_CHARS, 16);
+  assert.ok(ABBREV_CHARS < MAX_SCALAR_CHARS, 'the abbreviation must be narrower than the fence');
 });

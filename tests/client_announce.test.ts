@@ -36,6 +36,7 @@ import {
   MAX_ANNOUNCEMENT_FIELD_CHARS,
   MAX_ANNOUNCEMENT_TOTAL_CHARS,
   MAX_SHARED_ANNOUNCEMENTS,
+  MAX_ERROR_CODE_CHARS,
 } from '../src/client.js';
 
 /**
@@ -969,4 +970,74 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
       rmSync(cacheDir, { recursive: true, force: true });
     }
   });
+});
+
+describe('PC-MINT: an endpoint-chosen error `code` is bounded at EVERY mint, not at one of them', () => {
+  // There are TWO places a `SaihmEndpointError.code` is born — `doCall` for tool traffic and
+  // `onboardFetch` for join/upgrade — and the bound was added to the first only. Nothing failed,
+  // because no test anywhere asserted that a mint truncates: `server_render_fence.test.ts` pins the
+  // VALUE of MAX_ERROR_CODE_CHARS and exercises the RENDER fence, which sanitises independently, so
+  // the onboarding path carried an unbounded `code` into `code` AND into `message` with the suite
+  // fully green. `render_fence.ts` meanwhile cited "the client truncates `code` at the mint" as its
+  // reason for importing the budget rather than restating it — a claim about one call site standing
+  // in for a claim about the tree.
+  //
+  // So this parametrises over the MINTS rather than testing a path: a third mint that forgets the
+  // slice is a new row here, and the row fails until it does not. Testing `doCall` alone is what
+  // produced the gap in the first place.
+  const hugeCode = 'E'.repeat(200_000);
+
+  /** Answers EVERY request — MCP, challenge, upgrade — with the same oversized typed error. */
+  const startAngry = (): { server: Server; base: () => string } => {
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: hugeCode }));
+      });
+    });
+    return {
+      server,
+      base: () => `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    };
+  };
+
+  const mints: [string, (c: SaihmProClient) => Promise<unknown>][] = [
+    ['doCall', (c) => c.status()],
+    ['onboardFetch', (c) => c.requestUpgradeUrl()],
+  ];
+
+  for (const [mint, drive] of mints) {
+    it(`${mint} truncates \`code\` to MAX_ERROR_CODE_CHARS before it can be rendered twice`, async () => {
+      const m = startAngry();
+      await new Promise<void>((r) => m.server.listen(0, '127.0.0.1', () => r()));
+      try {
+        // `tier: 'FREE'` is load-bearing for the onboardFetch row: `requestUpgradeUrl` rejects a
+        // non-FREE identity locally with `not_free_tier` BEFORE any request, so without it this row
+        // asserts on a precondition throw and never reaches a mint at all. Caught only because the
+        // assertion below demands the code EQUAL the cap — `length <= 64` is true of `not_free_tier`
+        // (13 chars), so the weaker form would have passed green while testing nothing.
+        const c = new SaihmProClient(m.base() + '/mcp', 'jwt', new Uint8Array(32).fill(7), {
+          tier: 'FREE',
+        });
+        await assert.rejects(drive(c), (e: unknown) => {
+          assert.ok(e instanceof SaihmEndpointError, `${mint}: wrong error type: ${String(e)}`);
+          assert.equal(
+            e.code?.length,
+            MAX_ERROR_CODE_CHARS,
+            `${mint}: code must be cut AT THE MINT, not left for a renderer to cut`,
+          );
+          // `code` is interpolated into `message` as well, which is how an unbounded one doubled.
+          // Bound the whole message, not just the field, or the second copy carries the flood.
+          assert.ok(
+            e.message.length < MAX_ERROR_CODE_CHARS * 4,
+            `${mint}: message carries an unbounded second copy (${e.message.length} chars)`,
+          );
+          return true;
+        });
+      } finally {
+        await new Promise<void>((r) => m.server.close(() => r()));
+      }
+    });
+  }
 });
