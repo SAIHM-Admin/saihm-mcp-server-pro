@@ -425,6 +425,16 @@ test('saihm_join: no bridge-chosen expiry reaches the human unbounded', async ()
   // KILLED by this test. That is the split worth recording: the guards are real code with no reachable
   // input, so the honest coverage claim is about the clamp, not about them.
   //
+  // "The clamp" is TWO bounds and that sentence only earns the ceiling. The `below the floor` fixture
+  // cannot fail on the floor: `expiryMins` renders `Math.max(1, Math.round(n / 60))`, so EVERY value
+  // under 90 seconds renders as 1 whether it was raised to 60 or left at 1. Measured: `Math.max(60,
+  // …)` -> `Math.max(59, …)` SURVIVES, and it is equivalent for any practical purpose — the two
+  // differ only in a one-second poll deadline that no assertion here observes. Floor REMOVAL is
+  // caught, but by `expiryLine`'s own `phase-1 errored` guard rather than by anything about expiry:
+  // `budgetMs = expiresIn * 1000` collapses to 1 s and the poll loop returns `free_onboard_timeout`.
+  // That is a real kill for an unrelated reason, which is worth exactly as much as a passing test for
+  // the wrong layer. The floor is pinned properly in the test below, at the layer it acts on.
+  //
   // The first run of that battery reported both server mutations KILLED, and it was measuring nothing:
   // this test was still red at the time, so every mutant "failed" the suite for the same unrelated
   // reason. A mutation verdict read against a non-green baseline is not a verdict.
@@ -447,3 +457,16 @@ test('saihm_join: no bridge-chosen expiry reaches the human unbounded', async ()
     assert.equal(mins(await expiryLine(v)), want, `${label}: expiresIn=${JSON.stringify(v)}`);
   }
 });
+
+// The 60-second floor is NOT pinned here. A test was written at this spot asserting that
+// `expiryLine(1)` renders "expires in about N min", on the reasoning that the floor is what keeps the
+// poll loop alive. It had ZERO kill power and its own comment was wrong about why: under floor-removal
+// the run goes red at the HELPER's `assert.equal(first.isError, false)` — verbatim the "kill for the
+// wrong reason" that comment claimed to avoid — so its `assert.match` never executed, and deleting the
+// test outright left the mutation KILLED anyway by the `expiresIn: 1` row of the table above, which
+// drives the identical fixture. A test whose named mutation makes a DIFFERENT assertion fire first is
+// not coverage, however well its comment reads.
+//
+// The floor IS pinned, at the layer where it is observable: the clamp's output is `expiresIn` on the
+// prompt, and `client_free_onboard.test.ts` asserts its exact value. Rendered minutes cannot see it —
+// 60 and 59 both render as 1 — which is why asserting on this text surface could never have worked.

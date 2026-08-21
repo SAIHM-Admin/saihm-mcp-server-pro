@@ -31,6 +31,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   MALFORMED,
+  MAX_CHECKOUT_URL_CHARS,
   MAX_JOIN_FIELD_CHARS,
   boundedOrMarker,
   safeField,
@@ -989,7 +990,7 @@ async function runJoin(): Promise<void> {
       '',
       'SAIHM — subscribe this identity to activate your memory:',
       '',
-      '  ' + safeField(url, MAX_JOIN_FIELD_CHARS),
+      '  ' + safeField(url, MAX_CHECKOUT_URL_CHARS),
       '',
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
@@ -1053,14 +1054,32 @@ async function runFreeJoin(): Promise<void> {
  */
 async function runUpgrade(): Promise<void> {
   const c = SaihmProClient.bootFromEnv();
-  const target = (process.argv[3] ?? process.env.SAIHM_UPGRADE_TIER ?? 'PRO').trim();
+  // `|| 'PRO'` AFTER the trim, not `??` alone. `??` falls through only on null/undefined, so
+  // `upgrade ""` — and an exported-but-empty SAIHM_UPGRADE_TIER — reached `requestUpgradeUrl('')`.
+  //
+  // Stated precisely, because the obvious reading of this is wrong: that call does NOT render an
+  // empty tier into the line below. `requestUpgradeUrl` THROWS on `''` and is awaited BEFORE
+  // anything is written (measured: `upgrade BOGUS` exits 1 having written zero `upgrade this
+  // identity to` lines to stdout), so the interpolation is unreachable FROM HERE with an empty
+  // target. Two narrower statements, because the wider ones are false. WHICH code is thrown is
+  // conditional: the `tier !== 'FREE'` gate fires `not_free_tier` FIRST, so `bad_upgrade_tier`
+  // is reached only on a FREE-tier client — naming it unconditionally was wrong. And the empty
+  // tier IS interpolated, into `bad_upgrade_tier`'s own message ("...; got ''"), which `failText`
+  // renders to stderr; that is unreachable from `runUpgrade` because of the `|| 'PRO'` below, but
+  // reachable through the exported client API. The guarantee is about THIS call site, not the
+  // function. What the `??` actually cost was the DEFAULT:
+  // an empty argument turned a documented fallback to PRO into a hard error naming a tier the user
+  // never typed. `client.ts` gets this exact shape right for the provider argument; this site did
+  // not. An empty string is absence here, not a choice — which is what `||` says and `??` does not.
+  const target =
+    (process.argv[3] ?? process.env.SAIHM_UPGRADE_TIER ?? 'PRO').trim() || 'PRO';
   const url = await c.requestUpgradeUrl(target);
   process.stdout.write(
     [
       '',
       `SAIHM — upgrade this identity to ${target} (monthly). Your memories stay on this same key:`,
       '',
-      '  ' + safeField(url, MAX_JOIN_FIELD_CHARS),
+      '  ' + safeField(url, MAX_CHECKOUT_URL_CHARS),
       '',
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',

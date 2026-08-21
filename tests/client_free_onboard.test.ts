@@ -63,6 +63,8 @@ interface FreeMockOpts {
   challengeMode?: 'no_nonce' | 'bad_hex';
   /** the `interval` (seconds) the bridge advertises in the start response (default 5). */
   advertisedInterval?: number;
+  /** `expiresIn` the bridge advertises on /start, before the client's [60s,1800s] clamp. */
+  advertisedExpiresIn?: unknown;
 }
 
 const BOGUS_AGENT_ID = 'de'.repeat(32);
@@ -146,7 +148,7 @@ async function withFreeMock(
           flowId: 'flow-' + starts,
           userCode: 'WDJB-MJHT',
           verificationUri: 'https://github.com/login/device',
-          expiresIn: 900,
+          expiresIn: 'advertisedExpiresIn' in opts ? opts.advertisedExpiresIn : 900,
           interval: opts.advertisedInterval ?? 5,
         };
         if (opts.malformedStart) delete full[opts.malformedStart]; // drop one required field
@@ -719,4 +721,55 @@ describe('FF17: a non-hex challenge nonce is a typed onboard_bad_nonce (fails be
       { challengeMode: 'bad_hex' },
     );
   });
+});
+
+describe('FF10: the bridge-advertised expiry is CLAMPED to [60s, 1800s] before it becomes a deadline', () => {
+  // The clamp's output is `expiresIn` on the prompt, and it becomes `budgetMs` — the deadline the
+  // device-code poll loop runs against. Asserted HERE, on the value, because the rendered receipt
+  // cannot see it: minutes are `Math.max(1, Math.round(n / 60))`, so a floor of 60 and a floor of 59
+  // both render "about 1 min". A test written against that text surface had no kill power at all.
+  //
+  // A hostile or broken bridge that advertises `expiresIn: 1` gives the poll loop one second, so the
+  // join dies with `free_onboard_timeout` before a human could finish the device flow — the bridge
+  // suppressing its own onboarding through a NUMBER rather than a refusal, with nothing to point at.
+  // The ceiling is the mirror case: "good for a decade" means a dead code is never re-requested.
+  //
+  // The mock previously hardcoded `expiresIn: 900`, which sits inside the clamp, so neither arm was
+  // ever exercised and BOTH bounds were free to move. That is why the lower bound was reported as an
+  // equivalent mutant: test-equivalent is not behaviour-equivalent.
+  for (const [label, advertised, want] of [
+    ['below the floor is RAISED', 1, 60],
+    ['one second under the floor is raised to exactly the floor', 59, 60],
+    ['at the floor is untouched', 60, 60],
+    ['above the ceiling is CUT', 86_400 * 365 * 10, 1800],
+    ['at the ceiling is untouched', 1800, 1800],
+    ['a legitimate window passes through', 600, 600],
+    ['zero is not a window — falls back to the default', 0, 900],
+    ['negative falls back to the default', -3600, 900],
+    ['non-numeric falls back to the default', 'soon', 900],
+  ] as const) {
+    it(`${label}: bridge says ${JSON.stringify(advertised)} -> ${want}s`, async () => {
+      await withFreeMock(
+        async (m) => {
+          const c = new SaihmProClient(m.base + '/mcp', undefined, masterOf(29), {
+            tier: 'FREE',
+          });
+          let seen: unknown;
+          const r = await c.acquireFreeEntitlement({
+            pollIntervalMs: 5,
+            onPrompt: (pr) => {
+              seen = pr.expiresIn;
+            },
+          });
+          assert.equal(r.agentIdHash, c.agentIdHash);
+          assert.equal(
+            seen,
+            want,
+            `bridge advertised ${JSON.stringify(advertised)}: expected a clamped ${want}s deadline, got ${String(seen)}`,
+          );
+        },
+        { pendingBeforeGrant: 1, advertisedExpiresIn: advertised },
+      );
+    });
+  }
 });

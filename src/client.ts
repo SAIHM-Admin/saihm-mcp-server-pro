@@ -122,8 +122,11 @@ const MAX_SEQ = (1n << 64n) - 1n; // wire uint64 ceiling (mirrors client-pro wir
  * Two limits on the claim, both measured, neither hypothetical:
  *  - It is a claim about the ANNOUNCEMENT channel only. The endpoint's `error` string reaches the same
  *    tool's output through {@link SaihmEndpointError}; until it was truncated at the mint (see
- *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes — ~609x the 55,112-byte worst case
- *    here (both channels maximised in one response; an earlier cut divided by 54,216 and said 619x).
+ *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes — ~609x the 55,078-byte worst case
+ *    here. That denominator is a JOINT maximum, not a sum of the per-channel ones (3,595 + 51,515 =
+ *    55,110): the two channels are maximised by different epoch representations, so both cannot be
+ *    at their own maximum in one response. Earlier cuts divided by 54,216 (619x) and by 55,112 (a
+ *    fixture that cannot exist). See the matching note in `render_fence.ts`.
  *  - The budgets below count UTF-16 code units (`String.length`), NOT bytes. For the ASCII an endpoint
  *    has any reason to send the two coincide; for what a hostile one can send they do not. Measured
  *    against the 32,768-unit budget: control characters, which JSON-escape to six bytes per unit,
@@ -150,9 +153,13 @@ export const MAX_SHARED_ANNOUNCEMENTS = 256;
  *
  * "Full length" is the exact claim, and it is narrower than usable. The cap equality closes the
  * TRUNCATION route to an unusable pointer; it does not close the SANITISER route. `cellId` is
- * free-form, so a writer may choose one containing a non-ASCII character or a bracket, and
- * `safeField` replaces each with `?` — `notes-über` renders as `notes-?ber`, full length, no
- * truncation marker, and just as unusable when fed back. That is the same outcome this equality
+ * free-form, so a writer may choose one the scrubbers rewrite: a non-ASCII character, a bracket or a
+ * pipe (`safeField`), or an `=` (`labelSafe`, added at the pointer site to stop a `cellId` minting a
+ * label). `notes-über` renders as `notes-?ber` and `note=1` as `note?1` — full length, no truncation
+ * marker, and just as unusable when fed back. The `=` class is the newest and was NOT in this list
+ * when it was added one line away in the render; an enumeration of scrubbed characters that lives in
+ * a different file from the scrubbers goes stale by default, so read the two `.replace` chains in
+ * `render_fence.ts` as the authority and this sentence as a pointer to them. That is the same outcome this equality
  * exists to prevent, reached through the scrubber instead of the cap, and it is a residual rather
  * than a bug: the alternative is rendering an unescaped free-form field into a text block, which is
  * the hole the fence exists to close. A writer who wants a resolvable pointer picks an ASCII id.
@@ -183,8 +190,9 @@ export const MAX_ANNOUNCEMENT_FIELD_CHARS = 64;
  * defines (a 64-hex sharer, a full sha256 `cellId`): 64+64+`read` = 132 chars = 33.00 per field, 248
  * rows kept; with `readwrite` = 137 = 34.25, 239 rows; plus a 10-digit epoch = 147 = 36.75, 222 rows.
  * Every real-shaped row is above the threshold, so for a LEGITIMATE listing it is this cap and not
- * the 256-row cap that binds — an agent holding 222 or more grants sees `(LIST TRUNCATED)` from the
- * byte axis. The repo's own coverage already said so (`client_announce.test.ts` trips the budget at
+ * the 256-row cap that binds — an agent holding MORE THAN 222 grants sees `(LIST TRUNCATED)` from
+ * the byte axis. 222 is the last count that FITS (222 x 147 = 32,634 <= 32,768); the flag first
+ * fires at 223 (32,781), because `openRecallRows` flags on `announcedChars + rowChars > MAX`. The repo's own coverage already said so (`client_announce.test.ts` trips the budget at
  * row ~239, `server_shared_announce.test.ts` admits 219 of its rows) while this sentence claimed the
  * opposite. Exceeding it reports truncation exactly like the row cap, never silently.
  *
@@ -987,7 +995,7 @@ export class SaihmProClient {
     // This read "SAIHM_SELF_JOIN=1 only ... Off by default => this block is inert and boot
     // behaviour is unchanged" and was false: `selfJoinEnabled()` is `!== '0'` (measured across
     // unset/''/'1'/'anything' => true, '0' => false). The identical sentence was already found
-    // and corrected in server.ts:826 and the correction was never propagated to this second
+    // and corrected in server.ts:833-835 and never propagated to this second
     // copy — the same fix-one-of-N-sites defect the shardId resolve-twice mutation exposed.
     if (!secretHex && selfJoinEnabled()) {
       const p = defaultIdentityPath();
@@ -1416,10 +1424,26 @@ export class SaihmProClient {
         } else if (status !== 'pending') {
           terminal = new SaihmEndpointError(
             403,
+            // TRUNCATED AT THE MINT. `claim.error` is endpoint-chosen and arrives on an HTTP 200:
+            // `onboardFetch` caps the BODY at `MAX_RESPONSE_BYTES` but no field, so before this slice
+            // a 16 MiB `error` landed on `.code` unbounded and was retained on `joinState.error`
+            // until the next join. Render was never unsafe — `failText` re-fences it — so this was
+            // unbounded-at-mint, bounded-at-render.
+            //
+            // NO COUNT IS STATED HERE ON PURPOSE. The count has now been wrong three times, and the
+            // third time it was wrong ABOUT THIS CONSTRUCTION: the slice below was added while the
+            // `status` interpolated into the MESSAGE argument two lines down was left unbounded, so a
+            // comment declaring the category closed sat directly above an open instance of it. The
+            // invariant, which is checkable and does not decay: EVERY endpoint-chosen string entering
+            // a `SaihmEndpointError` is sliced AT THE MINT — the `code` argument and the `message`
+            // argument alike. Sweep the observable, not the argument position; the mints are found
+            // with `new SaihmEndpointError`, not with a grep for this constant.
             typeof claim.error === 'string'
-              ? claim.error
+              ? claim.error.slice(0, MAX_ERROR_CODE_CHARS)
               : 'free_onboard_denied',
-            `free-onboard was not granted (${typeof status === 'string' ? status : 'unknown'})`,
+            `free-onboard was not granted (${
+              typeof status === 'string' ? status.slice(0, MAX_ERROR_CODE_CHARS) : 'unknown'
+            })`,
           );
         }
       } catch (e) {
@@ -1464,14 +1488,16 @@ export class SaihmProClient {
         let code: string | undefined;
         try {
           const j = JSON.parse(text) as Record<string, unknown>;
-          // TRUNCATED AT THE MINT, exactly as `doCall` does — see the longer note there. There are
-          // TWO mints for `SaihmEndpointError.code` and the bound was added to only one of them, so
-          // the onboarding path stayed uncapped: `code` lands in `code` AND inside `message` below,
-          // so a 16MiB error body became a ~32MiB string on every join/upgrade. `render_fence.ts`
-          // meanwhile justified importing the budget rather than restating it with "the client
-          // truncates `code` at the mint" — true of the mint its author was looking at, false of the
-          // tree. Third instance this review of one fix landing at one of N sites; the durable
-          // defence is to grep for the SIBLING before calling such a fix done.
+          // TRUNCATED AT THE MINT, exactly as `doCall` does — see the longer note there. This
+          // sentence said "there are TWO mints" and was itself the fourth instance of the failure it
+          // was written to warn about: a THIRD mint sat 45 lines above, in the free-onboard claim
+          // branch, taking `claim.error` off an HTTP 200 with no slice. Counted by re-running the
+          // sweep rather than by recalling it: 55 `new SaihmEndpointError` sites, 52 hard-coded
+          // literals, 3 endpoint-chosen — all three now slice. `render_fence.ts` justified importing
+          // the budget rather than restating it with "the client truncates `code` at EVERY mint";
+          // that claim only became true at this commit. Do not restate the COUNT here — a number in
+          // prose goes stale silently. `MAX_ERROR_CODE_CHARS` is the grep handle; the invariant is
+          // that no endpoint-chosen string reaches `.code` without passing through it.
           if (typeof j.error === 'string') code = j.error.slice(0, MAX_ERROR_CODE_CHARS);
         } catch {
           /* non-JSON error body — leave code undefined */
@@ -1479,7 +1505,9 @@ export class SaihmProClient {
         throw new SaihmEndpointError(
           res.status,
           code,
-          `SAIHM onboard failed: ${res.status} ${res.statusText}` +
+          // `statusText` is an endpoint-chosen reason phrase, sliced at the mint like every other
+          // endpoint string reaching an error: short by RFC, unbounded by our transport.
+          `SAIHM onboard failed: ${res.status} ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}` +
             (code ? ` (${code})` : ''),
         );
       }
@@ -1676,7 +1704,8 @@ export class SaihmProClient {
         throw new SaihmEndpointError(
           res.status,
           code,
-          `SAIHM endpoint ${method} failed: ${res.status} ${res.statusText}` +
+          // `statusText` is endpoint-chosen — sliced at the mint, same invariant as the `code` arm.
+          `SAIHM endpoint ${method} failed: ${res.status} ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}` +
             (code ? ` (${code})` : ''),
         );
       }
@@ -1844,6 +1873,16 @@ export class SaihmProClient {
     // caller-supplied or client-generated, `seq` is this client's monotonic counter, and
     // `commitmentHash` is read off the envelope THIS process sealed. Taking them from the response
     // bought nothing and let the endpoint choose them.
+    // Resolved ONCE into a local, then type-checked and returned — never read twice. The reason
+    // recorded here before was that `r` is `JSON.parse` output and so carries only own data
+    // properties, making a second read provably identical. That reason is FALSE, and in the exact
+    // case the guard exists for: `r.shardId` is a PROTOTYPE-CHAIN lookup, so when the endpoint's
+    // 200 body OMITS `shardId` the read resolves on `Object.prototype`, where an accessor can
+    // return a different value on each read. No in-repo pollution vector was found, so this is
+    // shape, not an active defect — but resolve-once is cheap and does not depend on that search
+    // having been exhaustive, which is why it stays.
+    const rawShardId: unknown = r?.shardId;
+    const shardId = typeof rawShardId === 'string' ? rawShardId : '';
     return {
       cellId,
       seq: seq.toString(10),
@@ -1860,7 +1899,15 @@ export class SaihmProClient {
       // guards its own coercion for the same reason; this one is upstream of it and needed its own.
       // A shard id that is not a string is not a shard id, so there is nothing to salvage by
       // stringifying it.
-      shardId: typeof r?.shardId === 'string' ? r.shardId : '',
+      //
+      // RESOLVED ONCE, above, not re-read here. Written inline as
+      // `typeof r?.shardId === 'string' ? r.shardId : ''` this reads the property TWICE — once to
+      // test it, once to take it — and the two reads are not guaranteed to agree. A getter that
+      // returns a short string to the guard and 5,000 characters to the taker defeats it; that was
+      // measured, not supposed. Unreachable today because `r` is `JSON.parse`d and so carries only
+      // data properties, but the guard is written to be true of its own expression rather than of a
+      // fact about a caller three frames away.
+      shardId,
     };
   }
 
@@ -2091,7 +2138,14 @@ export class SaihmProClient {
           if (seenShared.has(key)) continue;
           const rowChars =
             row.sharer.length + row.cellId.length + row.scope.length + epochChars;
-          // BYTE AXIS. Checked before the row cap, because a single row can exceed the whole budget.
+          // BYTE AXIS. This said it is checked before the row cap "because a single row can exceed the
+          // whole budget", which the field cap above refutes: every one of the four summed fields is
+          // already bounded at MAX_ANNOUNCEMENT_FIELD_CHARS, so `rowChars` cannot exceed 256 against a
+          // 32,768 budget — unreachable by a factor of 128. The ordering is inert either way (both
+          // axes set `announcementsTruncated` and `continue`); only the reason was false. Kept in this
+          // order because the byte axis is the cheaper test, and flagged because the two neighbouring
+          // orderings in this block ARE argued from measurement, which is what made this one read as
+          // if it had been.
           // `continue`, never `break`: the scan must keep running to reach this agent's OWN cells,
           // which arrive interleaved with announcements and whose loss would be silent — and, on the
           // cached path, would then be written through to the on-disk cache by replaceAll.

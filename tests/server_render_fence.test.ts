@@ -215,7 +215,26 @@ test('a value String() cannot survive becomes a marker, not a thrown stack overf
   // throw underneath it — a primitive has no recursive structure to overflow on. Delete the try/catch
   // in `coerce` and this assertion is the one that goes red.
   assert.match(failText(deep), /\(malformed\)/);
-  assert.equal(safeScalar({ toString: () => { throw new Error('nope'); } }), MALFORMED);
+
+  // A THROWING `toString`, driven at BOTH layers — and they are not the same assertion. Under
+  // `safeScalar` the object is rejected as a non-primitive before any coercion, so the throwing
+  // method is never called: measured at 0 invocations, and the non-primitive branch is already pinned
+  // two tests below. Written alone here it read as coverage of the try/catch and was not. `failText`
+  // is the layer that actually reaches the coerce guard — 1 invocation, measured — so the reachable
+  // form is the one that has to be asserted.
+  //
+  // The two `calls` counters below are DOCUMENTATION, not unique witnesses, and are kept on that
+  // basis. Measured by stripping both and re-running the mutants they look like they cover:
+  // deleting `coerce`'s try/catch, swapping `failText`'s `String(e)` arm for `safeScalar`, and
+  // dropping `safeScalar`'s PRIMITIVE guard all stay KILLED without them, by the `assert.match`
+  // lines either side. No mutation was found that only they catch. They record WHICH layer
+  // reaches the guard, which is the thing that was previously asserted wrongly.
+  let calls = 0;
+  const throws = { toString: (): string => { calls++; throw new Error('nope'); } };
+  assert.equal(safeScalar(throws), MALFORMED);
+  assert.equal(calls, 0, 'safeScalar rejects a non-primitive before coercing it');
+  assert.match(failText(throws), /\(malformed\)/);
+  assert.equal(calls, 1, 'failText is the path that reaches the coerce guard');
 });
 
 test('safeScalar rejects a NON-PRIMITIVE instead of stringifying it into the text block', () => {
@@ -281,6 +300,18 @@ test('labelSafe is 1:1 and length-preserving, which is what keeps safeField reor
   // free to wrap either way round without changing the output.
   const hostile = 'x scope=readwrite [a]|b =';
   assert.equal(labelSafe(safeField(hostile, 64)), safeField(labelSafe(hostile), 64));
+  // ACROSS THE CUT, which is the only place the reorder could differ. The line above runs 25
+  // characters against a 64-character budget, so `safeField` never truncates and the equality also
+  // holds if both fences are the identity — it licenses a claim about slice-then-scrub without ever
+  // slicing. Swept over every budget through and past the input length, so the `=`, the brackets, the
+  // pipe, the U+2028 and the NUL each land on both sides of the boundary in turn.
+  for (let max = 0; max <= hostile.length + 2; max++) {
+    assert.equal(
+      labelSafe(safeField(hostile, max)),
+      safeField(labelSafe(hostile), max),
+      `slice-then-scrub and scrub-then-slice diverged at max=${max}`,
+    );
+  }
 });
 
 test('the closed-set checkers are `=`-free, which is why labelSafe skips them', () => {
@@ -384,17 +415,47 @@ test('failText spends each budget on the field it was sized for', () => {
 });
 
 test('the scalar and abbreviation budgets are PINNED, and ordered', () => {
-  // `shortScalar` fences at MAX_SCALAR_CHARS and abbreviates at ABBREV_CHARS. Swapping the two is an
-  // EQUIVALENT mutation, not a gap: `slice(0, ABBREV_CHARS)` discards whatever `safeField` appended,
-  // so fencing at 16 and fencing at 64 produce byte-identical output for every input (verified by
-  // differential fuzz over 32,409 inputs — lengths 0..80 across ASCII, brackets, astral, lone
-  // surrogates, newlines and a supplied `…`, plus the non-string branches: zero differing outputs).
-  // Recorded here rather than covered by a test that could not fail, because a test written for an
-  // indistinguishable mutation is the kind that reports coverage it does not have.
+  // This test used to carry a claim that "fencing at 16 and fencing at 64 produce byte-identical
+  // output for every input", called the mutation EQUIVALENT, and wrote no test on that basis. The
+  // claim was false, and the way it was reached is the point: the mutation moves the fence from the
+  // module CONSTANT to the caller-supplied PARAMETER `keep`, and the 32,409-input fuzz cited as proof
+  // swept the VALUE while holding `keep` at its default. It could not have observed the difference it
+  // was offered as evidence against. Sweeping BOTH axes gives 55,696 differing pairs, every one at
+  // `keep >= MAX_SCALAR_CHARS + 1`.
   //
-  // What IS assertable is the ordering the abbreviation depends on, so a later edit that inverts the
-  // two constants fails here instead of silently making the fence the narrower of the two.
+  // An equivalence argument is a claim that NO input distinguishes two programs. Establishing one by
+  // fuzzing every axis but the one the mutation touched is the same error as reading a mutation
+  // verdict off a red baseline: the measurement never had the chance to disagree.
   assert.equal(MAX_SCALAR_CHARS, 64);
   assert.equal(ABBREV_CHARS, 16);
   assert.ok(ABBREV_CHARS < MAX_SCALAR_CHARS, 'the abbreviation must be narrower than the fence');
+});
+
+test('shortScalar abbreviates INSIDE the fence — `keep` can never widen it', () => {
+  // The property the equivalence claim above obscured. `keep` says how much of an ALREADY-FENCED
+  // value to show; it is not a budget of its own, and a call site passing a larger one must not get
+  // more endpoint bytes than MAX_SCALAR_CHARS. That is one plausible edit away: MAX_JOIN_FIELD_CHARS
+  // (256) is defined eleven lines above `shortScalar` in the same file, so `shortScalar(v,
+  // MAX_JOIN_FIELD_CHARS)` reads exactly as though it would widen the fence.
+  //
+  // Asserted as the COUNT OF INPUT CHARACTERS that survive, swept across the boundary, because length
+  // alone cannot see it: at `keep = 65` the fenced form ('a' x64 plus marker) and the unfenced one
+  // ('a' x65) are both 65 characters. The marker is the only witness, so the input count is pinned.
+  const long = 'a'.repeat(300);
+  for (let keep = 0; keep <= 300; keep++) {
+    const out = shortScalar(long, keep);
+    assert.equal(
+      out.split('a').length - 1,
+      Math.min(keep, MAX_SCALAR_CHARS),
+      `shortScalar(300 chars, keep=${keep}) let ${out.split('a').length - 1} through; the fence is MAX_SCALAR_CHARS`,
+    );
+  }
+  // The smallest distinguishing case, spelled out: at exactly one past the fence, the marker is what
+  // separates a fenced value from an unfenced one of identical length.
+  assert.equal(
+    shortScalar('a'.repeat(MAX_SCALAR_CHARS + 1), MAX_SCALAR_CHARS + 1),
+    'a'.repeat(MAX_SCALAR_CHARS) + '…',
+  );
+  // And a `keep` inside the fence still abbreviates normally — the clamp must not become the fence.
+  assert.equal(shortScalar('b'.repeat(50), 10), 'b'.repeat(10) + '…');
 });
