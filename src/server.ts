@@ -24,7 +24,8 @@
  * Boot from env (self-onboard): SAIHM_ENDPOINT_URL, SAIHM_MASTER_SECRET_HEX,
  *   SAIHM_TIER, SAIHM_PAYMENT_METHOD. Advanced/legacy: SAIHM_AUTH_HEADER (static).
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as pathJoin } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -982,19 +983,68 @@ if (selfJoinEnabled()) {
  * for a Stripe hosted-checkout link to subscribe it, and print the link to pay. After payment, run the
  * server normally (no `join`) and it self-onboards. Writes only to stderr/stdout — not the MCP stream.
  */
+/**
+ * Write a hosted-checkout URL to a file beside the printed copy; return where it went, or '' if it
+ * could not be written.
+ *
+ * A hosted-checkout URL is long and carries a MANDATORY `#fid…` fragment that Stripe Checkout
+ * reads in the browser. Chat surfaces, markdown autolinkers and mail clients cut at the `#`, and a
+ * cut link is refused with "This link is incomplete" — which, to the payer, is indistinguishable
+ * from a broken backend. That misreading is not hypothetical: on 2026-08-27 a truncated relay of
+ * this exact URL was reported as a backend defect concatenating a stored fragment, and the proposed
+ * remedy — strip the fragment before returning it — would have broken every hosted checkout. A file
+ * is the one delivery channel that cannot reflow the URL.
+ *
+ * Best-effort by design: the printed URL remains the fallback, so a read-only or absent home
+ * directory degrades the affordance instead of failing the join.
+ */
+function persistCheckoutUrl(fenced: string): string {
+  try {
+    const dir = process.env.SAIHM_STATE_DIR || pathJoin(homedir(), '.saihm');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const to = pathJoin(dir, 'checkout-url.txt');
+    writeFileSync(to, fenced + '\n', { mode: 0o600 });
+    return to;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The printed URL, delimited so that truncation in transit is VISIBLE rather than silent.
+ *
+ * `savedTo` is fenced for the same reason the URL is: this block is addressed to a human and is a
+ * rendering surface, so anything interpolated into it must be unable to start a line. The path is
+ * derived from `SAIHM_STATE_DIR`, which is caller-chosen rather than endpoint-chosen — a weaker
+ * threat, but the fence costs nothing and the distinction is not worth encoding in a place where
+ * getting it wrong forges an instruction in the tool's own voice.
+ */
+function checkoutUrlBlock(fenced: string, savedTo: string): string[] {
+  return [
+    '  --- BEGIN CHECKOUT URL (one line, open unmodified) ---',
+    '  ' + fenced,
+    '  --- END CHECKOUT URL ---',
+    '',
+    ...(savedTo ? ['  Also written to: ' + safeField(savedTo, MAX_JOIN_FIELD_CHARS), ''] : []),
+  ];
+}
+
 async function runJoin(): Promise<void> {
   const c = SaihmProClient.bootFromEnv();
   const url = await c.requestCheckoutUrl();
+  const fenced = safeField(url, MAX_CHECKOUT_URL_CHARS);
   process.stdout.write(
     [
       '',
       'SAIHM — subscribe this identity to activate your memory:',
       '',
-      '  ' + safeField(url, MAX_CHECKOUT_URL_CHARS),
-      '',
+      ...checkoutUrlBlock(fenced, persistCheckoutUrl(fenced)),
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
-      '  Open the link above in a browser and pay. Keep SAIHM_MASTER_SECRET_HEX safe — it is',
+      '  Open the link above in a browser and pay. Copy it whole — everything after the "#" is part',
+      '  of the link, and a copy that loses it is refused as incomplete.',
+      '',
+      '  Keep SAIHM_MASTER_SECRET_HEX safe — it is',
       '  the only key to your memory and cannot be recovered. After payment, start the server',
       '  normally (drop the "join" argument) and it connects automatically.',
       '',
@@ -1074,16 +1124,17 @@ async function runUpgrade(): Promise<void> {
   const target =
     (process.argv[3] ?? process.env.SAIHM_UPGRADE_TIER ?? 'PRO').trim() || 'PRO';
   const url = await c.requestUpgradeUrl(target);
+  const fenced = safeField(url, MAX_CHECKOUT_URL_CHARS);
   process.stdout.write(
     [
       '',
       `SAIHM — upgrade this identity to ${target} (monthly). Your memories stay on this same key:`,
       '',
-      '  ' + safeField(url, MAX_CHECKOUT_URL_CHARS),
-      '',
+      ...checkoutUrlBlock(fenced, persistCheckoutUrl(fenced)),
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
-      '  Open the link above in a browser and pay. After payment, set SAIHM_TIER and',
+      '  Open the link above in a browser and pay. Copy it whole — everything after the "#" is part',
+      '  of the link, and a copy that loses it is refused as incomplete. After payment, set SAIHM_TIER and',
       '  SAIHM_PAYMENT_METHOD for the paid tier and start the server normally (drop the',
       '  "upgrade" argument) — it self-onboards paid and every prior memory is still there.',
       '',
