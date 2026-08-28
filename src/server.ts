@@ -14,10 +14,13 @@
  *
  * Run as an MCP server (the usual case):
  *   npx -y @saihm/mcp-server-pro
- * Self-serve join (one-off, prints a Stripe checkout link to subscribe this identity):
- *   npx -y @saihm/mcp-server-pro join
- * Self-serve FREE activation (one-off, OAuth device flow — requires SAIHM_TIER=FREE):
+ * Join SAIHM (one-off, OAuth device flow) — the default entry point. Needs NO configuration:
+ * it generates and persists your identity, defaults the tier FREE and the endpoint to the
+ * hosted operator, so this is a complete join on a bare machine:
  *   npx -y @saihm/mcp-server-pro free-join
+ * Subscribe an identity directly instead, skipping FREE (one-off, prints a Stripe checkout link).
+ * Needs a master secret and SAIHM_TIER/SAIHM_PAYMENT_METHOD in env — see README:
+ *   npx -y @saihm/mcp-server-pro join
  * Upgrade FREE -> monthly paid, same key/memories (one-off — requires SAIHM_TIER=FREE):
  *   npx -y @saihm/mcp-server-pro upgrade [PRO|PRO_FAST|ENTERPRISE|ENTERPRISE_FAST]
  *
@@ -1134,9 +1137,16 @@ async function runJoin(): Promise<void> {
  * FREE tier via the operator bridge's OAuth device flow (RFC 8628). Prints the one-tap prompt (open a
  * URL, enter a code) and waits for authorization; the provider token stays server-ephemeral and this
  * process never holds it. After it succeeds, run the server normally (no `free-join`) and it
- * self-onboards FREE. Requires SAIHM_TIER=FREE. Writes only to stdout/stderr — not the MCP stream.
+ * self-onboards FREE. Writes only to stdout/stderr — not the MCP stream.
+ *
+ * Takes no configuration: it ensures an identity the same way the `saihm_join` tool does, so
+ * `npx -y @saihm/mcp-server-pro free-join` is a complete join on a bare machine — the endpoint
+ * falls back to DEFAULT_ENDPOINT and the tier is defaulted FREE. An env secret already set is
+ * left untouched, so bring-your-own-key still works. Under SAIHM_SELF_JOIN=0 nothing is
+ * generated and bootFromEnv raises its own guided error, which is the point of that switch.
  */
 async function runFreeJoin(): Promise<void> {
+  const identity = selfJoinEnabled() ? ensureSelfJoinIdentityEnv() : undefined;
   const c = SaihmProClient.bootFromEnv();
   const r = await c.acquireFreeEntitlement({
     onPrompt: (p) =>
@@ -1164,9 +1174,19 @@ async function runFreeJoin(): Promise<void> {
       '',
       `  identity (agentIdHash): ${r.agentIdHash}`,
       '',
-      '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your memory and cannot be',
-      '  recovered. Start the server normally (drop the "free-join" argument) and it connects',
-      '  automatically. Upgrading to a paid plan later attaches to THIS same key — your memories persist.',
+      // Name the key the caller ACTUALLY has. This line was unconditionally
+      // "Keep SAIHM_MASTER_SECRET_HEX safe", which for a self-generated identity points at an env
+      // var that does not exist — sending the one caller who most needs to take a backup to look
+      // for the wrong thing. safeField: keyPath is env-derived on the bring-your-own-key path.
+      // Not `identity?.keyPath` alone: under SAIHM_SELF_JOIN=0 nothing is ensured, yet a caller
+      // who supplied SAIHM_MASTER_SECRET_FILE still has a FILE to back up. Reading env directly
+      // covers that case too, so the only caller told to keep the HEX var is one who set it.
+      (identity?.keyPath ?? process.env.SAIHM_MASTER_SECRET_FILE)
+        ? `  Back up ${safeField(identity?.keyPath ?? process.env.SAIHM_MASTER_SECRET_FILE!, MAX_JOIN_FIELD_CHARS)} — it is the only key to your`
+        : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your',
+      '  memory and cannot be recovered. Start the server normally (drop the "free-join" argument)',
+      '  and it connects automatically. Upgrading to a paid plan later attaches to THIS same key —',
+      '  your memories persist.',
       '',
     ].join('\n'),
   );

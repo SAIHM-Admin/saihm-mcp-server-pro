@@ -256,3 +256,75 @@ test('bootFromEnv: flag ON + persisted default-file identity => boots FREE (rest
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// The README promises `npx -y @saihm/mcp-server-pro free-join` is a COMPLETE join on a bare
+// machine — no env, no card, no master secret to invent. That promise is a composition of three
+// separate defaults (identity, tier, endpoint), each already covered alone above; nothing pinned
+// them TOGETHER, which is the only form the user actually meets. runFreeJoin does exactly this
+// pair of calls, so this fails if any one of the three stops carrying the zero-config case.
+test('free-join composition: zero env is a complete join (identity + FREE tier + default endpoint)', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-uj5-'));
+  try {
+    // SAIHM_HOME only, to keep the generated key out of the real ~/.saihm. Every other variable
+    // the CLI could read is unset by withEnv — no endpoint, no secret, no tier.
+    withEnv({ SAIHM_HOME: home }, () => {
+      assert.equal(selfJoinEnabled(), true, 'self-join is ON by default; the CLI relies on it');
+      const identity = selfJoinEnabled() ? ensureSelfJoinIdentityEnv() : undefined;
+      assert.equal(identity?.created, true, 'a bare machine has no key yet, so one is minted');
+      assert.equal(identity?.keyPath, join(home, 'free-identity.key'));
+
+      // Previously this threw `SAIHM_ENDPOINT_URL env var required`; DEFAULT_ENDPOINT is what
+      // makes the command zero-config, so a boot that does NOT throw IS the endpoint assertion.
+      const c = SaihmProClient.bootFromEnv();
+      assert.equal(c.tier, 'FREE', 'the paid tiers must never be what an unconfigured join lands on');
+      assert.match(c.agentIdHash, /^[0-9a-f]{64}$/);
+      assert.match(DEFAULT_ENDPOINT, /^https:\/\//, 'the fallback operator is https, never cleartext');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Non-vacuity for the test above: it must not pass merely because bootFromEnv is lenient. Under
+// the documented opt-out the CLI generates NOTHING and boot fails, which is the point of the flag.
+test('free-join composition: SAIHM_SELF_JOIN=0 mints no key and refuses to boot', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-uj6-'));
+  try {
+    withEnv({ SAIHM_HOME: home, SAIHM_SELF_JOIN: '0' }, () => {
+      const identity = selfJoinEnabled() ? ensureSelfJoinIdentityEnv() : undefined;
+      assert.equal(identity, undefined, 'the opt-out must not silently mint an identity');
+      assert.ok(!existsSync(join(home, 'free-identity.key')), 'no key file may appear');
+      assert.throws(() => SaihmProClient.bootFromEnv());
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// The composition test above MIRRORS runFreeJoin rather than invoking it — runFreeJoin runs a
+// device flow against a live bridge, so it cannot be called here. That leaves a real hole: drop
+// `ensureSelfJoinIdentityEnv()` from the CLI and the mirror still passes while the shipped command
+// regresses to demanding env. So re-derive the guarantee from the SOURCE, the same way the render
+// fence re-derives its call-site list. server.ts is read as text, not imported, because `main()`
+// sits at module scope and importing it would start a server.
+test('free-join composition: the shipped CLI actually performs it (re-derived from source)', () => {
+  const src = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf-8')
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+
+  const start = src.indexOf('async function runFreeJoin(');
+  assert.notEqual(start, -1, 'runFreeJoin must exist; renaming it silently voids this sweep');
+  const end = src.indexOf('\n}', start);
+  assert.notEqual(end, -1, 'could not find the end of runFreeJoin');
+  const body = src.slice(start, end);
+
+  // Comments are stripped above ON PURPOSE: runFreeJoin's own doc block names both symbols, so an
+  // unstripped match would pass on prose alone while the code did nothing.
+  assert.match(body, /ensureSelfJoinIdentityEnv\(\)/, 'zero-config join requires the CLI to mint an identity');
+  assert.match(body, /selfJoinEnabled\(\)/, 'SAIHM_SELF_JOIN=0 must still suppress self-join in the CLI');
+  assert.match(body, /bootFromEnv\(\)/);
+  assert.ok(
+    body.indexOf('ensureSelfJoinIdentityEnv()') < body.indexOf('bootFromEnv()'),
+    'the identity must be ensured BEFORE boot, or boot throws on the bare machine this promises to serve',
+  );
+});

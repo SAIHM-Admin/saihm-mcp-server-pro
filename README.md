@@ -139,18 +139,37 @@ you lose it, no one (including SAIHM) can open your cells.**
 
 **The simplest way: just ask your agent to "Join SAIHM."** Self-join is on by
 default, so the `saihm_join` tool is already there — it generates your key on
-this machine, starts the sign-in, and activates the free trial for you. No
+this machine, starts the sign-in, and activates the free tier for you. No
 master secret to invent, no env vars, no website visit.
 
-To do it yourself from a shell instead, generate a master secret first — it
-never leaves your machine, and it is the only key to your memory:
+**Prefer a terminal? One command, no configuration:**
+
+```sh
+npx -y @saihm/mcp-server-pro free-join
+```
+
+That is the whole thing. It generates your identity on this device, writes it
+mode-600 to `~/.saihm/free-identity.key`, and starts the sign-in — no env vars,
+no master secret to invent, no card. Open the printed link, enter the short
+code, approve. SAIHM never sees or stores the GitHub token: the sign-in stays in
+your browser and the token is server-ephemeral. When it returns, start the
+server normally (drop `free-join`) and it self-onboards on the free tier.
+
+**Back up the key file it prints.** It is the only key to your memory — if you
+lose it, no one, including SAIHM, can open your cells.
+
+<details>
+<summary>Bring your own key instead (optional)</summary>
+
+If you would rather generate the secret yourself, do that first — it never
+leaves your machine, and it is the only key to your memory:
 
 ```sh
 openssl rand -hex 32 > saihm-master.key && chmod 600 saihm-master.key
 ```
 
-Then activate. Prove you're a unique person once via a GitHub device sign-in;
-your memory is then bound to your own key for life:
+Then point `free-join` at it. An identity already supplied through the
+environment is used as-is and nothing is generated:
 
 ```sh
 SAIHM_ENDPOINT_URL=https://saihm.coti.global/mcp \
@@ -159,10 +178,7 @@ SAIHM_TIER=FREE \
   npx -y @saihm/mcp-server-pro free-join
 ```
 
-Open the printed link, enter the short code, approve. SAIHM never sees or stores
-the GitHub token — the sign-in stays in your browser and the token is
-server-ephemeral. When it returns, start the server normally (drop `free-join`)
-and it self-onboards free.
+</details>
 
 The free trial is for testing on real infrastructure: a fixed, one-time
 allowance of writes, reads, and shares that never resets or refills. **No card,
@@ -183,10 +199,12 @@ This prints a monthly checkout link bound to your identity; billing attaches to
 the same key, so every memory you already have persists. Pay, switch your config
 to the paid tier, and start the server normally.
 
-### Self-serve join
+### Subscribe directly, skipping the free tier
 
-To subscribe an identity from the command line instead of the website, run the
-one-off `join` command with the same env:
+Most people should start with `free-join` above and upgrade later — the key and
+every memory carry over. This path is for going straight to a paid tier from the
+command line instead of the website. Unlike `free-join` it is not zero-config:
+it needs your own master secret and an explicit tier.
 
 ```sh
 SAIHM_ENDPOINT_URL=https://saihm.coti.global/mcp \
