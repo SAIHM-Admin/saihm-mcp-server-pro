@@ -744,6 +744,16 @@ export interface QuotaNag {
 class SeqState {
   private readonly hwm = new SeqHighWaterMark();
   private readonly cellIds = new Set<string>();
+  // The commitment hash of the envelope observed AT the current high-water seq, per cellId.
+  // Monotonic seq alone cannot close rollback, because a seq can legitimately repeat: `remember`
+  // advances the mark only after the endpoint accepts the write, so a write the endpoint COMMITS
+  // whose response is lost leaves the mark unadvanced and the next write reuses that seq. Two
+  // validly-signed envelopes then exist at one (cellId, seq), and a `<`-only guard admits both --
+  // measured: the endpoint served two different plaintexts at the same seq, alternately, with no
+  // error. Pinning the commitment makes the pair distinguishable, which the sequence number alone
+  // never can be. Tightening the guard to `<=` instead would be wrong: it rejects every legitimate
+  // re-read of the cell at its current seq.
+  private readonly commitments = new Map<string, string>();
 
   constructor(
     private readonly agentIdHashHex: string,
@@ -766,18 +776,29 @@ class SeqState {
       return; // corrupt/empty — treat as no state (admit() is monotonic; nothing regresses)
     }
     for (const [cellId, v] of Object.entries(obj)) {
-      if (typeof v !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(v)) continue;
-      if (this.hwm.admit(this.agentIdHashHex, cellId, BigInt(v)))
+      // Two accepted shapes. A bare decimal string is the LEGACY form, written before commitments
+      // were pinned; it loads with no commitment, so the first envelope observed at that seq pins
+      // one. Refusing to load it would regress every existing agent's whole sequence state to zero
+      // -- a far worse outcome than an unpinned first read, which is the state a cold start is in
+      // anyway. `{seq, commitmentHash}` is the current form.
+      const seqText = typeof v === 'string' ? v : (v as { seq?: unknown })?.seq;
+      const hash = typeof v === 'string' ? undefined : (v as { commitmentHash?: unknown })?.commitmentHash;
+      if (typeof seqText !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(seqText)) continue;
+      if (this.hwm.admit(this.agentIdHashHex, cellId, BigInt(seqText))) {
         this.cellIds.add(cellId);
+        if (typeof hash === 'string' && hash.length > 0) this.commitments.set(cellId, hash);
+      }
     }
   }
 
   private persist(): void {
     if (!this.path) return;
-    const obj: Record<string, string> = {};
+    const obj: Record<string, { seq: string; commitmentHash?: string }> = {};
     for (const cellId of this.cellIds) {
       const c = this.hwm.current(this.agentIdHashHex, cellId);
-      if (c !== undefined) obj[cellId] = c.toString(10);
+      if (c === undefined) continue;
+      const hash = this.commitments.get(cellId);
+      obj[cellId] = hash === undefined ? { seq: c.toString(10) } : { seq: c.toString(10), commitmentHash: hash };
     }
     // `mode` applies ONLY when the directory is CREATED — an existing one keeps its own
     // permissions, so this hardens the path we make and never re-permissions a shared one.
@@ -809,10 +830,21 @@ class SeqState {
     return this.hwm.current(this.agentIdHashHex, cellId);
   }
 
-  /** Seed / advance the high-water mark to a server-observed value (monotonic; persists on change). */
-  observe(cellId: string, seq: bigint): void {
+  /** The commitment pinned AT the current high-water seq, if one has been observed. */
+  currentCommitment(cellId: string): string | undefined {
+    return this.commitments.get(cellId);
+  }
+
+  /** Seed / advance the high-water mark to a server-observed value (monotonic; persists on change).
+   *  `commitmentHash` belongs to the envelope carrying `seq` and is pinned with it. It is recorded
+   *  only when the mark actually ADVANCES, so a re-read at the current seq can never overwrite the
+   *  pin with a second, equivocating envelope's hash -- which would hand the endpoint the very
+   *  substitution this pin exists to detect. */
+  observe(cellId: string, seq: bigint, commitmentHash?: string): void {
     if (this.hwm.admit(this.agentIdHashHex, cellId, seq)) {
       this.cellIds.add(cellId);
+      if (commitmentHash !== undefined) this.commitments.set(cellId, commitmentHash);
+      else this.commitments.delete(cellId);
       this.persist();
     }
   }
@@ -1938,6 +1970,22 @@ export class SaihmProClient {
         `endpoint returned a rolled-back envelope for cell '${env.cellId}' (seq ${env.seq} < ${knownSeq})`,
       );
     }
+    // Rollback WITHIN a sequence number, which the comparison above cannot see. A seq can repeat:
+    // `remember` advances the mark only after the endpoint accepts the write, so a committed write
+    // whose response was lost leaves the mark unadvanced and the next write reuses that seq. Both
+    // envelopes are genuinely signed by this identity, so every other check on this path passes and
+    // the endpoint may serve either, alternately, forever. Comparing the pinned commitment is what
+    // separates them. Only ever checked at EQUAL seq -- a higher seq is a legitimate new version and
+    // pins a new commitment below.
+    const envCommitment = toHex(env.publicMeta.commitmentHash);
+    const knownCommitment = this.seq.currentCommitment(env.cellId);
+    if (knownSeq !== undefined && env.seq === knownSeq && knownCommitment !== undefined && envCommitment !== knownCommitment) {
+      throw new SaihmEndpointError(
+        502,
+        'stale_cell',
+        `endpoint returned a different envelope at the same sequence for cell '${env.cellId}' (seq ${env.seq})`,
+      );
+    }
     let plaintext: string;
     try {
       plaintext = fromUtf8(openCell(env, this.identity.kek));
@@ -1948,7 +1996,9 @@ export class SaihmProClient {
         `cell '${env.cellId}' could not be opened with this identity's key`,
       );
     }
-    this.seq.observe(env.cellId, env.seq); // env.seq is authenticated (bound into the AEAD AAD)
+    // Both authenticated: seq is bound into the AEAD AAD, and the commitment is the envelope's own
+    // public meta, verified before this line. Neither is the endpoint's echo.
+    this.seq.observe(env.cellId, env.seq, envCommitment);
     return {
       cellId: env.cellId,
       plaintext,
@@ -2007,7 +2057,10 @@ export class SaihmProClient {
     });
     const wire = encodeEnvelope(env);
     const r = await this.call<RememberResult>('saihm_remember', { wire });
-    this.seq.observe(cellId, seq); // advance only after the endpoint accepted the write
+    // Advance only after the endpoint accepted the write, and pin the commitment of the envelope
+    // THIS process just sealed -- so a later read of a DIFFERENT envelope at this same seq, which a
+    // lost response makes possible, is detectable rather than silently accepted.
+    this.seq.observe(cellId, seq, toHex(env.publicMeta.commitmentHash));
     // Delta-cache coherence: a delta recall SKIPS cellIds we already hold, so an in-place UPDATE (or a
     // fresh create) would otherwise be invisible to this client's next recall. Cache the CANONICAL
     // opened cell by re-opening OUR OWN just-sealed envelope — byte-identical to a future recall, with
