@@ -48,11 +48,9 @@ import {
 import { z } from 'zod';
 import {
   SaihmProClient,
-  SaihmEndpointError,
   selfJoinEnabled,
   ensureSelfJoinIdentityEnv,
   MAX_ANNOUNCEMENT_FIELD_CHARS,
-  MAX_ERROR_CODE_CHARS,
   type FreeDevicePrompt,
   type FreeEntitlementResult,
 } from './client.js';
@@ -504,7 +502,44 @@ server.registerTool(
           ? ['No memories stored.']
           : [
               `RECALL ${cells.length} memories`,
-              ...cells.map((c) => `  [${c.cellId}] seq=${c.seq} | ${c.plaintext}`),
+              // cellId and seq land in LABEL position, exactly as in the REMEMBERED and
+              // SHARED-RECALL receipts, and are fenced identically here. NOT because the endpoint
+              // chose them: `openRow` DISCARDS the server's row label and takes both from the
+              // envelope this identity's own key opened, binding seq into the AEAD AAD.
+              // `render_fence.ts` records calling these two endpoint-chosen as a prior error made
+              // in the other direction. (`server_render_hostile.test.ts` says the same in its
+              // reachability note, but SAYS is the right verb: its two assertions are about line
+              // and label grammar, so citing it as a pin for ownership would be the mistake this
+              // tree keeps making.)
+              //
+              // CALLER-SUPPLIED IS NOT CALLER-CHOSEN, and that — not housekeeping — is why the
+              // fence is here. `cellId` is a free-form argument to `saihm_remember` with no pattern
+              // and no length bound, which the tool's own description invites callers to supply. An
+              // agent that lifts an id out of a forged pointer line and stores under it signs the
+              // payload itself, and the endpoint then replays it authenticated. The endpoint cannot
+              // SET this field; it can INDUCE it, and an induced id in LABEL position is exactly
+              // what `labelSafe` and the scalar budget are for. A first cut of this comment gave
+              // only renderer-consistency as the reason, which understated it into a tidiness
+              // argument.
+              //
+              // The consistency argument is real but secondary: one of three sibling receipts
+              // rendering a label by a different rule is how the other two stop being evidence for
+              // anything, and the announcement block above keeps its own backstop for the same
+              // reason — this renderer must be safe for ANY input, not only for what today's
+              // client admits.
+              //
+              // The structured `memories[]` copy is deliberately left WHOLE, and as of 2026-08-28
+              // that is SETTLED rather than open: `render_fence.ts` carries both the reasoning and
+              // the premise it rests on. This fence answers a renderer question, and the channel it
+              // fences is the one an agent actually reads.
+              //
+              // Plaintext stays RAW by design — it is the payload, not a label;
+              // the residual that creates is documented on the `sharedLines` block earlier in this
+              // same handler, not above it.
+              ...cells.map(
+                (c) =>
+                  `  [${labelSafe(safeScalar(c.cellId))}] seq=${labelSafe(safeScalar(c.seq))} | ${c.plaintext}`,
+              ),
             ];
       return ok([...lines, ...sharedLines].join('\n'), {
         count: cells.length,
