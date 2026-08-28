@@ -2385,6 +2385,25 @@ export class SaihmProClient {
    * checks, and an unauthenticated share fails `verifyShareSig`. `verifyEnvelope` additionally proves
    * the sharer's ML-DSA signature over the exact content (non-repudiation). The recipient's tier must
    * be sharing-capable; otherwise the endpoint rejects the fetch (`BLIND_SHARE_TIER_REQUIRED`, 402).
+   *
+   * TWO PROPERTIES ARE ENDPOINT-ENFORCED, NOT CRYPTOGRAPHIC, and the paragraph above used to be read
+   * as covering them. It does not, and the distinction is the same one `SharedAnnouncement.expiryEpoch`
+   * already draws for its own fields:
+   *
+   *   - FRESHNESS. An OLDER envelope the sharer genuinely signed for this same cellId passes every
+   *     check listed above: the ciphertext is untampered, the cell is not substituted, the share is
+   *     authenticated. `recall` and `share` both carry an explicit rollback guard against exactly this
+   *     (`stale_cell`, on `this.seq.current(cellId)`); this path has none and cannot cheaply gain one,
+   *     because `this.seq` is THIS agent's own write counter and a recipient holds no authenticated
+   *     high-water mark for a foreign cell — the first read of one is unprotectable in principle. What
+   *     the caller DOES get is `seq` on the returned row, taken off the verified envelope: a caller
+   *     that remembers the highest seq it has seen per (sharer, cellId) can enforce monotonicity
+   *     itself. Nothing here does that for it.
+   *   - REVOCATION. `null` for a revoked grant is the HONEST endpoint declining to serve it. A hostile
+   *     one replays the share envelope and content it served before the revocation, and every check
+   *     above still passes. Revocation is a server-side authorization decision, so it is exactly as
+   *     strong as the party this paragraph assumes hostile — state it that way rather than reading the
+   *     `null` return as a cryptographic guarantee.
    */
   async recallShared(grant: SharedReadGrant): Promise<RecalledCell | null> {
     // 1) Pin the sharer's identity (defeats directory key-substitution) → trusted sharer ML-DSA key.
