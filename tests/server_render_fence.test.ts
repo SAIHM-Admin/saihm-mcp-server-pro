@@ -143,12 +143,20 @@ test('every character RFC 3986 permits in a fragment survives the fence — chec
   // unnecessary here, because the alphabet is attested by the GRAMMAR rather than by any capture. RFC
   // 3986 gives `fragment = *( pchar / "/" / "?" )` with `pchar = unreserved / pct-encoded / sub-delims
   // / ":" / "@"`. `[` and `]` are gen-delims reserved for an IP-literal HOST, and `|` is outside the
-  // URI grammar altogether, so no conforming fragment can carry any of the three unescaped — which
-  // makes enumerating what the grammar DOES permit a COMPLETE test of the legal alphabet, not a guess.
+  // URI grammar altogether, so no conforming fragment can carry any of the three unescaped. That is
+  // what makes the enumeration below COMPLETE rather than a sample: every literal character the
+  // grammar admits, plus the one production that is not a character.
   const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
   const unreserved = `${ALPHA}0123456789-._~`;
   const subDelims = "!$&'()*+,;=";
-  const legal = `${unreserved}${subDelims}:@/?`;
+  // pct-encoded is a three-character SEQUENCE and a BARE `%` is not conforming, so it is appended as
+  // triplets instead of being folded into the character set — an earlier cut of this test left it out
+  // of `legal` entirely while the comment above still claimed completeness, which is the same
+  // false-universal this file exists to catch. `%5B%5D%7C` is the escaped form of the three scrubbed
+  // characters, i.e. how a live fragment legitimately carries them; a fence that decoded before
+  // scrubbing would turn it back into `?`.
+  const pctEncoded = '%5B%5D%7C%20%2F';
+  const legal = `${unreserved}${subDelims}:@/?${pctEncoded}`;
 
   // The invariant in one line: the legal alphabet and the scrub set are DISJOINT. Asserted rather than
   // left to the comment, because it is the whole reason the identity below holds.
@@ -161,9 +169,10 @@ test('every character RFC 3986 permits in a fragment survives the fence — chec
     'a conforming fragment must cross the fence byte-identical — one `?` here is a dead payment link',
   );
 
-  // The escaped forms are how a live fragment legitimately carries the three scrubbed characters, and
-  // the measured fixture is full of `%2F`. They must survive AS TEXT, never decoded and then scrubbed.
-  assert.equal(safeField('%5B%5D%7C%20', MAX_CHECKOUT_URL_CHARS), '%5B%5D%7C%20');
+  // Kept as its own assertion even though `legal` now contains it: when the identity above fails, a
+  // whole-alphabet string does not say WHICH part moved, and the pct-encoded case is the one a
+  // decode-then-scrub regression would break on its own.
+  assert.equal(safeField(pctEncoded, MAX_CHECKOUT_URL_CHARS), pctEncoded);
 
   // Non-vacuity: deleting the scrub must not satisfy this test. The RAW characters still have to go.
   assert.equal(safeField('a[b]c|d', MAX_CHECKOUT_URL_CHARS), 'a?b?c?d');
