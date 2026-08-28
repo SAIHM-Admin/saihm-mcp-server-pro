@@ -493,6 +493,11 @@ export interface ForgetResult {
   sharesPurged: number;
   steps: ReadonlyArray<{ step: string; success: boolean; detail: string }>;
   epoch: string;
+  /**
+   * Set by THIS CLIENT, never by the endpoint, when the erasure succeeded but the local plaintext
+   * cache could not be purged. `undefined` on every other path. See {@link SaihmProClient.forget}.
+   */
+  localCacheResidual?: string;
 }
 
 export interface StatusSnapshot {
@@ -805,6 +810,11 @@ class RecallCache {
 
   get configured(): boolean {
     return this.path !== undefined;
+  }
+
+  /** Where the cache lives, for a residual message that tells the operator what to go and check. */
+  get cachePath(): string | undefined {
+    return this.path;
   }
 
   private load(): void {
@@ -2279,8 +2289,36 @@ export class SaihmProClient {
   /** Crypto-shred a cell (GDPR Art.17): the endpoint destroys the wrapped DEK + tombstones. */
   async forget(cellId: string): Promise<ForgetResult> {
     const r = await this.call<ForgetResult>('saihm_forget', { id: cellId });
-    this.recallCache.remove(cellId); // keep the delta cache from serving a crypto-shredded cell
-    return r;
+    // PAST THIS LINE THE ERASURE HAS HAPPENED AND IS IRREVERSIBLE. The cache purge below is local
+    // bookkeeping, and it used to run unguarded: any I/O failure threw, the server rendered
+    // `fail(e)`, and the operator was told the forget FAILED on a cell whose DEK was already
+    // destroyed — the worst possible direction to be wrong in on this tool.
+    //
+    // Swallowing it is NOT the fix and was rejected: that reports plain success while the cell's
+    // PLAINTEXT is still sitting in the on-disk cache, which is the opposite lie about the one
+    // promise this tool makes. Both halves are reported instead. The in-memory delete has already
+    // happened, so the residual is bounded — the next successful persist rewrites the file without
+    // this cell — but "it will probably fix itself" is not something to leave unsaid on an erasure.
+    let localCacheResidual: string | undefined;
+    try {
+      this.recallCache.remove(cellId);
+    } catch {
+      const where = this.recallCache.cachePath ?? 'the configured recall cache';
+      localCacheResidual =
+        `the DEK is destroyed and this cell is unrecoverable, but the local plaintext cache could ` +
+        `not be purged: plaintext may remain in ${where} until the next successful cache write`;
+    }
+    // The endpoint's claim is DELETED before ours is set, not merely overwritten. `r` is an
+    // unvalidated cast of the endpoint's body, so a hostile endpoint can put `localCacheResidual` in
+    // its 200 and would otherwise be writing a sentence straight into a rendered erasure receipt —
+    // the same channel the announcement caps and `failText`'s fences exist to close, on the one tool
+    // where an operator is most likely to act on what it says. `delete` rather than assigning
+    // `undefined` because `exactOptionalPropertyTypes` makes absent and present-but-undefined
+    // different things, and absent is the one that means "this client had nothing to report".
+    const out: ForgetResult = { ...r };
+    delete out.localCacheResidual;
+    if (localCacheResidual !== undefined) out.localCacheResidual = localCacheResidual;
+    return out;
   }
 
   /** Non-custodial status: operator-observable metadata only (no plaintext). */

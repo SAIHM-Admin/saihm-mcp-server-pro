@@ -33,6 +33,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   MALFORMED,
   MAX_CHECKOUT_URL_CHARS,
+  MAX_ERROR_MESSAGE_CHARS,
   MAX_JOIN_FIELD_CHARS,
   boundedOrMarker,
   safeField,
@@ -584,7 +585,15 @@ server.registerTool(
         // the line correct. The remaining three fields are outcomes only the endpoint can report,
         // so they stay its own — fenced, because that is exactly what an unvalidated cast needs.
         `FORGOTTEN [${labelSafe(safeScalar(id))}] complete=${labelSafe(safeScalar(r.complete))} ` +
-          `sharesPurged=${labelSafe(safeScalar(r.sharesPurged))} epoch=${labelSafe(safeScalar(r.epoch))}`,
+          `sharesPurged=${labelSafe(safeScalar(r.sharesPurged))} epoch=${labelSafe(safeScalar(r.epoch))}` +
+          // The erasure succeeded; this line says what did NOT. It is rendered because a residual an
+          // operator never sees is the same as no residual at all — and this is the one tool where
+          // the thing left behind is the plaintext they asked to destroy. The sentence is ours, but
+          // it interpolates the cache path, which comes from operator env and is not statically
+          // known here, so it goes through the same fence every other rendered value does.
+          (r.localCacheResidual
+            ? `\n  ! ${safeField(r.localCacheResidual, MAX_ERROR_MESSAGE_CHARS)}`
+            : ''),
       );
     } catch (e) {
       return fail(e);
