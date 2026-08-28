@@ -15,11 +15,11 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
-import { mkdtempSync, existsSync, statSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, statSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
-import { fromHex } from '@saihm/client-pro';
+import { deriveIdentity, toHex, fromHex } from '@saihm/client-pro';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, '../src/server.ts');
@@ -45,8 +45,19 @@ function startMock(
 ): {
   server: Server;
   base: () => string;
+  /** How many memory-endpoint calls the mock actually received. */
+  mcpCalls: () => number;
+  /** The ML-DSA public key hex presented at `/api/onboard`, or `''` if it was never reached. */
+  onboardPubkey: () => string;
 } {
   let lastNonce = '';
+  let mcpCalls = 0;
+  /**
+   * The public key presented at `/api/onboard`, or `''` if that exchange never happened. This is the
+   * restart test's real observable: it identifies WHICH key booted, where a request COUNT identifies
+   * only that some key did.
+   */
+  let onboardPubkey = '';
   let pending = opts.pendingBeforeGrant ?? 0;
   const server = createServer((req, res) => {
     const url = req.url ?? '';
@@ -116,11 +127,69 @@ function startMock(
         return send(200, { status: 'granted', agentIdHash: sha256Hex(b.pubkey ?? '') });
       });
     }
+    // The PAID-ONBOARD exchange the memory client runs before its first call: it signs the
+    // challenge nonce with the identity it booted, and gets a session JWT back. Inert for the join
+    // tests, and part of the restart test's observable — reaching it at all already proves a key was
+    // loaded, because the signature cannot be produced without one.
+    if (req.method === 'POST' && url === '/api/onboard') {
+      return read((body) => {
+        let b: { pubkey?: string; nonce?: string; signature?: string } = {};
+        try {
+          b = JSON.parse(body) as typeof b;
+        } catch {
+          return send(400, { error: 'bad_json' });
+        }
+        let good = false;
+        try {
+          good =
+            b.nonce === lastNonce &&
+            ml_dsa65.verify(
+              fromHex(b.signature ?? ''),
+              fromHex(b.nonce ?? ''),
+              fromHex(b.pubkey ?? ''),
+            );
+        } catch {
+          good = false;
+        }
+        if (!good) return send(401, { error: 'bad_signature' });
+        // Recorded only AFTER the signature verifies, so the value is one the caller proved it holds
+        // the secret for — not merely one it asserted.
+        onboardPubkey = b.pubkey ?? '';
+        const seg = (o: unknown): string => Buffer.from(JSON.stringify(o)).toString('base64url');
+        return send(201, {
+          jwt: `${seg({ alg: 'EdDSA' })}.${seg({
+            sub: b.pubkey,
+            tier: 'FREE',
+            exp: Math.floor(Date.now() / 1000) + 3600,
+          })}.sig`,
+        });
+      });
+    }
+    // The MEMORY endpoint. Inert for every join test in this file — none of them calls a memory
+    // tool — and load-bearing for the restart test, which needs a booted identity to be able to
+    // complete a round-trip rather than merely to exist.
+    if (req.method === 'POST' && url === '/mcp') {
+      return read((body) => {
+        let m = '';
+        try {
+          m = (JSON.parse(body) as { method?: string }).method ?? '';
+        } catch {
+          /* an unparseable body is the caller's problem, not this mock's */
+        }
+        if (m === 'saihm_recall') {
+          mcpCalls += 1;
+          return send(200, []);
+        }
+        return send(404, { error: 'unknown_method' });
+      });
+    }
     return send(404, { error: 'not_found' });
   });
   return {
     server,
     base: () => `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    mcpCalls: () => mcpCalls,
+    onboardPubkey: () => onboardPubkey,
   };
 }
 
@@ -352,8 +421,38 @@ test('saihm_join ON: a hostile bridge cannot add steps to the human instructions
 
 test('saihm_join ON: the persisted key is reusable on a fresh boot (restart-safe, no env secret)', async () => {
   // A prior join wrote SAIHM_HOME/free-identity.key; a brand-new process with only SAIHM_SELF_JOIN=1
-  // (no env secret) must boot from it. We assert boot success indirectly: tools/list succeeds and the
-  // memory client would load the SAME identity (bootFromEnv fallback), not throw for a missing key.
+  // (no env secret) must boot from it.
+  //
+  // WHAT THIS ASSERTED BEFORE, and why it was nothing. Two assertions: that tools/list contained
+  // `saihm_join`, and that the key file existed — a file THIS TEST had written four lines earlier.
+  // The first holds whether or not the key is ever read, because tool registration does not touch
+  // the identity; the second is a statement about the test's own setup. Its comment conceded the
+  // shape outright ("We assert boot success indirectly"), and indirectly here meant not at all:
+  // replacing the key-file lookup with `if (false)` — deleting the entire restart path this test is
+  // named for — left it green. MEASURED against that mutant: green before, red after this rewrite.
+  //
+  // Reaching the endpoint is NECESSARY and NOT SUFFICIENT, and a cut of this test asserted only the
+  // necessary half. Counting memory-endpoint calls does kill the mutant that DELETES the restart
+  // path — force `bootFromEnv`'s self-join fallback past its key-file lookup and no secret is found,
+  // so the client answers with the join hint and never opens a socket. That much the count settles.
+  //
+  // What a count cannot settle is WHICH key booted. A mutant that still reads a key but resolves a
+  // DIFFERENT one — a mis-parsed or re-derived secret, or the same file under another
+  // `deriveIdentity` domain tag — onboards happily and calls the endpoint exactly once, so every
+  // count-based assertion here passes while the agent is now a different identity that silently
+  // reaches none of the memories it stored under the old one. That is the production failure this
+  // test is named for, and it is invisible to traffic.
+  //
+  // So the observable is IDENTITY CONTINUITY. The mock records the public key presented at
+  // `/api/onboard` once its signature verifies, and that key is compared against the one derived
+  // from the seed this test wrote. Substituting a freshly generated secret for the file's contents
+  // leaves the count at 1 and fails on the key — which is the whole reason this assertion exists
+  // alongside the count rather than instead of it.
+  //
+  // Deliberately not compared against `No memories stored.` either, which a different cut asserted.
+  // That string is the render of an EMPTY recall rather than of a successful boot, so keying on it
+  // couples restart safety to wording `server.ts` is free to change, and reports "restart is broken"
+  // for the wrong cause. A public key is not a rendering choice.
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   const home = mkdtempSync(join(tmpdir(), 'saihm-selfjoin-restart-'));
@@ -369,7 +468,25 @@ test('saihm_join ON: the persisted key is reusable on a fresh boot (restart-safe
   try {
     const tools = await handshake(d);
     assert.ok(tools.includes('saihm_join'), 'restart still exposes saihm_join');
-    assert.ok(existsSync(join(home, 'free-identity.key')), 'seeded key persists');
+    assert.equal(mock.mcpCalls(), 0, 'nothing has called the memory endpoint yet');
+    const r = await callText(d, 10, 'saihm_recall', {});
+    assert.equal(
+      r.isError,
+      false,
+      `a memory tool failed on a restarted server holding a seeded key: ${r.text}`,
+    );
+    assert.equal(
+      mock.mcpCalls(),
+      1,
+      'no identity booted: a memory tool that cannot load a key answers from the client with the ' +
+        `join hint and never reaches the endpoint. Got: ${r.text}`,
+    );
+    assert.equal(
+      mock.onboardPubkey(),
+      toHex(deriveIdentity(fromHex(seeded)).mldsaPubKey),
+      'a key booted, but NOT the seeded one — the persisted identity was discarded and a fresh key ' +
+        'minted, which in production orphans every memory the agent already stored',
+    );
   } finally {
     d.proc.kill();
     await new Promise<void>((r) => mock.server.close(() => r()));

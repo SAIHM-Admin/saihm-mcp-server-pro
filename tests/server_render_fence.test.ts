@@ -11,6 +11,7 @@
  */
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readFileSync, readdirSync } from 'node:fs';
 import {
   MALFORMED,
   MAX_ERROR_MESSAGE_CHARS,
@@ -29,6 +30,57 @@ import {
   failText,
 } from '../src/render_fence.js';
 import { SaihmEndpointError, MAX_ERROR_CODE_CHARS } from '../src/client.js';
+
+const SRC_ROOT = new URL('../src/', import.meta.url);
+
+/**
+ * Every `.ts` under `src/`, recursively, relative to `src/`.
+ *
+ * ONE walker for both sweeps in this file, rather than a copy each. They make claims of the same
+ * form — EVERY budget, EVERY call site — and a copy is how two sweeps come to disagree about what
+ * `src/` contains while both read as exhaustive. Each pins non-vacuity in its own terms below, so a
+ * walker that returned nothing fails loudly twice rather than passing quietly twice.
+ */
+const walkSrc = (dir: URL = SRC_ROOT, prefix = ''): string[] =>
+  readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : 1))
+    .flatMap((d) =>
+      d.isDirectory()
+        ? walkSrc(new URL(`${d.name}/`, dir), `${prefix}${d.name}/`)
+        : d.name.endsWith('.ts')
+          ? [`${prefix}${d.name}`]
+          : [],
+    );
+
+/**
+ * A swept token must not sit after a `//` on the same line, in any file a sweep in this file reads.
+ *
+ * The strippers below treat `//` as a comment start even inside a STRING LITERAL, and `src/client.ts`
+ * carries several of those — a scheme prefix in a URL, and both halves of the endpoint-scheme error.
+ * Blanking one takes the rest of its line with it, so a swept token placed after it would vanish in
+ * silence: the sweep would report a clean result over source it never saw, which is the failure these
+ * sweeps exist to refuse rather than to commit.
+ *
+ * A real lexer is the expensive fix and is not the one needed. What is needed is that the excluded
+ * set be EMPTY and be MEASURED empty rather than disclosed — `client_free_onboard.test.ts` sets that
+ * standard for a sweep of this shape in as many words, and a limit nobody measured is a blank cheque.
+ * So this checks the hazard ARRANGEMENT itself. It cannot tell a comment from a string and does not
+ * try; it fails closed on the arrangement, which makes the answer "move the call to its own line"
+ * rather than an argument about which slash was which.
+ */
+const assertStripperCanSee = (file: string, raw: string, token: RegExp): void => {
+  raw.split('\n').forEach((line, i) => {
+    const tok = line.search(token);
+    const slashes = line.indexOf('//');
+    assert.ok(
+      tok < 0 || slashes < 0 || slashes > tok,
+      `${file}:${i + 1} places a swept token after a \`//\` on one line. If that \`//\` is inside a ` +
+        'string literal the comment stripper blanks the token along with it, and the sweep reports a ' +
+        'clean result over source it never read. Put the call on its own line, or replace the ' +
+        'stripper with something that lexes string literals',
+    );
+  });
+};
 
 /** A line in authenticated-memory shape: `  [<id>] seq=<n> | <plaintext>`. */
 const MEMORY_LINE = /^ {2}\[[^\]\n]*\] seq=/;
@@ -270,6 +322,174 @@ test('the JOIN and STRUCTURED budgets are PINNED, not merely self-consistent', (
   assert.equal(MAX_STRUCTURED_SCALAR_CHARS, 256);
 });
 
+test('EVERY declared budget is pinned — the enumeration is derived, not remembered', async () => {
+  // Written because the hand-kept version of this list failed the way hand-kept lists do.
+  // `MAX_CHECKOUT_URL_CHARS` was added in the same review round that wrote three separate pin tests,
+  // and no pin was written for it: the constant shipped, its siblings stayed green, and a 2048 ->
+  // 65536 widening had nothing to catch it. Adding a member to a set without extending the
+  // enumeration that exists to catch exactly that is the failure this file has now recorded three
+  // times, so this test stops asserting the property and MECHANISES it instead.
+  //
+  // The key set is read off the MODULES, not typed out here. A new numeric export therefore turns
+  // this test red on the commit that introduces it — the author has to state the value on purpose,
+  // which is the whole point of a pin — and a deleted or renamed one turns it red too.
+  //
+  // BOTH modules, and that is a correction to this test's own first cut. It derived over
+  // `render_fence.ts` alone while being named "EVERY render budget", which was the same
+  // false-universal move it was written to prevent, one file over: four more budgets live in
+  // `client.ts` (the error-code cap and the three announcement-channel caps), so the mechanisation
+  // covered six of ten while its name claimed all of them. They were each hand-pinned elsewhere, so
+  // nothing was uncovered — but a FIFTH client budget would have gone unpinned in silence, which is
+  // precisely the hole this test exists to close.
+  //
+  // Keyed by module rather than flattened, so a budget that MOVES between the two is caught as well
+  // as one that appears or vanishes. The per-name assertions above are kept rather than folded in:
+  // they carry the reasoning for their particular values, and this test deliberately carries none,
+  // so that it never becomes the place a value gets justified.
+  const PINNED: Record<string, Record<string, number>> = {
+    'render_fence.ts': {
+      MAX_SCALAR_CHARS: 64,
+      ABBREV_CHARS: 16,
+      MAX_JOIN_FIELD_CHARS: 256,
+      MAX_CHECKOUT_URL_CHARS: 2048,
+      MAX_STRUCTURED_SCALAR_CHARS: 256,
+      MAX_ERROR_MESSAGE_CHARS: 256,
+    },
+    'client.ts': {
+      MAX_ERROR_CODE_CHARS: 64,
+      MAX_SHARED_ANNOUNCEMENTS: 256,
+      MAX_ANNOUNCEMENT_FIELD_CHARS: 64,
+      MAX_ANNOUNCEMENT_TOTAL_CHARS: 32 * 1024,
+    },
+    // The package's PUBLIC surface: a barrel of re-exports. It declares no budget of its own, and
+    // `{}` says so deliberately rather than by omission — omission is what left it outside this
+    // sweep in the first place. If the barrel ever re-exports one, this turns red and the author
+    // states it here, which is correct: a budget on the public surface is the one consumers see.
+    'index.ts': {},
+    // Budgets, but not exports: `server.ts` exports nothing at all and calls `main()` at module
+    // scope, so importing it to read them off would start a server. They are derived from its SOURCE
+    // instead, below. Listed here so every module is pinned in one place.
+    'server.ts': {
+      MAX_NUMERIC_CHARS: 32,
+      RENDER_LIMIT: 16,
+    },
+  };
+  // The module set is DERIVED from `src/`, not listed here, and that is this test's THIRD correction
+  // on the same axis rather than a new idea. The first cut swept `render_fence.ts` alone while being
+  // named EVERY budget. The second added `client.ts` and stopped — a hand-kept map of two names, in
+  // the test whose opening paragraph indicts hand-kept lists. `src/index.ts` sat outside it: the
+  // package's PUBLIC surface, so a budget re-exported through the barrel — or declared by any module
+  // added to `src/` later — was unpinned with nothing going red, while the paragraph above promised
+  // that a new numeric export turns this red on the commit that introduces it. It cost nothing
+  // (measured: `index.ts` exports no number today) and would have kept costing nothing until the
+  // commit that added one. The sibling sweep in this file already walked `src/` for exactly this
+  // reason; the two now share ONE walker, so they cannot disagree about what `src/` holds.
+  //
+  // `server.ts` is the single exclusion, and not by convention: it cannot be imported at all, because
+  // `main()` runs at module scope. It is read from SOURCE below. Every other module is imported by
+  // its `.js` specifier, the same form the static imports at the top of this file use.
+  const modFiles = walkSrc().filter((f) => f !== 'server.ts');
+  assert.ok(modFiles.length > 0, 'the module walk found nothing under `src/` — it is broken, not the tree');
+  assert.deepEqual(
+    Object.keys(PINNED).sort(),
+    [...modFiles, 'server.ts'].sort(),
+    'a module under `src/` has no entry in PINNED, or PINNED names a module that no longer exists. ' +
+      'Declare it — `{}` if it holds no budget — rather than leaving it outside this sweep',
+  );
+  const MODULES: Record<string, Record<string, unknown>> = {};
+  for (const f of modFiles) {
+    MODULES[f] = (await import(new URL(f.replace(/\.ts$/, '.js'), SRC_ROOT).href)) as Record<
+      string,
+      unknown
+    >;
+  }
+  for (const [name, mod] of Object.entries(MODULES)) {
+    // EVERY numeric export, with no name filter. An earlier cut kept only `MAX_*` and `ABBREV_*`,
+    // which reintroduced in the predicate the very hole the test exists to close: a budget named
+    // outside the convention would have been skipped in silence, while the paragraph above promised
+    // that any new one turns this red. Measured across both modules, every numeric export IS a
+    // budget and none is anything else, so the filter bought no precision and cost exhaustiveness.
+    // If a non-budget number is ever exported here, the right answer is to pin it too rather than to
+    // teach this sweep to look away.
+    const live = Object.entries(mod)
+      .filter(([, v]) => typeof v === 'number')
+      .map(([k]) => k)
+      .sort();
+    assert.deepEqual(
+      live,
+      Object.keys(PINNED[name]).sort(),
+      `${name}: a budget was added, removed or moved without pinning its value here — add it to ` +
+        'PINNED, with the value stated as a literal, in the same commit that introduces the constant',
+    );
+    for (const [k, want] of Object.entries(PINNED[name])) {
+      assert.equal(mod[k], want, `${name}: ${k} was widened or narrowed`);
+    }
+  }
+
+  // `server.ts` is the module that APPLIES these fences, and it declares two budgets of its own that
+  // sat outside this enumeration while its name claimed EVERY declared budget. That is the same shape
+  // the test was written to stop — a hand-kept list missing the member added next to it — one file
+  // over from where it was first caught. Both were pinned behaviourally elsewhere, so nothing was
+  // uncovered; a THIRD one would not have been.
+  //
+  // Read from SOURCE because it cannot be imported: it exports nothing, and `main()` runs at module
+  // scope. `const NAME = <number>;` at ANY indent, with NO name filter — `RENDER_LIMIT` lives inside
+  // a handler, and a convention filter is the predicate-shaped hole the block above already records.
+  const serverSrc = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf-8')
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+  // `export const` as well as `const`. A cut of this line read `\n *const` alone, so an exported
+  // budget was invisible to it — and nothing in the tree would have shown that, because `server.ts`
+  // has no exports for it to miss. That is an OBSERVATION about the file, not the reason it is read
+  // as SOURCE: the reason is `main()` at module scope, which would still make importing it start a
+  // server even if every budget here were exported. The hole cost nothing, and would have kept
+  // costing nothing right up until the commit that added one. It is
+  // the predicate-shaped hole the name-filter note above records, on a different axis: the predicate
+  // encoded a CONVENTION the file happens to follow rather than the SHAPE it means to catch.
+  // `let` is deliberately NOT admitted — it would sweep in mutable counters, which are not budgets.
+  const BUDGET =
+    /\n[ \t]*(?:export )?const ([A-Za-z_$][\w$]*)\s*(?::\s*number\s*)?=\s*([0-9][0-9_]*(?:\s*\*\s*[0-9][0-9_]*)*)\s*;/g;
+  const budgetsIn = (t: string): { name: string; value: number }[] =>
+    [...t.matchAll(BUDGET)].map((m) => ({
+      name: m[1] as string,
+      value: (m[2] as string).split('*').reduce((a, b) => a * Number(b.trim().replace(/_/g, '')), 1),
+    }));
+  // The instrument is proved able to FIND one before it is trusted to report NONE, and proved through
+  // the SAME function the sweep uses rather than a second copy of it — a probe that reimplements what
+  // it is checking pins the copy. `found.length > 0` below proves only that it found the constants
+  // already there, and both of those are plain `const NAME = <int>;`, so every other shape this
+  // pattern claims to admit is unexercised by the file itself. A probe of ONE shape would repeat the
+  // mistake one size down, so this is a table: the export keyword, an explicit `: number`, an indent,
+  // a product and a numeric separator each have to survive, values included. The indent row is a TAB
+  // rather than a second run of spaces, because the comment above says ANY indent and a pattern
+  // written `\\n *` says spaces — the file has none today, which is what made the gap free to keep.
+  // A broken instrument returning an authoritative-looking result is the failure this is for.
+  assert.deepEqual(
+    budgetsIn('\nexport const __A = 7;\nconst __B: number = 8;\n\tconst __C = 32 * 1_024;\n'),
+    [
+      { name: '__A', value: 7 },
+      { name: '__B', value: 8 },
+      { name: '__C', value: 32768 },
+    ],
+    'the `server.ts` budget matcher is blind to a declaration shape it claims to admit, so a budget ' +
+      'written that way would go unpinned in silence',
+  );
+  const found = budgetsIn(serverSrc);
+  assert.ok(found.length > 0, 'the `server.ts` budget matcher found nothing — it is broken, not the file');
+  assert.deepEqual(
+    found.map((f) => f.name).sort(),
+    Object.keys(PINNED['server.ts'] as Record<string, number>).sort(),
+    'server.ts: a numeric constant was added, removed or renamed without pinning its value here — ' +
+      'add it to PINNED, with the value stated as a literal, in the same commit that introduces it',
+  );
+  for (const f of found) {
+    assert.equal(
+      f.value,
+      (PINNED['server.ts'] as Record<string, number>)[f.name],
+      `server.ts: ${f.name} was widened or narrowed`,
+    );
+  }
+});
 test('the error budgets are PINNED, not merely self-consistent', () => {
   // Both assertions that bound these values compute their ceiling FROM the constants, so widening one
   // keeps the suite green — a mutation pass took MAX_ERROR_MESSAGE_CHARS from 256 to 900 and
@@ -458,4 +678,248 @@ test('shortScalar abbreviates INSIDE the fence — `keep` can never widen it', (
   );
   // And a `keep` inside the fence still abbreviates normally — the clamp must not become the fence.
   assert.equal(shortScalar('b'.repeat(50), 10), 'b'.repeat(10) + '…');
+});
+
+test('EVERY `safeScalar` call site takes the DEFAULT budget — the sweep itself, not a sentence about it', () => {
+  // `MAX_SCALAR_CHARS` is the default parameter of `safeScalar`, so it governs every call site that
+  // does not pass a budget of its own. That is a claim about ALL call sites, and it was carried in
+  // prose by a command that could not reach them all: the doc block named
+  // `grep -n 'safeScalar(' src/server.ts`, while the function is also called from `render_fence.ts`
+  // itself. The conclusion was true and the control was narrower than the conclusion — the third
+  // instance of that shape in this module's history, after the budget enumeration below was scoped
+  // by name prefix and `noUnusedLocals` was adopted for `src` only.
+  //
+  // So the sweep runs here instead of being described anywhere. It reads the shipped sources, finds
+  // every call, and fails if any one of them passes a second argument. A site that legitimately
+  // needs a different budget is not forbidden by this — it is required to come here and say so,
+  // which is the whole difference between a documented exception and an undocumented one.
+  // Walks SUBDIRECTORIES, not just the top level. A cut of this called `readdirSync` flat, so a call
+  // site in a new `src/` subdirectory would have sat outside "EVERY call site" with nothing going
+  // red — vacuous while `src/` stayed flat, and silently narrower the first moment it did not. That
+  // is the same shape as the grep this test replaced, one directory level up.
+  const files = walkSrc();
+  for (const f of files) {
+    assertStripperCanSee(f, readFileSync(new URL(f, SRC_ROOT), 'utf-8'), /safeScalar\(/);
+  }
+
+  // Comments are stripped before matching, because this module's own doc blocks quote the call
+  // shape while discussing it — including the retracted sentence this test replaces. A matcher that
+  // counted those would report sites that do not exist.
+  // Newlines inside a stripped comment are PRESERVED, so the line numbers this test reports are the
+  // ones the file actually has. A first cut collapsed each block comment to a single space and then
+  // reported a site 77 lines above itself — a repair that reintroduced, in its own failure message,
+  // the by-line citation problem the surrounding rules exist to prevent.
+  const stripComments = (t: string): string =>
+    t
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+
+  // Walks the argument list with a paren counter so a nested call — `safeScalar(coerce(v))` — is not
+  // mistaken for a second argument. Quotes and template literals are tracked only well enough to
+  // keep a comma inside a string from counting; no site here puts one there, and if one ever does
+  // the failure is a visible false positive rather than a silent miss.
+  const passesExplicitBudget = (t: string, from: number): boolean => {
+    let depth = 0;
+    let quote = '';
+    for (let i = from; i < t.length; i++) {
+      const c = t[i];
+      if (quote) {
+        if (c === '\\') i++;
+        else if (c === quote) quote = '';
+        continue;
+      }
+      if (c === "'" || c === '"' || c === '`') quote = c;
+      else if (c === '(') depth++;
+      else if (c === ')') {
+        if (--depth === 0) return false;
+      } else if (c === ',' && depth === 1) return true;
+    }
+    throw new Error('unbalanced parentheses while scanning a `safeScalar` call');
+  };
+
+  const sites: string[] = [];
+  const withBudget: string[] = [];
+  for (const f of files) {
+    const text = stripComments(readFileSync(new URL(f, SRC_ROOT), 'utf-8'));
+    for (const m of text.matchAll(/safeScalar\(/g)) {
+      const line = text.slice(0, m.index).split('\n').length;
+      const at = `${f}:${line}`;
+      sites.push(at);
+      if (passesExplicitBudget(text, m.index + 'safeScalar'.length)) withBudget.push(at);
+    }
+  }
+
+  // A sweep that found nothing would pass this test while asserting nothing, which is the failure
+  // mode that makes a clean count untrustworthy. Pin that the matcher actually ran, and pin that it
+  // reached BOTH modules — the exact coverage the prose it replaces did not have.
+  assert.ok(sites.length > 0, 'the sweep matched no call sites at all — the matcher is broken, not the source');
+  const modules = new Set(sites.map((s) => s.split(':')[0]));
+  assert.ok(
+    modules.has('render_fence.ts') && modules.has('server.ts'),
+    `the sweep must reach every module that calls safeScalar; it saw ${[...modules].sort().join(', ')}`,
+  );
+
+  assert.deepEqual(
+    withBudget,
+    [],
+    'a `safeScalar` call site passes an explicit budget, so MAX_SCALAR_CHARS no longer governs it. ' +
+      'That is allowed, but it must be stated on the constant rather than discovered here: ' +
+      `${withBudget.join(', ')}`,
+  );
+});
+
+test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fence.ts`, mechanised', () => {
+  // `MAX_STRUCTURED_SCALAR_CHARS` carries a map of which structured fields it bounds, which are
+  // bounded by a different guard, which the client bounds, and which are unbounded by design. That is
+  // a claim about every field on every tool, and that one doc block has now shipped five wrong
+  // statements — four measured figures presented as maxima, then a universal ("Each endpoint-chosen
+  // value entering `structuredContent` is capped here") that was false for three of its four
+  // families. A sixth rewrite carried by nothing but prose would be the pattern, not the exit from
+  // it, so the map is DERIVED here instead of trusted there.
+  //
+  // A structured key that appears, moves between tools, or vanishes turns this red on the commit that
+  // does it, and its author has to come here and say which family it belongs to. The bucket strings
+  // are documentation: what is asserted is that every key is ACCOUNTED FOR, not that the sentence
+  // beside it is true. Where a bound is behavioural it is pinned by a behavioural test elsewhere —
+  // `boundedOrMarker` by the hostile suite, the numeric guards by their boundary fixtures, the
+  // client's announcement caps by the announce suite.
+  //
+  // STATED LIMIT: this reads TOP-LEVEL keys. `memories` and `shared` are arrays, and their element
+  // shapes are pinned elsewhere rather than here. Written down because the last cut of the block this
+  // defends failed by claiming a reach it did not have — and then MEASURED, because a limit whose
+  // excluded set nobody measured is a blank cheque rather than a bound. A fourth key added to a
+  // `memories` element turns `server_recall_shared.test.ts` red on its full-shape deep-equal over a
+  // NON-EMPTY element, and the matching key on `shared` turns `server_shared_announce.test.ts` red
+  // the same way. A cut of this sentence named `server_render_hostile.test.ts` as one of the two.
+  // That suite DOES go red on the probe, but for a different reason — a declared key is required, so
+  // a branch that does not emit it fails output validation — and a reason that fires by accident is
+  // not a pin. Naming it here would have sent the next reader to a file that checks something else.
+  const DECLARED: Record<string, Record<string, string>> = {
+    saihm_remember: {
+      cellId: 'caller-supplied or client-generated',
+      seq: "this client's monotonic counter",
+      shardId: 'CAPPED HERE (boundedOrMarker)',
+      commitmentHash: 'read off the envelope this process sealed',
+    },
+    saihm_recall: {
+      count: 'client-computed from the opened cells',
+      memories: 'UNBOUNDED BY DESIGN: the payload, plus caller-supplied labels',
+      shared: 'BOUNDED IN THE CLIENT: per field, running total, and row count',
+      sharedTruncated: 'client-computed',
+    },
+    saihm_status: {
+      agentIdHash: "this client's own — never the endpoint's `agentIdHashHex`",
+      tier: 'CAPPED HERE (boundedOrMarker)',
+      custody: 'CAPPED HERE (boundedOrMarker)',
+      activeShardCount: 'NUMERIC GUARD (countOrNull refuses on LENGTH)',
+      activeSharingContracts: 'NUMERIC GUARD (countOrNull refuses on LENGTH)',
+      bfsi: 'NUMERIC GUARD (numOrNull refuses on LENGTH)',
+      snapshotEpoch: 'CAPPED HERE (boundedOrMarker)',
+    },
+  };
+
+  // Every tool the server registers, so this sweep cannot go blind on a whole tool the way the prose
+  // it replaces went blind on three whole families. `saihm_join` is the ninth and is NOT a protocol
+  // tool — it is the self-join bootstrap affordance — but it is pinned here all the same, because
+  // what this list guards is that the sweep saw everything, not what the protocol surface is.
+  const TOOLS = [
+    'saihm_remember',
+    'saihm_recall',
+    'saihm_forget',
+    'saihm_status',
+    'saihm_share',
+    'saihm_revoke_share',
+    'saihm_governance_propose',
+    'saihm_governance_vote',
+    'saihm_join',
+  ];
+
+  const src = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf-8');
+  // Both tokens this sweep matches on, not just the one that looks fragile: a `registerTool` the
+  // stripper cannot see loses a whole TOOL, which is strictly worse than losing one field.
+  assertStripperCanSee('server.ts', src, /(?<![.\w$])ok\(/);
+  assertStripperCanSee('server.ts', src, /server\.registerTool\(/);
+  // Newline structure preserved, for the reason the sibling sweep in this file gives.
+  const stripped = src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+
+  const tools = [...stripped.matchAll(/server\.registerTool\(\s*'([a-z_]+)'/g)].map((m) => ({
+    name: m[1] as string,
+    at: m.index,
+  }));
+  assert.deepEqual(
+    tools.map((t) => t.name),
+    TOOLS,
+    'a tool was added, removed or renamed — this sweep attributes every structured field to a tool, ' +
+      'so it must know the whole list before it can claim to have covered it',
+  );
+
+  // Splits a bracketed list on TOP-LEVEL commas — used for the `ok(...)` argument list and for the
+  // object literal inside it alike, so a comma in a nested call, array, object or string cannot end
+  // an item early.
+  const splitTop = (t: string, open: number): string[] => {
+    const out: string[] = [];
+    let depth = 0;
+    let quote = '';
+    let start = open + 1;
+    for (let i = open; i < t.length; i++) {
+      const c = t[i];
+      if (quote) {
+        if (c === '\\') i++;
+        else if (c === quote) quote = '';
+        continue;
+      }
+      if (c === "'" || c === '"' || c === '`') quote = c;
+      else if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') {
+        if (depth === 1) {
+          out.push(t.slice(start, i));
+          return out;
+        }
+        depth--;
+      } else if (c === ',' && depth === 1) {
+        out.push(t.slice(start, i));
+        start = i + 1;
+      }
+    }
+    throw new Error('unbalanced brackets while scanning a structured literal');
+  };
+
+  const found = new Map<string, Set<string>>();
+  // `(?<![.\w$])` so a member call can never be mistaken for the `ok` helper.
+  for (const m of stripped.matchAll(/(?<![.\w$])ok\(/g)) {
+    // A trailing comma before the closing paren yields an empty final item, which is why the filter
+    // runs before the arity check rather than after it — otherwise every text-only receipt would look
+    // like it carried structured output.
+    const args = splitTop(stripped, m.index + 'ok'.length).filter((a) => a.trim());
+    if (args.length < 2) continue;
+    const lit = args[1] as string;
+    const brace = lit.indexOf('{');
+    assert.ok(brace >= 0, `a structured argument is not an object literal: ${lit.trim().slice(0, 60)}`);
+    const owner = [...tools].reverse().find((t) => t.at < m.index);
+    assert.ok(owner, 'a structured `ok(` sits outside every registerTool call');
+    const keys = splitTop(lit, brace)
+      .map((part) => (/^\s*([A-Za-z_$][\w$]*)/.exec(part) ?? [])[1])
+      .filter((k): k is string => Boolean(k));
+    const set = found.get(owner.name) ?? new Set<string>();
+    for (const k of keys) set.add(k);
+    found.set(owner.name, set);
+  }
+
+  assert.ok(found.size > 0, 'the sweep found no structured output at all — the matcher is broken');
+  assert.deepEqual(
+    [...found.keys()].sort(),
+    Object.keys(DECLARED).sort(),
+    'a tool gained or lost structured output entirely',
+  );
+  for (const [tool, keys] of found) {
+    assert.deepEqual(
+      [...keys].sort(),
+      Object.keys(DECLARED[tool] as Record<string, string>).sort(),
+      `${tool}: a structured field was added, removed or renamed. Declare which family it belongs to ` +
+        'here AND in the `MAX_STRUCTURED_SCALAR_CHARS` block in `render_fence.ts` — an ' +
+        'endpoint-chosen field that no budget covers is the defect this sweep exists to catch',
+    );
+  }
 });

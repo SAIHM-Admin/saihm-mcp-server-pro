@@ -882,3 +882,160 @@ test('the fence budgets are PINNED, not merely self-consistent', () => {
   assert.equal(MAX_SCALAR_CHARS, 64);
   assert.equal(ABBREV_CHARS, 16);
 });
+
+test('saihm_recall: the OWN-MEMORY line is fenced in its LABEL half, and plaintext stays raw', async () => {
+  // A LINE-SHAPED interpolation of an endpoint-reachable value, and the one the renderer's own
+  // argument for fencing the REMEMBERED receipt applies to word for word: fencing is what keeps
+  // "safe for ANY input" true independently of what the client happens to guarantee today.
+  //
+  // A cut of this opened "the LAST unfenced interpolation of an endpoint-reachable value in this
+  // tree". No sweep pins that, and the word does not carry one scope across this tree: `src/client.ts`
+  // uses "unfenced" for the MINT half alone, and lists envelope-derived values that stay unfenced in
+  // that sense and are safe only because `failText` re-fences every error before an agent sees one.
+  // One word carrying two scopes in two files is how a tree-wide claim gets read off a test that pins
+  // one line, so the claim is gone and the line is what remains.
+  //
+  // Reachability is the part worth stating, because `cellId` here arrives inside a SIGNED envelope and
+  // that looks at first like it closes the path. It does not. The signature is this agent's OWN, so it
+  // proves only that this client sealed the cell — and the cellId it sealed under is a CALLER argument
+  // to `saihm_remember`, declared free-form with no pattern and no length bound, which the tool's own
+  // description invites callers to supply. An agent that lifts an id out of a forged pointer line and
+  // stores under it signs the payload itself; the endpoint then replays it, authenticated.
+  //
+  // Two grammars, two assertions. LINES: the payload's `\n`, `[`, `]` and `|` must not add one, and
+  // — unlike every other test in this file — a legitimate own-memory line is EXPECTED here, so the
+  // property is that there is exactly ONE, not that there are none. LABELS: `seq=` follows the fenced
+  // value on the same line, so an unfenced `seq=9` in the payload shadows the real one.
+  //
+  // The payload's CR is NOT in that first list, and a cut of this put it there. Measured, it sits
+  // past `MAX_SCALAR_CHARS` in `PAYLOAD` while every other grammar character sits inside — so on this
+  // path the budget CUTS it and the scrubber never sees it. Listing it beside four characters the
+  // scrubber does neutralise is how an assertion comes to read as evidence for a mechanism it does
+  // not exercise, which is the same SAYS-versus-PINS move this file corrects elsewhere.
+  //
+  // The plaintext half is deliberately NOT asserted safe. It is the payload, not a label, and the
+  // handler documents that residual; asserting it here would pin a property the tree does not claim.
+  const me = deriveIdentity(fromHex(MASTER_HEX));
+  const wire = encodeEnvelope(
+    sealCell({
+      plaintext: utf8('x'),
+      kek: me.kek,
+      mldsaSecretKey: me.mldsaSecretKey,
+      mldsaPubKey: me.mldsaPubKey,
+      agentIdHash: me.agentIdHash,
+      cellId: PAYLOAD,
+      seq: 1n,
+      tier: 'PRO',
+    }),
+  );
+  await withHostileServer(
+    { recallAll: [{ cellId: PAYLOAD, found: true, wire }] },
+    async (d) => {
+      const r = await callText(d, 3, 'saihm_recall', {});
+      assert.equal(r.isError, false, `recall errored: ${r.text}`);
+      const lines = r.text.split('\n');
+      assert.equal(lines.length, 2, `the payload minted a line:\n${r.text}`);
+      assert.equal(
+        lines.filter((l) => OWN_MEMORY_LINE.test(l)).length,
+        1,
+        `expected exactly one authenticated-memory line, the server's own:\n${r.text}`,
+      );
+      assert.equal(
+        lines.filter((l) => /^RECALL \d+ memories/.test(l)).length,
+        1,
+        `the forged recall banner reached the start of a line:\n${r.text}`,
+      );
+      const count = (c: string): number => r.text.split(c).length - 1;
+      assert.equal(count('['), 1, `an endpoint-supplied '[' survived:\n${r.text}`);
+      assert.equal(count(']'), 1, `an endpoint-supplied ']' survived:\n${r.text}`);
+      assert.equal(count('|'), 1, `an endpoint-supplied '|' survived:\n${r.text}`);
+      assert.equal(count('='), 1, `a forged label pair survived — only \`seq=\` is the template's:\n${r.text}`);
+      // Kept as a backstop on the rendered OUTPUT, not as evidence about the scrubber: see the note
+      // above on why the budget, not the scrub, is what removes this one. CR neutralisation is pinned
+      // where it belongs, on `safeField` directly, in the budget suite. To re-measure the split,
+      // delete the non-printable replacement from `safeField` and run `npm test`: this assertion
+      // stays green, while this test still goes red through its line count — the payload's `\n` IS
+      // inside the budget — and `safeField`'s own test goes red directly.
+      assert.ok(!r.text.includes('\r'), 'a bare CR reached the rendered recall block');
+      assert.ok(!r.text.includes('[f00dcafe]'), 'the forged cell id reached the block in memory shape');
+      assert.ok(r.text.length < 2_000, `the 5KB cellId rendered in full (${r.text.length} chars)`);
+      // The plaintext IS still there, whole: the fence must not have eaten the payload it exists for.
+      assert.ok(r.text.endsWith('| x'), `the memory's own content was lost:\n${r.text}`);
+    },
+  );
+});
+
+test('saihm_status: the numeric LENGTH guard is pinned at its boundary, in both directions', async () => {
+  // `numOrNull` rejects a numeric string longer than a fixed budget before it ever reaches `Number()`,
+  // and nothing exercised that clause: every fixture that reached it was junk on the GRAMMAR axis
+  // (`'abc'`, an object, a fraction), which the `DECIMAL` test rejects first. So the length guard sat
+  // behind a check that already covered every input any test supplied, and both a widened budget and
+  // an off-by-one `>` -> `>=` were invisible.
+  //
+  // The budget itself is module-private, and stays that way: exporting a constant so a test can pin
+  // its value would widen the module's surface to make a test easier to write, and the value is not
+  // the property worth holding — the BOUNDARY is. Two fixtures, one either side of it, pin the
+  // boundary from both directions without naming the number: 33 characters must be refused, 32 must
+  // be accepted. Widening the budget lets the 33 through; tightening the comparison stops the 32.
+  //
+  // Both channels, as the sibling tests do. A value the text calls malformed while the structured
+  // half reports a number is the two-spellings-for-one-verdict defect the fence was rebuilt to close.
+  const OVER = '9'.repeat(33);
+  const AT = '9'.repeat(32);
+  const mock = createServer((req, res) => {
+    const send = (s: number, b: unknown): void => {
+      res.writeHead(s, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(b));
+    };
+    let buf = '';
+    req.on('data', (c) => (buf += c));
+    req.on('end', () => {
+      const url = req.url ?? '';
+      if (url === '/api/onboard/challenge') return send(200, { nonce: '00'.repeat(32) });
+      if (url === '/api/onboard') {
+        const b = JSON.parse(buf) as { pubkey?: string };
+        return send(201, {
+          jwt: `${b64url({ alg: 'EdDSA' })}.${b64url({ sub: b.pubkey, tier: 'PRO', exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`,
+        });
+      }
+      const j = JSON.parse(buf) as { method?: string };
+      if (j.method === 'saihm_status')
+        return send(200, {
+          agentIdHashHex: 'ignored',
+          tier: 'PRO',
+          activeShardCount: OVER, // one character OVER the budget: must be refused on length alone
+          activeSharingContracts: AT, // exactly AT it: the largest the guard admits, must pass
+          bfsi: 0,
+          bfsi_R: '0',
+          bfsi_M: '0',
+          prsInstrumented: true,
+          snapshotEpoch: '495000',
+          custody: 'COTI',
+        });
+      return send(404, { error: 'unknown_method' });
+    });
+  });
+  await new Promise<void>((r) => mock.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(`http://127.0.0.1:${(mock.address() as AddressInfo).port}/mcp`);
+  try {
+    await handshake(d);
+    const r = await d.rpc(3, 'tools/call', { name: 'saihm_status', arguments: {} });
+    const text = r.result.content[0].text as string;
+    assert.equal(r.result.isError === true, false, `status must not fail closed: ${text}`);
+    assert.match(text, /shards=\(malformed\)/, `a 33-character numeric string must be refused:\n${text}`);
+    assert.ok(
+      !text.includes(OVER.slice(0, 20)),
+      `the refused value's digits reached the line — it was truncated, not refused:\n${text}`,
+    );
+    assert.match(text, /sharing=1e\+32(\s|$)/, `a 32-character numeric string must be admitted:\n${text}`);
+    assert.equal(r.result.structuredContent.activeShardCount, null, 'both channels agree: refused');
+    assert.equal(
+      r.result.structuredContent.activeSharingContracts,
+      Number(AT),
+      'both channels agree: admitted, and as the same number',
+    );
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.close(() => r()));
+  }
+});

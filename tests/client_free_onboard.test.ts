@@ -24,7 +24,9 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { fromHex } from '@saihm/client-pro';
-import { SaihmProClient, SaihmEndpointError } from '../src/client.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { SaihmProClient, SaihmEndpointError, MAX_ERROR_CODE_CHARS } from '../src/client.js';
 
 const masterOf = (n: number): Uint8Array => new Uint8Array(32).fill(n & 0xff);
 const sha256Hex = (hex: string): string =>
@@ -65,6 +67,16 @@ interface FreeMockOpts {
   advertisedInterval?: number;
   /** `expiresIn` the bridge advertises on /start, before the client's [60s,1800s] clamp. */
   advertisedExpiresIn?: unknown;
+  /**
+   * /claim answers HTTP 200 with a TERMINAL verdict whose `status` and `error` are each this many
+   * chars — the endpoint spending the body cap on two fields the client turns into an error.
+   */
+  hostileClaimChars?: number;
+  /**
+   * /start answers 4xx with a reason phrase AND a body `error` of this many chars — the same axis
+   * one layer up, where the reason phrase rides the status line rather than the body.
+   */
+  hostileStartChars?: number;
 }
 
 const BOGUS_AGENT_ID = 'de'.repeat(32);
@@ -102,8 +114,13 @@ async function withFreeMock(
 
   const server: Server = createServer((req, res) => {
     const url = (req.url ?? '').split('?')[0];
-    const send = (status: number, body: unknown): void => {
-      res.writeHead(status, { 'content-type': 'application/json' });
+    const send = (status: number, body: unknown, statusText?: string): void => {
+      // A reason phrase is only ever passed by the hostile arms; Node derives the standard one
+      // otherwise. The branch is for READERS, not for Node: measured, `writeHead(s, undefined, h)`
+      // and `writeHead(s, h)` produce the same status line, so a cut of this comment claiming they
+      // differ was asserting a distinction that is not there.
+      if (statusText === undefined) res.writeHead(status, { 'content-type': 'application/json' });
+      else res.writeHead(status, statusText, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
     const readBody = (cb: (o: Record<string, unknown>) => void): void => {
@@ -144,6 +161,10 @@ async function withFreeMock(
       return readBody((b) => {
         starts += 1;
         startBodies.push(b);
+        if (opts.hostileStartChars) {
+          const n = opts.hostileStartChars;
+          return send(400, { error: 'E'.repeat(n) }, 'S'.repeat(n));
+        }
         const full: Record<string, unknown> = {
           flowId: 'flow-' + starts,
           userCode: 'WDJB-MJHT',
@@ -164,6 +185,10 @@ async function withFreeMock(
         // carrying the wrong flowId cannot resolve a pending authorization -> flow_not_found (404).
         if (issuedFlowId && b.flowId !== issuedFlowId) {
           return send(404, { error: 'flow_not_found' });
+        }
+        if (opts.hostileClaimChars) {
+          const n = opts.hostileClaimChars;
+          return send(200, { status: 'D'.repeat(n), error: 'E'.repeat(n) });
         }
         if (opts.claimHttpError) {
           // A NON-401 terminal error (e.g. 404 flow-not-found) — the client must surface it, not re-mint.
@@ -772,4 +797,401 @@ describe('FF10: the bridge-advertised expiry is CLAMPED to [60s, 1800s] before i
       );
     });
   }
+});
+
+describe('FF18: no endpoint-chosen value reaches a message the JOIN STATE will retain', () => {
+  // `client.ts` states that the message half of a `SaihmEndpointError` is unbounded-at-mint and
+  // bounded-at-render, and gives as the reason that "nothing retains a message across calls the way
+  // `joinState` retains a code". The retention half of that sentence is not true: the server's
+  // `JoinState.error` is typed `unknown` and holds the whole error object — message included — until
+  // the next join replaces it. What makes the conclusion safe is a different fact that the sentence
+  // never names: on THIS path, every endpoint-chosen value is sliced at the mint, so there is no
+  // endpoint-sized message to retain in the first place.
+  //
+  // An unnamed fact is an unpinned one, so it is pinned here rather than described anywhere. Both
+  // endpoint-chosen mints on the join path are driven, because a control narrower than the claim it
+  // certifies is the failure this module keeps repeating — the budget enumeration scoped by name
+  // prefix, `noUnusedLocals` adopted for one directory, the `safeScalar` sweep named for one file.
+  //
+  // Each mint is driven at TWO magnitudes 64x apart. Equal message lengths across the pair is the
+  // property — independence from what the endpoint sent — and it holds without anyone writing down
+  // what the length is, which a measured number in a comment could not do.
+  //
+  // The magnitudes differ per axis because the two endpoint-chosen values travel differently. A body
+  // field is bounded only by `MAX_RESPONSE_BYTES`, so the endpoint can make it enormous. A reason
+  // phrase rides the STATUS LINE, and past a point the HTTP transport stops delivering it whole — a
+  // hostile phrase large enough arrives SHORTER, not longer, which would exercise the transport's
+  // behaviour instead of this client's fence. So the status-line axis is driven with headroom below
+  // that point. No figure is written down for it: the `includes` assertion below fails loudly if the
+  // transport ever starts cutting beneath the fence, which is the drift this would otherwise hide.
+
+  // Bounds the fallback name for a mint whose message has no literal in it at all, so a failure
+  // message can never itself become the unbounded string this suite exists to keep out of one.
+  const ABBREV = 48;
+
+  // `text` is the marker the endpoint puts where the MESSAGE will read from; `code` is the marker it
+  // puts where `.code` will read from. Distinct letters so an assertion cannot pass on the wrong one.
+  const SCENARIOS = [
+    {
+      label: 'a terminal claim verdict off an HTTP 200 (`free-onboard was not granted (`)',
+      opt: (n: number): FreeMockOpts => ({ hostileClaimChars: n }),
+      text: 'D',
+      code: 'E',
+      status: 403,
+      magnitudes: [1_024, 65_536],
+    },
+    {
+      label: 'a non-2xx from the device-flow start (`SAIHM onboard failed: `)',
+      opt: (n: number): FreeMockOpts => ({ hostileStartChars: n }),
+      text: 'S',
+      code: 'E',
+      status: 400,
+      magnitudes: [256, 16_384],
+    },
+  ] as const;
+
+  for (const sc of SCENARIOS) {
+    it(`bounds both halves of ${sc.label}`, async () => {
+      const seen: { message: number; code: number; status: number }[] = [];
+      for (const n of sc.magnitudes) {
+        let err: unknown;
+        await withFreeMock(
+          async (m) => {
+            const c = new SaihmProClient(m.base + '/mcp', undefined, masterOf(31), {
+              tier: 'FREE',
+            });
+            await assert.rejects(
+              () => c.acquireFreeEntitlement({ pollIntervalMs: 5, onPrompt: () => {} }),
+              (e: unknown) => {
+                err = e;
+                return e instanceof SaihmEndpointError;
+              },
+            );
+          },
+          sc.opt(n),
+        );
+        const e = err as SaihmEndpointError;
+        seen.push({ message: e.message.length, code: (e.code ?? '').length, status: e.status });
+
+        // NON-VACUITY, both directions. The hostile value must actually have REACHED the message —
+        // a fence that bounds a value the client never read would pass this test while proving
+        // nothing — and it must have been cut at exactly the named budget, not merely somewhere.
+        assert.ok(
+          e.message.includes(sc.text.repeat(MAX_ERROR_CODE_CHARS)),
+          `the endpoint's ${n}-char value never reached the message, so this fence was not exercised: ${e.message}`,
+        );
+        assert.ok(
+          !e.message.includes(sc.text.repeat(MAX_ERROR_CODE_CHARS + 1)),
+          'an endpoint-chosen value passed the message fence by at least one char',
+        );
+        assert.equal(
+          (e.code ?? '').includes(sc.code.repeat(MAX_ERROR_CODE_CHARS)),
+          true,
+          'the endpoint-chosen code never reached `.code`, so its slice was not exercised either',
+        );
+        assert.ok(
+          !(e.code ?? '').includes(sc.code.repeat(MAX_ERROR_CODE_CHARS + 1)),
+          'an endpoint-chosen value passed the code fence by at least one char',
+        );
+        assert.equal(e.status, sc.status);
+      }
+
+      // THE PROPERTY: a change in what the endpoint sent moves neither half by one character. Read
+      // across EVERY magnitude rather than a pair of indices. A cut of this compared `seen[1]` to
+      // `seen[0]` while the magnitudes were a list, so a third entry would have been driven and
+      // never looked at — the same silent narrowing the sweep below now fails closed against.
+      assert.ok(sc.magnitudes.length >= 2, 'one magnitude proves nothing about independence');
+      assert.equal(seen.length, sc.magnitudes.length, 'a magnitude was driven but not recorded');
+      for (const s of seen) {
+        assert.deepEqual(
+          s,
+          seen[0],
+          `the retained error grew with the endpoint's payload — ${JSON.stringify(seen)}`,
+        );
+
+        // And it is small in terms of the constant that makes it small, rather than in terms of a
+        // number someone measured once. The message is fixed chrome plus a fenced reason plus a
+        // fenced code; two budgets and change cannot reach four.
+        assert.ok(
+          s.message < 4 * MAX_ERROR_CODE_CHARS,
+          `the retained message is not bounded by its own budgets: ${s.message} chars`,
+        );
+      }
+    });
+  }
+
+  it('EVERY join-path mint whose message is not a bare literal is accounted for — the sweep, not a promise', () => {
+    // Driving two mints proves those two are fenced. It does not prove they are the only two, and
+    // that is exactly the gap this module keeps shipping: a true conclusion carried by a control
+    // that cannot reach all of it. So the region is swept. A third interpolating mint added to the
+    // join path turns this red and sends its author here to say why it is safe, which is the whole
+    // difference between a declared exception and an undiscovered one.
+    const src = readFileSync(
+      fileURLToPath(new URL('../src/client.ts', import.meta.url)),
+      'utf-8',
+    );
+
+    // STATED LIMIT, MEASURED EMPTY. The stripper below treats `//` as a comment start even inside a
+    // STRING LITERAL, and this is the file that has them — a scheme prefix in a URL, and both halves
+    // of the endpoint-scheme error. Blanking one takes the rest of its line with it, so a mint placed
+    // after one would vanish and this sweep would report a clean, complete-looking result over source
+    // it never read. That is the exact failure the paragraphs below indict, committed by the
+    // instrument instead of by the code, and a disclosure of it would be the blank cheque this test
+    // already refuses to accept from anyone else. So the ARRANGEMENT is checked rather than lexed:
+    // it cannot tell a comment from a string and does not try, and fails closed either way.
+    src.split('\n').forEach((line, i) => {
+      const tok = line.search(/new SaihmEndpointError\(/);
+      const slashes = line.indexOf('//');
+      assert.ok(
+        tok < 0 || slashes < 0 || slashes > tok,
+        `client.ts:${i + 1} places a mint after a \`//\` on one line. If that \`//\` is inside a ` +
+          'string literal the stripper blanks the mint with it and this sweep goes quiet — put the ' +
+          'mint on its own line, or replace the stripper with something that lexes string literals',
+      );
+    });
+
+    // Comments are stripped first, newline structure preserved, because this region's own doc blocks
+    // quote the mint shape while discussing it. The `[^\n]` replacement is deliberate: a stripper
+    // that collapsed each block to a single space once made a sibling sweep report a call site 77
+    // lines above itself.
+    const stripped = src
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
+
+    // The join path is DERIVED, not delimited. A cut of this sliced the file positionally, from
+    // `acquireFreeEntitlement` to where the authenticated call path begins — and `fetchChallengeNonce`
+    // is declared ABOVE that start while the join path calls it twice, so a third of the path sat
+    // outside the sweep. MEASURED against a mint interpolating an endpoint value: placed inside the
+    // slice it went red; placed in `fetchChallengeNonce`, the identical mint left the suite green.
+    // Same detector, same shape, only the location differed. That is the seventh time this module has
+    // certified a conclusion with a control that could not reach all of it, and the second time inside
+    // this very test — the first was the detector below, this was the input it ran on.
+    //
+    // So the path is walked instead of guessed: start at the entry point, follow every call it makes
+    // transitively, and sweep every body reached. A helper added anywhere in the file is covered the
+    // moment the path calls it, wherever its declaration happens to sit and whatever kind it is.
+    //
+    // A cut of this walk followed `this.<method>(` ONLY, and disclosed that as a stated limit — but
+    // the disclosure was paired with a fact: "every mint in this file is currently a class method, so
+    // nothing is uncovered today". That fact was false, and it is the reason the limit read as empty.
+    // `readBodyCapped` is a module-scope `async function` holding a mint, and `onboardFetch` — in the
+    // closure — calls it. MEASURED: an endpoint-interpolating mint placed inside `readBodyCapped` left
+    // the suite green at 33/33; the identical mint inside `onboardFetch` turned it red naming its own
+    // chrome. Only the location differed. That was the eighth time this module certified a conclusion
+    // with a control that could not reach all of it, and the third consecutive time inside the guard
+    // against that shape. A disclosed limit is not a bounded one: unless the disclosure is MEASURED
+    // to be empty it is a blank cheque, and the measurement is the thing that was missing.
+    //
+    // So the walk follows BOTH shapes: `this.<method>(` and a bare `name(` that resolves to a
+    // declaration in this file. Free functions and class methods are declarations alike here and
+    // share one ordered list.
+    //
+    // A method's body is the span from its own declaration to the NEXT declaration. That needs no
+    // brace matching, so an object return type — `): {` — cannot be mistaken for the body's opening
+    // brace. If the pattern ever MISSES a declaration the two bodies merge, which over-reports rather
+    // than under-reports: a mint from a method that is not on the path shows up below as an undeclared
+    // entry, loudly, instead of a join-path mint disappearing quietly.
+    const DECL = /\n {2}(?:private |public |protected )?(?:static )?(?:async )?([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>)?\s*\(/g;
+    // Module-scope functions, in both shapes this file uses. Sliced by the same next-declaration rule
+    // as methods, so the two kinds go into ONE ordered list rather than two walks that could disagree.
+    const FREE =
+      /\n(?:export )?(?:async )?function ([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>)?\s*\(|\n(?:export )?const ([A-Za-z_$][\w$]*)\s*=\s*(?:async )?\(/g;
+    // `\n  for (` and `\n  if (` satisfy the declaration pattern, which never mattered while only class
+    // members were walked — inside a class those sit at four spaces or deeper. A module-scope function
+    // body sits at two, so once free functions are in the list they land in `decls` as well.
+    //
+    // MEASURED, because the obvious reason to filter them is the wrong one: dropping `for` alone does
+    // NOT lose coverage of the loop it splits, since `for (` reads as a call too and the walk simply
+    // follows it back in. What breaks is RESOLUTION — an unfiltered `if` resolves to many
+    // declarations at once, `bodyOf` refuses to guess between them, and the whole sweep dies with
+    // `\`if\` is declared more than once`. So the filter is here to stop a spurious hard failure,
+    // not to restore reach.
+    const KEYWORD = new Set(['if', 'for', 'while', 'switch', 'catch', 'do', 'else', 'return', 'with']);
+    const allDecls = [
+      ...[...stripped.matchAll(DECL)].map((m) => ({ name: m[1] as string, at: m.index })),
+      ...[...stripped.matchAll(FREE)].map((m) => ({ name: (m[1] ?? m[2]) as string, at: m.index })),
+    ].sort((a, b) => a.at - b.at);
+    const decls = allDecls.filter((d) => !KEYWORD.has(d.name));
+    assert.ok(decls.length > 0, 'no declarations were found — this sweep is blind');
+
+    // THAT CLAIM, RUN RATHER THAN DESCRIBED. A cut of the paragraph above closed by saying "the
+    // control that pins it removes `if` and reads that message" — and no such control existed
+    // anywhere, asserted in the present tense, in the test whose entire subject is a conclusion
+    // outrunning what checks it. It also stated the collision count as a number, which decays in
+    // silence the day someone adds or removes a two-space-indent `if`. Both are replaced by this:
+    // the collision is recomputed here, and no figure is written down.
+    assert.ok(
+      allDecls.filter((d) => d.name === 'if').length > 1,
+      '`if` no longer collides, so KEYWORD is preventing nothing here — either the filter is now ' +
+        'obsolete, or the declaration pattern has stopped matching control flow and the walk has ' +
+        'gone blind in a way this sweep can no longer see',
+    );
+
+    const bodyOf = (name: string): string | undefined => {
+      const hits = decls.filter((d) => d.name === name);
+      // A name that resolves to two declarations resolves to neither. This class file holds several
+      // classes, so a collision is possible in principle; refusing to guess is the only safe answer.
+      assert.ok(hits.length <= 1, `\`${name}\` is declared more than once — this walk cannot resolve it`);
+      const i = hits.length ? decls.indexOf(hits[0]!) : -1;
+      return i < 0 ? undefined : stripped.slice(decls[i]!.at, decls[i + 1]?.at ?? stripped.length);
+    };
+
+    const CALL = /this\.([A-Za-z_$][\w$]*)\s*(?:<[^;=]*?>)?\s*\(/g;
+    // A bare `name(` is followed only when it RESOLVES to a declaration here. The two call shapes are
+    // treated differently on purpose: a `this.` call that does not resolve is a HOLE and is reported,
+    // whereas an unresolved bare name is ordinary — `Buffer.concat(`, `String(` and every import land
+    // in this matcher too — so it is skipped. A bare call that collides with a method name is followed
+    // and over-reports one body, which surfaces as a loud undeclared entry rather than a quiet miss.
+    const FREE_CALL = /(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g;
+    const declared = new Set(decls.map((d) => d.name));
+    const closure = new Map<string, string>();
+    const unresolved: string[] = [];
+    const queue = ['acquireFreeEntitlement'];
+    while (queue.length) {
+      const name = queue.pop() as string;
+      if (closure.has(name)) continue;
+      const body = bodyOf(name);
+      if (body === undefined) {
+        unresolved.push(name);
+        continue;
+      }
+      closure.set(name, body);
+      for (const c of body.matchAll(CALL)) queue.push(c[1] as string);
+      for (const c of body.matchAll(FREE_CALL)) {
+        const n = c[1] as string;
+        if (declared.has(n)) queue.push(n);
+      }
+    }
+
+    // Both halves of the walk are pinned, because a resolver that silently returns nothing would make
+    // every assertion below vacuous. It must have REACHED the callees the path is known to have, and
+    // it must have left NOTHING unresolved — a name it could not find is a hole, not a detail.
+    // `readBodyCapped` is in this list because it is the free function that was missing when the walk
+    // followed methods alone; it is what makes the widening non-vacuous rather than merely present.
+    assert.deepEqual(unresolved, [], `the walk could not resolve a method the join path calls`);
+    for (const required of [
+      'acquireFreeEntitlement',
+      'fetchChallengeNonce',
+      'onboardFetch',
+      'readBodyCapped',
+    ]) {
+      assert.ok(
+        closure.has(required),
+        `the join-path closure never reached \`${required}\`; it saw ${[...closure.keys()].sort().join(', ')}`,
+      );
+    }
+
+    // Reaching a declaration is not the same as reading its body. Bodies are sliced to the NEXT
+    // declaration, so a pattern that treats something inside a function as a declaration truncates it
+    // and the sweep goes quiet over the tail — which is exactly what a control-flow keyword did here
+    // before `KEYWORD` existed. Pin that the one body known to mint below its own first statement
+    // still contains a mint after slicing.
+    assert.match(
+      closure.get('readBodyCapped') as string,
+      /new SaihmEndpointError\(/,
+      'the `readBodyCapped` body was sliced short of the mint it holds — the walk reaches it but does not read it',
+    );
+
+    // Splits a call's arguments on TOP-LEVEL commas only, so a comma inside a nested call, an object
+    // or a string does not end an argument early. A quote scanner runs alongside the paren counter
+    // for the same reason.
+    const argsOf = (t: string, open: number): string[] => {
+      const out: string[] = [];
+      let depth = 0;
+      let quote = '';
+      let start = open + 1;
+      for (let i = open; i < t.length; i++) {
+        const c = t[i];
+        if (quote) {
+          if (c === '\\') i++;
+          else if (c === quote) quote = '';
+          continue;
+        }
+        if (c === "'" || c === '"' || c === '`') quote = c;
+        else if (c === '(' || c === '[' || c === '{') depth++;
+        else if (c === ')' || c === ']' || c === '}') {
+          if (c === ')' && depth === 1) {
+            out.push(t.slice(start, i));
+            return out;
+          }
+          depth--;
+        } else if (c === ',' && depth === 1) {
+          out.push(t.slice(start, i));
+          start = i + 1;
+        }
+      }
+      throw new Error('unbalanced parentheses while scanning a join-path mint');
+    };
+
+    // A message is SAFE only in one shape: a single string literal with nothing evaluated inside it.
+    // Everything else is declared below, whatever syntax it uses.
+    //
+    // A cut of this sweep asked the opposite question — it looked for a message that BEGINS with a
+    // template literal containing `${`. That enumerates dangerous shapes, and an enumeration of
+    // dangerous shapes is only ever as complete as the imagination behind it: a message built by
+    // concatenation, `'prefix ' + value`, walked straight past it and the sweep stayed green. So the
+    // test written to stop a control from being narrower than its conclusion was narrower than its
+    // conclusion, which is the sixth time this module has shipped that shape and the first time it
+    // shipped inside the guard against it.
+    //
+    // Asking for the one SAFE shape instead is complete by construction. Concatenation, a template
+    // in any position, a ternary, a function call, and whatever syntax gets invented next all fail
+    // closed, because none of them is a bare literal.
+    const BARE_LITERAL = [
+      /^'(?:[^'\\]|\\.)*'$/, // 'plain'
+      /^"(?:[^"\\]|\\.)*"$/, // "plain"
+      /^`(?:[^`\\$]|\\.|\$(?!\{))*`$/, // `plain`, but NOT one containing ${
+    ];
+
+    // A mint is named by the literal chrome its message opens with — never by a line number, which
+    // is the citation this module's rules exist to keep out of failure messages. Chrome is read from
+    // the FIRST literal in the argument, so a concatenation is named by its leading text exactly as a
+    // template is; a message with no literal at all falls back to its own bounded text.
+    const chromeOf = (t: string): string => {
+      const q = t.search(/['"`]/);
+      if (q < 0) return t.replace(/\s+/g, ' ').slice(0, ABBREV);
+      const open = t[q] as string;
+      const rest = t.slice(q + 1);
+      const stops = [rest.indexOf(open), open === '`' ? rest.indexOf('${') : -1].filter((i) => i >= 0);
+      return stops.length ? rest.slice(0, Math.min(...stops)) : rest.slice(0, ABBREV);
+    };
+
+    const MINT = 'new SaihmEndpointError(';
+    const notBare: string[] = [];
+    let mints = 0;
+    for (const body of closure.values()) {
+      for (const m of body.matchAll(/new SaihmEndpointError\(/g)) {
+        mints++;
+        const args = argsOf(body, m.index + MINT.length - 1);
+        const message = (args[2] ?? '').trim();
+        if (BARE_LITERAL.some((re) => re.test(message))) continue;
+        notBare.push(chromeOf(message));
+      }
+    }
+    assert.ok(mints > 0, 'the sweep found no mints in the join path at all — the matcher is broken');
+
+    assert.deepEqual(
+      notBare.sort(),
+      [
+        // Endpoint-chosen, both fenced at `MAX_ERROR_CODE_CHARS` and both driven by the two tests
+        // above at two magnitudes.
+        'SAIHM onboard failed: ',
+        'free-onboard was not granted (',
+        // Interpolates `this.requestTimeoutMs` — the client's OWN configured timeout. Nothing the
+        // endpoint chose reaches it, so there is nothing here for a fence to cut.
+        'SAIHM onboard timed out after ',
+        // `readBodyCapped`'s over-budget throw, and the entry this list gained when the walk stopped
+        // following methods alone. It interpolates its `method` argument and its `max` argument. On
+        // the join path the only caller is `onboardFetch`, which passes a string LITERAL for the
+        // first and `MAX_RESPONSE_BYTES` for the second, so both are the client's own and neither is
+        // a value the endpoint returned. Note what it does NOT interpolate: the body it just refused
+        // to read. That is the whole point of the mint — it fires because the payload was too large,
+        // and putting any of that payload in the message would defeat the budget it enforces.
+        'SAIHM endpoint ',
+      ].sort(),
+      'a join-path mint builds its message from something other than a plain string literal, and ' +
+        'no test above drives it. If what it evaluates is endpoint-chosen it must be sliced at the ' +
+        'mint and driven here; if it is local, say so in this list.',
+    );
+  });
 });
