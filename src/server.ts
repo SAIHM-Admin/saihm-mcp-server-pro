@@ -24,7 +24,7 @@
  * Boot from env (self-onboard): SAIHM_ENDPOINT_URL, SAIHM_MASTER_SECRET_HEX,
  *   SAIHM_TIER, SAIHM_PAYMENT_METHOD. Advanced/legacy: SAIHM_AUTH_HEADER (static).
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as pathJoin } from 'node:path';
@@ -1068,7 +1068,19 @@ function persistCheckoutUrl(fenced: string): string {
     // following a link at it. The tmp name carries pid + ms so concurrent CLI runs cannot collide.
     const tmp = `${to}.tmp.${process.pid}.${Date.now()}`;
     writeFileSync(tmp, fenced + '\n', { mode: 0o600, flag: 'wx' });
-    renameSync(tmp, to); // atomic; inherits the tmp file's 0600 mode even if `to` pre-existed at 0644
+    try {
+      renameSync(tmp, to); // atomic; inherits the tmp file's 0600 mode even if `to` pre-existed at 0644
+    } catch (e) {
+      // Nothing sweeps stale tmp files, so a failed rename would leave one beside the real path
+      // forever. `wx` above proves THIS process created it, so the exact name is safe to unlink —
+      // never a glob, which would be reaching for another process's in-flight write.
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* never created, or already gone */
+      }
+      throw e;
+    }
     return to;
   } catch {
     return '';

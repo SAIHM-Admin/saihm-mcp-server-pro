@@ -53,6 +53,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -693,7 +694,23 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
     mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
     const tmp = `${keyPath}.tmp.${process.pid}.${Date.now()}`;
     writeFileSync(tmp, secretHex, { mode: 0o600, flag: 'wx' });
-    renameSync(tmp, keyPath); // atomic; inherits the tmp file's 0600 mode
+    try {
+      renameSync(tmp, keyPath); // atomic; inherits the tmp file's 0600 mode
+    } catch (e) {
+      // The tmp already holds the full contents. Nothing in this package sweeps stale tmp files, and
+      // no later purge reaches one: `forget()` and a delta recall both rewrite `<path>`, which the tmp
+      // is not. So a failed rename used to leave THE MASTER SECRET sitting beside the file
+      // the operator was told to check, permanently. Unlinked here because `wx` above proves THIS
+      // process created it — an exact name, never a glob, so another process's in-flight tmp is never
+      // touched. A kill between the write and the rename still leaves one; that is inherent to
+      // tmp-then-rename and is not what this closes.
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* never created, or already gone */
+      }
+      throw e;
+    }
     created = true;
   }
   process.env.SAIHM_MASTER_SECRET_FILE = keyPath;
@@ -769,7 +786,23 @@ class SeqState {
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.tmp.${process.pid}.${Date.now()}`;
     writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600, flag: 'wx' });
-    renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
+    try {
+      renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
+    } catch (e) {
+      // The tmp already holds the full contents. Nothing in this package sweeps stale tmp files, and
+      // no later purge reaches one: `forget()` and a delta recall both rewrite `<path>`, which the tmp
+      // is not. So a failed rename used to leave this agent’s whole sequence state sitting beside the file
+      // the operator was told to check, permanently. Unlinked here because `wx` above proves THIS
+      // process created it — an exact name, never a glob, so another process's in-flight tmp is never
+      // touched. A kill between the write and the rename still leaves one; that is inherent to
+      // tmp-then-rename and is not what this closes.
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* never created, or already gone */
+      }
+      throw e;
+    }
   }
 
   current(cellId: string): bigint | undefined {
@@ -856,7 +889,23 @@ class RecallCache {
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.tmp.${process.pid}.${Date.now()}`;
     writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600, flag: 'wx' });
-    renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
+    try {
+      renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
+    } catch (e) {
+      // The tmp already holds the full contents. Nothing in this package sweeps stale tmp files, and
+      // no later purge reaches one: `forget()` and a delta recall both rewrite `<path>`, which the tmp
+      // is not. So a failed rename used to leave EVERY CACHED CELL’S PLAINTEXT sitting beside the file
+      // the operator was told to check, permanently. Unlinked here because `wx` above proves THIS
+      // process created it — an exact name, never a glob, so another process's in-flight tmp is never
+      // touched. A kill between the write and the rename still leaves one; that is inherent to
+      // tmp-then-rename and is not what this closes.
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* never created, or already gone */
+      }
+      throw e;
+    }
   }
 
   knownCellIds(): string[] {
@@ -1949,7 +1998,19 @@ export class SaihmProClient {
       try {
         this.recallCache.upsert(this.openRow(cellId, wire));
       } catch {
-        this.recallCache.remove(cellId);
+        // The recovery must not re-enter the operation that just failed, and it used to: `upsert`
+        // sets the entry and THEN persists, so an unwritable cache throws with the entry already in
+        // the map — and `remove` finds it, deletes it, and persists again, failing identically. That
+        // second throw escaped, and the tool reported a FAILED WRITE for a cell the endpoint had
+        // accepted and stored. The line three comments up says a successful write must never be
+        // reported as failed because of the cache; this is what enforces it rather than intending it.
+        // The agent's likely response to a false failure is to write the content again, which is how
+        // a duplicate cell gets created for a cell that was already there.
+        try {
+          this.recallCache.remove(cellId);
+        } catch {
+          /* cache unwritable; the entry is dropped in memory and the next recall rebuilds it */
+        }
       }
     }
     // The receipt is composed from what WE authenticated, not from `r`. Returning the endpoint's echo

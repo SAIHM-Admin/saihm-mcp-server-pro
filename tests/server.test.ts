@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -722,6 +723,44 @@ test('server.ts: a forget receipt cannot carry the ENDPOINT\'s own localCacheRes
     assert.doesNotMatch(f.text, /^ {2}! /m, 'this client purged cleanly, so there is no residual line at all');
   } finally {
     d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: a failed cache persist leaves no plaintext behind in its tmp file', async () => {
+  // The write is tmp-then-rename, so a persist that fails AT THE RENAME has already put the full
+  // cache — every cached cell's PLAINTEXT — on disk under `<path>.tmp.<pid>.<ms>`. Nothing in this
+  // package unlinks it, and no later purge can: `forget()` prunes the cache at `<path>`, and a
+  // delta recall rewrites `<path>`. The tmp is outside both. So a cell the operator crypto-shredded
+  // stays readable in a file next to the one they were told to check — and the residual message
+  // 8980549 added names `<path>`, which is the wrong file in exactly this case.
+  //
+  // Driven through `remember`, whose cache upsert is deliberately swallowed ("a successful write
+  // must never be reported as failed because of it") — so the residue is left SILENTLY. The rename
+  // is made to fail by pointing the cache at a path that is a DIRECTORY: EISDIR on rename, while
+  // the tmp write beside it succeeds.
+  const dir = mkdtempSync(pathJoin(tmpdir(), 'saihm-tmpres-'));
+  const cachePath = pathJoin(dir, 'recall.json');
+  mkdirSync(cachePath); // the cache path IS a directory => renameSync(tmp, cachePath) throws
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp', [], { SAIHM_RECALL_CACHE_PATH: cachePath });
+  try {
+    await handshake(d);
+    const SECRET = 'PLAINTEXT-THAT-MUST-NOT-SURVIVE-A-FAILED-PERSIST';
+    const rem = await callText(d, 3, 'saihm_remember', { content: SECRET });
+    assert.equal(rem.isError, false, 'a stored cell must never be reported as a failed write');
+    const strays = readdirSync(dir).filter((f) => f.startsWith('recall.json.tmp.'));
+    for (const f of strays) {
+      assert.ok(
+        !readFileSync(pathJoin(dir, f), 'utf8').includes(SECRET),
+        `stray tmp ${f} still holds cell plaintext`,
+      );
+    }
+    assert.deepEqual(strays, [], 'a failed persist must clean up after itself');
+  } finally {
+    d.proc.kill();
+    rmSync(dir, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));
   }
 });
