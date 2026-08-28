@@ -24,6 +24,9 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as pathJoin } from 'node:path';
 
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { fromHex } from '@saihm/client-pro';
@@ -44,11 +47,20 @@ const serverPath = fileURLToPath(new URL('../src/server.ts', import.meta.url));
 const tsxBin = fileURLToPath(new URL('../node_modules/.bin/tsx', import.meta.url));
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const MASTER70_HEX = Buffer.from(masterOf(70)).toString('hex');
+// The `upgrade` CLI persists its checkout URL under SAIHM_STATE_DIR, and `cliEnv` strips every
+// ambient SAIHM_* — so without a value of its own the child falls back to ~/.saihm and every run of
+// this file writes into the operator's real home. Give it a throwaway directory, and remove it when
+// the process exits. (The sibling fix in server.test.ts covered only that file; this is the other
+// spawn site, found by checking that the home file had actually stopped appearing.)
+const CLI_STATE_DIR = mkdtempSync(pathJoin(tmpdir(), 'saihm-upgrade-nag-'));
+process.on('exit', () => rmSync(CLI_STATE_DIR, { recursive: true, force: true }));
+
 /** Child env with every ambient SAIHM_* stripped, then the explicit vars applied (no host bleed-through). */
 const cliEnv = (extra: Record<string, string>): NodeJS.ProcessEnv => ({
   ...Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !k.startsWith('SAIHM_')),
   ),
+  SAIHM_STATE_DIR: CLI_STATE_DIR,
   ...extra,
 });
 

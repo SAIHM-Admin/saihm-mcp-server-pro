@@ -9,7 +9,9 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, join as pathJoin, resolve } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import {
   deriveIdentity,
@@ -20,11 +22,21 @@ import {
   toHex,
   fromHex,
 } from '@saihm/client-pro';
+import {
+  MAX_CHECKOUT_URL_CHARS,
+  MAX_JOIN_FIELD_CHARS,
+} from '../src/render_fence.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, '../src/server.ts');
 const TSX = resolve(HERE, '../node_modules/.bin/tsx');
 const MASTER_HEX = '33'.repeat(32); // the master secret the spawned server boots from
+
+// `join` persists the checkout URL under SAIHM_STATE_DIR, defaulting to ~/.saihm. Left unset, every
+// run of this suite writes into the operator's real home directory — test pollution that outlives
+// the test. Point it at a throwaway dir instead, and remove it when the process exits.
+const TEST_STATE_DIR = mkdtempSync(pathJoin(tmpdir(), 'saihm-pro-test-'));
+process.on('exit', () => rmSync(TEST_STATE_DIR, { recursive: true, force: true }));
 
 interface Rpc {
   id?: number | string;
@@ -179,7 +191,11 @@ interface Driver {
   notify: (method: string, params?: unknown) => void;
 }
 
-function startServer(endpoint: string, args: string[] = []): Driver {
+function startServer(
+  endpoint: string,
+  args: string[] = [],
+  extraEnv: NodeJS.ProcessEnv = {},
+): Driver {
   const env = {
     ...process.env,
     SAIHM_ENDPOINT_URL: endpoint,
@@ -189,6 +205,8 @@ function startServer(endpoint: string, args: string[] = []): Driver {
     // This suite pins the core tool wiring; opt out of self-join (on by default)
     // so tools/list stays the canonical eight. Self-join has its own suite.
     SAIHM_SELF_JOIN: '0',
+    SAIHM_STATE_DIR: TEST_STATE_DIR,
+    ...extraEnv,
   };
   const proc = spawn(TSX, [SERVER, ...args], {
     env,
@@ -445,6 +463,140 @@ test('server.ts: `join` CLI cannot have extra instructions forged into it', asyn
     // unopenable would trade one failure for another.
     assert.ok(out.includes('https://checkout.example/pay'), `the real URL was lost:\n${out}`);
   } finally {
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+// --- hosted-checkout URL delivery (incident 2026-08-27) ---------------------
+// A hosted checkout URL carries a MANDATORY `#fid…` fragment, and a copy that loses it is refused
+// by Stripe with "This link is incomplete" — which, to the payer, is indistinguishable from a broken
+// backend. The fixture below carries the shape MEASURED against the live API on 2026-08-27 and
+// recorded in INCIDENT-stripe-checkout-fragment-2026-08-27.md: 523 characters total, of which the
+// fragment is 422. The first 40 fragment characters are the measured ones verbatim; the rest is
+// opaque padding to the measured length, drawn only from the alphabet that measurement attests
+// (base64 plus percent-escapes).
+//
+// RESIDUAL, stated because it cannot be closed from here: only the first 40 characters of a live
+// fragment were ever recorded, so the full alphabet is unattested. `safeField` replaces `[`, `]` and
+// `|` with `?`, so a live fragment containing one of those unescaped would be delivered corrupt.
+// Nothing observed suggests it does, and inventing such a character here would assert a premise no
+// measurement supports.
+const FRAGMENT = (
+  "fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSd2cG" +
+  "Jyd2YGB3c2B2YFVrJz8nZGZmYHZxWjA0S0BLPWFEZ21NRlZQNTFXcXR3TktMNTNx%2F".repeat(
+    6,
+  )
+).slice(0, 422);
+const HOSTED_URL =
+  "https://checkout.stripe.com/c/pay/" +
+  ("cs_live_a1N8E8V7" + "kQ7mZ2pR9xT4vB6nL8cJ3wY5hD1gF0sA".repeat(2)).slice(
+    0,
+    66,
+  ) +
+  "#" +
+  FRAGMENT;
+
+/**
+ * Run the server as a CLI subcommand and collect its stdout until it exits.
+ *
+ * The two cases below want what the `join` cases above build inline — spawn, accumulate stdout,
+ * resolve on close — plus a state directory of their own, so they share one helper rather than a
+ * third and fourth copy of the block.
+ */
+function runCli(
+  endpoint: string,
+  args: string[],
+  extraEnv: NodeJS.ProcessEnv = {},
+): Promise<string> {
+  return new Promise<string>((res, rej) => {
+    const d = startServer(endpoint, args, extraEnv);
+    let o = "";
+    d.proc.stdout!.on("data", (c) => (o += c));
+    d.proc.on("close", () => res(o));
+    d.proc.on("error", rej);
+    setTimeout(() => {
+      d.proc.kill();
+      rej(new Error(`${args[0]} timeout`));
+    }, 12000);
+  });
+}
+
+/**
+ * Both halves of the delivery: the URL a human reads, and the file they can open instead.
+ *
+ * Written as one helper over both call sites because they compose the same two functions from the
+ * same two budgets. `render_fence.ts` records that both sites once fenced this URL with
+ * {@link MAX_JOIN_FIELD_CHARS}, sized and documented for a device-flow URI of "well under 100
+ * characters" — a hosted URL cut there is a link that looks actionable and opens nothing. Testing
+ * only one site would leave half of that fix pinned by nothing. Each site was mutated in isolation
+ * to confirm it: each failed only its own case, so neither is standing in for the other.
+ */
+function assertCheckoutDelivered(out: string, dir: string): void {
+  // The fixture has to sit in the window where the two budgets DISAGREE, or neither assertion below
+  // can tell them apart.
+  assert.ok(
+    HOSTED_URL.length > MAX_JOIN_FIELD_CHARS &&
+      HOSTED_URL.length < MAX_CHECKOUT_URL_CHARS,
+    "fixture must exceed the join-field budget and fit the checkout budget",
+  );
+  // The delimiters exist so that truncation in transit is VISIBLE. Match them, and the URL is
+  // pinned to one line, byte for byte, with nothing else on it — which is the whole claim.
+  const block =
+    /--- BEGIN CHECKOUT URL \(one line, open unmodified\) ---\n {2}(.*)\n {2}--- END CHECKOUT URL ---/.exec(
+      out,
+    );
+  assert.ok(block, `the delimited checkout block was not printed:\n${out}`);
+  assert.equal(
+    block[1],
+    HOSTED_URL,
+    "the printed URL must be the endpoint URL, whole",
+  );
+  assert.ok(
+    block[1].endsWith("#" + FRAGMENT),
+    "the #fid fragment is REQUIRED by Stripe — never strip or cut it",
+  );
+  // Where the block SAYS it saved the URL is where the URL must actually be. Asserting only that
+  // the operator's home stayed clean would be satisfied just as well by the write silently failing.
+  const saved = /Also written to: (\S+)/.exec(out);
+  assert.ok(saved, `the block did not report where the URL was saved:\n${out}`);
+  assert.equal(saved[1], pathJoin(dir, "checkout-url.txt"));
+  // On disk it is one line and unreflowed: a file is the one delivery channel that cannot cut at
+  // the `#`, which is why `persistCheckoutUrl` exists at all.
+  assert.equal(readFileSync(saved[1], "utf8"), HOSTED_URL + "\n");
+}
+
+test("server.ts: `join` delivers a fragment-bearing checkout URL whole, printed and on disk", async () => {
+  const dir = mkdtempSync(pathJoin(tmpdir(), "saihm-join-frag-"));
+  const mock = startMock({ checkoutUrl: HOSTED_URL });
+  await new Promise<void>((r) => mock.server.listen(0, "127.0.0.1", () => r()));
+  try {
+    assertCheckoutDelivered(
+      await runCli(mock.base() + "/mcp", ["join"], { SAIHM_STATE_DIR: dir }),
+      dir,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test("server.ts: `upgrade` delivers a fragment-bearing checkout URL whole, printed and on disk", async () => {
+  // The second call site, and the reason this file covers it: `requestUpgradeUrl` refuses a paid
+  // identity, so reaching it needs SAIHM_TIER=FREE — which is exactly why a `join`-only test would
+  // never have exercised it.
+  const dir = mkdtempSync(pathJoin(tmpdir(), "saihm-upgrade-frag-"));
+  const mock = startMock({ checkoutUrl: HOSTED_URL });
+  await new Promise<void>((r) => mock.server.listen(0, "127.0.0.1", () => r()));
+  try {
+    assertCheckoutDelivered(
+      await runCli(mock.base() + "/mcp", ["upgrade", "PRO"], {
+        SAIHM_TIER: "FREE",
+        SAIHM_STATE_DIR: dir,
+      }),
+      dir,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));
   }
 });
