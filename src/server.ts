@@ -38,6 +38,7 @@ import {
   MAX_CHECKOUT_URL_CHARS,
   MAX_ERROR_MESSAGE_CHARS,
   MAX_JOIN_FIELD_CHARS,
+  MAX_PATH_FIELD_CHARS,
   boundedOrMarker,
   safeField,
   safeScalar,
@@ -1098,6 +1099,10 @@ function persistCheckoutUrl(fenced: string): string {
  * derived from `SAIHM_STATE_DIR`, which is caller-chosen rather than endpoint-chosen — a weaker
  * threat, but the fence costs nothing and the distinction is not worth encoding in a place where
  * getting it wrong forges an instruction in the tool's own voice.
+ *
+ * The BUDGET is {@link MAX_PATH_FIELD_CHARS} and not the join-field one this line used to carry.
+ * The whole point of the line is to name a file the caller can open; a path cut at a budget sized
+ * for a device-flow URI names one that does not exist, which fails the line at its only job.
  */
 function checkoutUrlBlock(fenced: string, savedTo: string): string[] {
   return [
@@ -1105,7 +1110,7 @@ function checkoutUrlBlock(fenced: string, savedTo: string): string[] {
     '  ' + fenced,
     '  --- END CHECKOUT URL ---',
     '',
-    ...(savedTo ? ['  Also written to: ' + safeField(savedTo, MAX_JOIN_FIELD_CHARS), ''] : []),
+    ...(savedTo ? ['  Also written to: ' + safeField(savedTo, MAX_PATH_FIELD_CHARS), ''] : []),
   ];
 }
 
@@ -1177,12 +1182,14 @@ async function runFreeJoin(): Promise<void> {
       // Name the key the caller ACTUALLY has. This line was unconditionally
       // "Keep SAIHM_MASTER_SECRET_HEX safe", which for a self-generated identity points at an env
       // var that does not exist — sending the one caller who most needs to take a backup to look
-      // for the wrong thing. safeField: keyPath is env-derived on the bring-your-own-key path.
+      // for the wrong thing. safeField: keyPath is env-derived on the bring-your-own-key path,
+      // at MAX_PATH_FIELD_CHARS — this names the ONLY key to the caller's memory, so a path
+      // truncated to a URI's budget is worse than no line at all: it reads as a backup taken.
       // Not `identity?.keyPath` alone: under SAIHM_SELF_JOIN=0 nothing is ensured, yet a caller
       // who supplied SAIHM_MASTER_SECRET_FILE still has a FILE to back up. Reading env directly
       // covers that case too, so the only caller told to keep the HEX var is one who set it.
       (identity?.keyPath ?? process.env.SAIHM_MASTER_SECRET_FILE)
-        ? `  Back up ${safeField(identity?.keyPath ?? process.env.SAIHM_MASTER_SECRET_FILE!, MAX_JOIN_FIELD_CHARS)} — it is the only key to your`
+        ? `  Back up ${safeField(identity?.keyPath ?? process.env.SAIHM_MASTER_SECRET_FILE!, MAX_PATH_FIELD_CHARS)} — it is the only key to your`
         : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your',
       '  memory and cannot be recovered. Start the server normally (drop the "free-join" argument)',
       '  and it connects automatically. Upgrading to a paid plan later attaches to THIS same key —',

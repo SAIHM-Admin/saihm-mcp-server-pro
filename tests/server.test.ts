@@ -34,6 +34,7 @@ import {
 import {
   MAX_CHECKOUT_URL_CHARS,
   MAX_JOIN_FIELD_CHARS,
+  MAX_PATH_FIELD_CHARS,
 } from '../src/render_fence.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -111,6 +112,46 @@ function startMock(opts: MockOpts = {}): {
         return send(201, {
           jwt: `${b64url({ alg: 'EdDSA' })}.${b64url({ sub: b.pubkey, tier: 'PRO', exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`,
         });
+      });
+    }
+    // The FREE device flow, enough of it to drive `free-join` to the block that names the key.
+    // Additive: the `/api/onboard` challenge/verify pair above is untouched, because the tests that
+    // pin the purchase path read it and nothing here may move under them.
+    if (req.method === 'POST' && url === '/api/free-onboard/start') {
+      return read(() =>
+        send(200, {
+          flowId: 'flow-1',
+          userCode: 'WDJB-MJHT',
+          verificationUri: 'https://saihm.test/device',
+          expiresIn: 900,
+          interval: 1,
+        }),
+      );
+    }
+    if (req.method === 'POST' && url === '/api/free-onboard/claim') {
+      return read((s2) => {
+        let b: { pubkey?: string; nonce?: string; signature?: string } = {};
+        try {
+          b = JSON.parse(s2);
+        } catch {
+          return send(400, { error: 'bad_json' });
+        }
+        let ok = false;
+        try {
+          ok =
+            b.nonce === lastNonce &&
+            ml_dsa65.verify(
+              fromHex(b.signature ?? ''),
+              fromHex(b.nonce ?? ''),
+              fromHex(b.pubkey ?? ''),
+            );
+        } catch {
+          ok = false;
+        }
+        if (!ok) return send(401, { error: 'bad_signature' });
+        // The client ignores a body-supplied agentIdHash and reports the one it derived, so this
+        // value is deliberately not the real hash: a test that echoed it could not tell the two apart.
+        return send(200, { status: 'granted', agentIdHash: 'ff'.repeat(32) });
       });
     }
     if (req.method === 'POST' && url === '/api/stripe/checkout') {
@@ -764,6 +805,79 @@ test('server.ts: a failed cache persist leaves no plaintext behind in its tmp fi
     assert.deepEqual(strays, [], 'a failed persist must clean up after itself');
   } finally {
     d.proc.kill();
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+
+/**
+ * A state directory deep enough that the two budgets DISAGREE about the path inside it.
+ *
+ * The mismatch these pin is invisible at any ordinary depth: `MAX_JOIN_FIELD_CHARS` (256, sized for
+ * a device-flow URI) and `MAX_PATH_FIELD_CHARS` (4096, PATH_MAX) render an ordinary `/tmp` path
+ * identically. Only a path in the window between them can tell which budget a call site carries.
+ * Every component stays under NAME_MAX and the whole stays under PATH_MAX, so this is a path the
+ * filesystem genuinely accepts — not an impossible input propped up to make a test fail.
+ */
+const DEEP_SEGMENT = 'p'.repeat(40);
+function deepStateDir(prefix: string): string {
+  const deep = pathJoin(
+    mkdtempSync(pathJoin(tmpdir(), prefix)),
+    ...Array<string>(6).fill(DEEP_SEGMENT),
+  );
+  mkdirSync(deep, { recursive: true });
+  return deep;
+}
+
+test('server.ts: `join` names the SAVED FILE by a path budget, not a URI budget', async () => {
+  const dir = deepStateDir('saihm-join-deep-');
+  const expected = pathJoin(dir, 'checkout-url.txt');
+  assert.ok(
+    expected.length > MAX_JOIN_FIELD_CHARS && expected.length < MAX_PATH_FIELD_CHARS,
+    'fixture must sit in the window where the two budgets disagree',
+  );
+  const mock = startMock({ checkoutUrl: HOSTED_URL });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    // `assertCheckoutDelivered` already requires the reported path to BE the file it reads back, so
+    // a path fenced at the URI budget fails it twice: the equality, and then the read of a name that
+    // no longer exists. Reused rather than restated — the claim is the same one, at a longer path.
+    assertCheckoutDelivered(
+      await runCli(mock.base() + '/mcp', ['join'], { SAIHM_STATE_DIR: dir }),
+      dir,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: `free-join` names the KEY TO BACK UP by a path budget, not a URI budget', async () => {
+  const dir = deepStateDir('saihm-free-deep-');
+  // The bring-your-own-key branch: no self-join identity, but a caller-supplied FILE that exists and
+  // holds the secret the child boots from. This is the caller the line is addressed to.
+  const keyFile = pathJoin(dir, 'master-secret.hex');
+  writeFileSync(keyFile, MASTER_HEX + '\n', { mode: 0o600 });
+  assert.ok(
+    keyFile.length > MAX_JOIN_FIELD_CHARS && keyFile.length < MAX_PATH_FIELD_CHARS,
+    'fixture must sit in the window where the two budgets disagree',
+  );
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const out = await runCli(mock.base() + '/mcp', ['free-join'], {
+      SAIHM_TIER: 'FREE',
+      SAIHM_MASTER_SECRET_HEX: undefined,
+      SAIHM_MASTER_SECRET_FILE: keyFile,
+      SAIHM_STATE_DIR: dir,
+    });
+    // Matched as a whole line with its trailing prose attached. Asserting `out.includes(keyFile)`
+    // would pass on a truncated path too, since the truncation marker lands AFTER the prefix.
+    const line = /\n {2}Back up (.+) — it is the only key to your\n/.exec(out);
+    assert.ok(line, `the backup line was not printed:\n${out}`);
+    assert.equal(line[1], keyFile, 'the key named for backup must be the path that exists');
+  } finally {
     rmSync(dir, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));
   }

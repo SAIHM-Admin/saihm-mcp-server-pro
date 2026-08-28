@@ -271,6 +271,28 @@ export const MAX_JOIN_FIELD_CHARS = 256;
  */
 export const MAX_CHECKOUT_URL_CHARS = 2048;
 
+/**
+ * Budget for a FILESYSTEM PATH the caller has to act on — where the URL was saved, which key to back up.
+ *
+ * Split from {@link MAX_JOIN_FIELD_CHARS} for the same reason {@link MAX_CHECKOUT_URL_CHARS} was, and
+ * as the other half of that split: the constant above is sized and documented for a device-flow
+ * verification URI, and the sweep that found URLs wearing it stopped at URLs. Paths were wearing it
+ * too, on the two lines whose whole job is to hand a human a path — "Also written to" and "Back up".
+ *
+ * A path is not bounded like a URI. Linux PATH_MAX is 4096, and both values are CALLER-chosen
+ * (`SAIHM_STATE_DIR`, `SAIHM_MASTER_SECRET_FILE`), so 256 sits BELOW the legitimate maximum rather
+ * than above it — the direction that matters, because a URI budget over-provisions its value class
+ * and this one under-provisions its own. Cut at 256, the backup line names a path that does not
+ * exist and cannot be created: "actionable-looking but not actionable", which is the outcome
+ * {@link MAX_JOIN_FIELD_CHARS} documents itself as existing to prevent, reached by reusing it.
+ *
+ * Still fenced, and the fence is the part that carries the security property: `safeField` scrubs the
+ * control range and the label metacharacters at ANY budget, so widening the cap costs nothing there.
+ * What the cap defends is the block's shape — the value still cannot become a paragraph — and at
+ * PATH_MAX no path a filesystem can hold is ever cut.
+ */
+export const MAX_PATH_FIELD_CHARS = 4096;
+
 /** How much of a hash or opaque id a receipt line shows. Enough to recognise, too little to flood. */
 export const ABBREV_CHARS = 16;
 

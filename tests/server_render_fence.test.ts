@@ -409,6 +409,7 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       ABBREV_CHARS: 16,
       MAX_JOIN_FIELD_CHARS: 256,
       MAX_CHECKOUT_URL_CHARS: 2048,
+      MAX_PATH_FIELD_CHARS: 4096,
       MAX_STRUCTURED_SCALAR_CHARS: 256,
       MAX_ERROR_MESSAGE_CHARS: 256,
     },
