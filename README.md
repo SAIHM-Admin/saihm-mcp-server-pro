@@ -1,18 +1,56 @@
-# @saihm/mcp-server-pro
+# SAIHM Memory for AI Agents
+
+`@saihm/mcp-server-pro` — **portable memory for AI agents, sealed on your own machine.**
 
 [![npm version](https://img.shields.io/npm/v/@saihm/mcp-server-pro.svg)](https://www.npmjs.com/package/@saihm/mcp-server-pro)
 [![license](https://img.shields.io/npm/l/@saihm/mcp-server-pro.svg)](./LICENSE)
 
-Production thin-client for **SAIHM non-custodial memory**.
+Your agent remembers what matters — across sessions, across models, and across
+vendors. Share a memory with another agent, revoke it, or erase it for good. The
+service that stores it never holds your keys and cannot read it.
 
-`SaihmProClient` seals every cell **on the client** with [`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro), then POSTs the resulting ciphertext to the blind SAIHM `/mcp` endpoint. The endpoint stores, anchors, shares, and meters over ciphertext — it never holds your keys and cannot read your memory. Your master secret, key-encryption key, and plaintext never leave this process.
+## Start free — just ask your agent to "Join SAIHM"
 
-- **Seal before send** — `remember` encrypts client-side; `recall` decrypts client-side.
-- **Post-quantum** — ML-DSA-65 identity/signing, ML-KEM-768 authenticated sharing (via `@saihm/client-pro`).
+No card. No master secret to invent. No website visit. Paste this into your MCP
+host (Claude Desktop, Claude Code, Cursor):
+
+```json
+{
+  "mcpServers": {
+    "saihm": {
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": {
+        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp"
+      },
+      "timeout": 60
+    }
+  }
+}
+```
+
+Then say this to your agent:
+
+> Join SAIHM.
+
+That is the whole setup. Your agent generates your key on this device, hands you
+a one-time sign-in that confirms you are a unique person, and your memory is
+live. Next session, it is still there.
+
+Keep `timeout` as written — some hosts allow a start-up budget as short as 1.5 s
+(Cline's default), too short for `npx` to resolve and launch, and a server that
+misses it is skipped **silently**, with no error in the chat.
+
+> **Back up `~/.saihm/free-identity.key`.** It is the only key to your memory. If
+> you lose it, no one — including SAIHM — can open your cells. That is the
+> design, not a gap: the service is blind, so there is nobody to ask for a reset.
+
+## Under the hood
+
+- **Seal before send** — `remember` encrypts client-side; `recall` decrypts client-side. Your plaintext, master secret, and key-encryption key never leave this process.
+- **Post-quantum** — ML-DSA-65 identity/signing, ML-KEM-768 authenticated sharing (via [`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro)).
 - **Same transport as the standards client** — `POST {method, params}` + `Authorization: Bearer <JWT>`; the endpoint binds your tenant from the JWT. HTTPS-only (loopback `http` permitted for local dev).
 - **Crypto-shred erasure** — `forget` destroys the endpoint-side wrapped DEK, rendering the cell undecryptable (GDPR Art. 17).
-
-> **Key loss is unrecoverable by design.** If you lose your master secret you lose your KEK, and no one — including SAIHM — can open your cells. Back it up securely.
 
 ## See it run
 
@@ -77,29 +115,11 @@ there is no token to paste or re-paste. Eight tools are exposed
 `saihm_share`, `saihm_revoke_share`, `saihm_governance_propose`,
 `saihm_governance_vote`).
 
-### Zero-config free start — prompt your agent to "Join SAIHM"
+### Zero-config free start — what "Join SAIHM" actually does
 
-The easiest start needs **no master secret and no card**. Self-join is on by
-default, so this is the whole configuration:
-
-```json
-{
-  "mcpServers": {
-    "saihm": {
-      "command": "npx",
-      "args": ["-y", "@saihm/mcp-server-pro"],
-      "env": {
-        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp"
-      },
-      "timeout": 60
-    }
-  }
-}
-```
-
-Then, in your agent session, just say:
-
-> Join SAIHM.
+The whole configuration is at the top of this README: point
+`SAIHM_ENDPOINT_URL` at the hosted endpoint and say *"Join SAIHM"* to your
+agent. Here is what happens when you do.
 
 The agent calls the `saihm_join` tool, which **generates your identity on this
 device** (a 32-byte master secret written mode-600 to `~/.saihm/free-identity.key`)
