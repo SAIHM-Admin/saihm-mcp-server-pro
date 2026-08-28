@@ -123,7 +123,47 @@ export const safeField = (s: string, max: number): string => {
  */
 export const labelSafe = (s: string): string => s.replace(/=/g, '?');
 
-/** Budget for a single endpoint-chosen scalar in a receipt/status line. These are short by nature. */
+/**
+ * Budget for a single endpoint-chosen scalar in a receipt/status line. These are short by nature.
+ *
+ * ONE LINE IS NOT A RECEIPT, and the sentence above described the budget's intent as though it were
+ * its extent. `saihm_join`'s device-flow block fences `userCode` with this budget, on a line a HUMAN
+ * reads and retypes — while the `verificationUri` directly above it uses the join-specific
+ * {@link MAX_JOIN_FIELD_CHARS}. So the two halves of one instruction are budgeted by two different
+ * rules, and only one of them is named after the thing it is on.
+ *
+ * That line is rendered from TWO call sites in `server.ts`, not one, and the distinction is not
+ * pedantry here: this tree has already shipped a defect of exactly that shape, where a sentence was
+ * corrected in one of two copies of the self-join block and the second kept the false version. Both
+ * sites are found with `grep -n 'safeScalar(p.userCode)' src/server.ts`; anything done to one is
+ * owed to the other.
+ *
+ * The doc is corrected rather than the call, because there is no live defect to fix. The cut cannot
+ * fire on a value this budget already admits — stated that way rather than as the number it works out
+ * to, because that number is one past this constant and would go stale in silence the day the
+ * constant moved — and if it ever did fire the code would arrive visibly marked with `…` rather
+ * than silently wrong. No user code is near that: RFC 8628 §6.1 sets no length — it recommends a
+ * short, human-transcribable code and reasons about alphabet and entropy instead — and the codes
+ * this tree has actually rendered are single digits of characters. (Stated that way on purpose. An
+ * earlier cut of this paragraph wrote "RFC 8628 user codes are 8-9 characters", attributing a bound
+ * to a standard that does not set one; `server_self_join.test.ts` already carries a scar for the
+ * same move, where a local convention was cited as an RFC 8628 default.) Widening `userCode` to the
+ * join budget would change no output today and would trade a documented mismatch for an
+ * undocumented one.
+ *
+ * What is worth stating is the boundary itself: this constant is the DEFAULT for `safeScalar`, so it
+ * governs every scalar whose site has not chosen a budget of its own. That is a claim about ALL call
+ * sites, so it is no longer made here. A cut of this block made it in prose and named
+ * `grep -n 'safeScalar(' src/server.ts` as the sweep — a command that cannot reach the call sites in
+ * THIS module, which is where `safeScalar` is also used. The conclusion happened to be true and the
+ * control was narrower than the conclusion, which is the same shape as the budget enumeration that
+ * once filtered by name prefix, and as adopting `noUnusedLocals` for `src` alone.
+ *
+ * The sweep is now a test: `server_render_fence.test.ts` reads every `.ts` under `src/`, finds each
+ * call, and fails if one passes a second argument — after first pinning that it matched something
+ * and that it reached both modules, so it cannot narrow or go blind in silence. A site that needs a
+ * different budget is not forbidden; it is required to be declared here rather than discovered.
+ */
 export const MAX_SCALAR_CHARS = 64;
 
 /**
@@ -279,8 +319,103 @@ export const MAX_STRUCTURED_SCALAR_CHARS = 256;
  * a different axis and was missing: the announcement channel is capped on both rows and bytes, while
  * `saihm_remember` and `saihm_status` were capped on neither. Measured with only this bound removed:
  * a 16,777,074-byte response yields a 16,777,414-byte `saihm_remember` result and a 16,777,482-byte
- * `saihm_status` one, in successful calls, through fields declared as short scalars. With the bound
- * in place the same response yields 409 and 477 bytes.
+ * `saihm_status` one, in successful calls, through fields declared as short scalars.
+ *
+ * NO WITH-THE-BOUND FIGURE IS STATED HERE. Four have been written in this spot and every one was
+ * wrong, each in a different way, and the fourth was wrong in the act of correcting the third:
+ *
+ *   - "409 and 477 bytes" was the 16 MiB fixture's output: every field over the bound, every one
+ *     collapsed to the marker. A number that gets SMALLER the more hostile the input — the floor of
+ *     the bounded range wearing the grammar of its ceiling.
+ *   - "1,444 bytes" set every endpoint-chosen field to exactly {@link MAX_STRUCTURED_SCALAR_CHARS}
+ *     characters, assuming the largest admitted value maximises everywhere.
+ *   - "1,477 bytes" was offered as the fix for that, together with a recipe and an INVERSION rule
+ *     (bounded fields maximise by being ADMITTED, numeric fields by being REFUSED). The rule is
+ *     false and the recipe does not reach the number printed beside it. `bfsi_R` and `bfsi_M` are
+ *     not numeric fields at all — they are `safeScalar` STRINGS in the text and appear in no
+ *     structured field — so refusing them shrinks the result; and a count is not maximised by
+ *     refusal either, since a value inside the numeric length guard can render far wider than the
+ *     marker it would otherwise be replaced by. Admitting maximises both families.
+ *   - Every one of those numbers was one fixture's output presented as a maximum, and each was
+ *     written immediately after finding the same defect somewhere else.
+ *
+ * What is TRUE, and what this comment is now limited to, is the BOUND rather than any evaluation of
+ * it. Where this budget applies, the text copy of the same value is re-fenced at
+ * {@link MAX_SCALAR_CHARS} plus a marker, so that pair is linear in (fields × bound) and has no
+ * single interesting number in it.
+ *
+ * WHERE IT APPLIES IS NOT EVERYWHERE, and a cut of this said it was: "Each endpoint-chosen value
+ * entering `structuredContent` is capped here at MAX_STRUCTURED_SCALAR_CHARS", followed by
+ * "`saihm_status` carries the most such fields". Both are false, and the second is false by the
+ * first's own measure — `saihm_recall` can carry up to `MAX_SHARED_ANNOUNCEMENTS` (declared in `client.ts`) announcement
+ * rows of four endpoint-chosen fields each, against seven fields for `saihm_status`. Several
+ * families enter `structuredContent` and only one of them is bounded by this constant. The list
+ * below is the ENDPOINT-CHOSEN part of that map, which is the part this module has an opinion
+ * about; it is not the whole of what enters, and a cut of this block said "four families enter"
+ * as though it were. The CLIENT-ORIGIN fields — the caller's own `cellId`, this client's `seq` and
+ * `commitmentHash`, its computed `count` and `sharedTruncated`, and its own `agentIdHash` — enter
+ * too and are owed no bound here at all. No count is given for either group; the mechanised map
+ * named at the end of this block is the place that knows them, and it is complete where this
+ * paragraph is a summary:
+ *
+ *   - CAPPED HERE, via `boundedOrMarker`: `saihm_remember.shardId` and `saihm_status`'s `tier`,
+ *     `custody` and `snapshotEpoch`. These are the endpoint's own strings and this is their bound.
+ *   - BOUNDED BY A DIFFERENT GUARD: `saihm_status`'s three counters pass `numOrNull`/`countOrNull`,
+ *     which refuse on LENGTH before parsing, so they arrive as JS numbers or `null`.
+ *   - BOUNDED IN THE CLIENT: `saihm_recall.shared[]` is endpoint-chosen and unauthenticated, and is
+ *     capped there on three axes at once — per field, on a running total, and on row count. Nothing
+ *     in this module has an opinion about it, and nothing needs to.
+ *   - NOT BOUNDED, BY DESIGN: `saihm_recall.memories[]`. `plaintext` is the payload and must arrive
+ *     whole; `cellId` and `seq` are CALLER-supplied, which a cut of this comment got wrong in the
+ *     other direction by calling them endpoint-chosen. MEASURED: seal a short `cellId` and have the
+ *     endpoint replay a long one in the outer row, and the client renders the SEALED value and
+ *     discards the outer entirely — `openRow` takes both fields off the opened envelope and never
+ *     looks at the server's row label.
+ *
+ *     CALLER-SUPPLIED IS NOT CALLER-CHOSEN, and a cut of this closed with "the endpoint cannot
+ *     choose this field, so capping it would buy nothing … an adversary with no reach". That
+ *     overstated a true mechanism into a false reachability claim, and the refutation was already
+ *     in this tree: the reachability note in `server_render_hostile.test.ts` spells out that
+ *     `cellId` is a free-form argument to `saihm_remember` with no pattern and no length bound
+ *     which the tool's own description invites callers to supply, so an agent that lifts an id out
+ *     of a forged pointer line and stores under it signs the payload ITSELF, and the endpoint then
+ *     replays it authenticated. The endpoint cannot SET the field; it can INDUCE it. There is a
+ *     reach, and it runs through the agent.
+ *
+ *     The decision does not change, and the reason it survives is a different one than the sentence
+ *     it replaces gave: `structuredContent` is deliberately unsanitised on every tool — `server.ts`
+ *     says so where it refuses to route an agent there — so a bound on this one field would not be
+ *     the boundary anyone would be relying on, while it WOULD cost the `saihm_forget` round-trip for
+ *     any caller who chose a long id. The laundering path is answered in the channel that is
+ *     actually fenced: the TEXT receipt re-fences `cellId` and `seq` in label position, which is
+ *     what makes an induced id inert where an agent reads it.
+ *
+ *     Whether the structured copy should also be bounded was put to the Architect and DECIDED on
+ *     2026-08-28: leave it whole. Not because the reach is imaginary — the paragraph above is the
+ *     record that it is not — but because a bound on this one field would not be a boundary anyone
+ *     relies on while `structuredContent` is unsanitised on every tool, and it would cost the
+ *     `saihm_forget` round-trip for a caller who legitimately chose a long id. The laundering path
+ *     is answered in the channel that is actually fenced. REOPEN THIS if `structuredContent` ever
+ *     becomes a fenced surface: the decision rests on that premise, not on the reach being absent.
+ *
+ * That map is a claim about EVERY structured field on EVERY tool, so it is not left in prose:
+ * `server_render_fence.test.ts` derives the tools and their structured keys from `server.ts` and
+ * fails if a key appears, moves or vanishes without being declared there. Adding an uncapped
+ * endpoint-chosen field turns it red rather than quietly widening what this block covers.
+ *
+ * To get a figure, MEASURE ONE — do not read one from here. Drive the tool against a hostile
+ * endpoint using the harness already in `tests/server_render_hostile.test.ts` (`startMock` +
+ * `startServer` + `callText`), choose the field values yourself, and take
+ * `JSON.stringify(result).length`. Vary each field in BOTH directions before calling any output a
+ * maximum: that step is what every figure above skipped.
+ *
+ * A bound holds for every input. A measurement holds for the one input that produced it, and this
+ * comment has now demonstrated four times that the difference does not survive being written down.
+ *
+ * The residual all of this leaves is the CALLER's: `saihm_remember` echoes a `cellId` the caller
+ * supplied, and `saihm_recall` reads it back out of the sealed envelope. No budget in this module has
+ * an opinion about either, so a caller can make its own results any size it likes. The bounds here
+ * fence the ENDPOINT's contribution only — which is the whole of what they are for.
  *
  * REJECTS a non-string outright rather than stringifying it. `String(v)` here fabricated values that
  * looked like data the endpoint had sent: an omitted field became the string `"undefined"`, `true`

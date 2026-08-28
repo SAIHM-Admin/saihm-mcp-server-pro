@@ -1430,14 +1430,59 @@ export class SaihmProClient {
             // until the next join. Render was never unsafe — `failText` re-fences it — so this was
             // unbounded-at-mint, bounded-at-render.
             //
-            // NO COUNT IS STATED HERE ON PURPOSE. The count has now been wrong three times, and the
+            // NO COUNT IS STATED HERE ON PURPOSE. The count has been wrong three times, and the
             // third time it was wrong ABOUT THIS CONSTRUCTION: the slice below was added while the
             // `status` interpolated into the MESSAGE argument two lines down was left unbounded, so a
-            // comment declaring the category closed sat directly above an open instance of it. The
-            // invariant, which is checkable and does not decay: EVERY endpoint-chosen string entering
-            // a `SaihmEndpointError` is sliced AT THE MINT — the `code` argument and the `message`
-            // argument alike. Sweep the observable, not the argument position; the mints are found
-            // with `new SaihmEndpointError`, not with a grep for this constant.
+            // comment declaring the category closed sat directly above an open instance of it.
+            //
+            // SCOPE, STATED EXACTLY, because the repair for that was itself too broad. It claimed
+            // "EVERY endpoint-chosen string entering a `SaihmEndpointError` is sliced AT THE MINT —
+            // the `code` argument and the `message` argument alike". Only the first half is true. The
+            // `code` argument is the one this slice and its two siblings close, and closing it is
+            // what `render_fence.ts` relies on when it imports the budget instead of restating it.
+            // The MESSAGE argument is NOT closed and is not meant to be: several mints on the read,
+            // share and shared-read paths interpolate envelope-derived values — `env.cellId`,
+            // `env.seq`, `envelope.cellId`, `envelope.seq`, `cell.cellId` — straight into the message
+            // with no slice, to say WHICH cell mismatched or rolled back.
+            //
+            // That is safe, and the reason is a different layer rather than this one: an error never
+            // reaches an agent as `.message`, only through `failText`, which re-fences it at
+            // `MAX_ERROR_MESSAGE_CHARS`. So the message half is unbounded-at-mint,
+            // bounded-at-render — the same shape as `claim.error` before this slice existed.
+            //
+            // A cut of that paragraph closed with a second reason: "acceptable here because nothing
+            // retains a message across calls the way `joinState` retains a code". The retention half
+            // of it is false. `JoinState.error` is typed `unknown` and holds the whole error object,
+            // message included, until the next join replaces it — so a message IS retained across
+            // calls, and the sentence was resting on the one claim it had backwards.
+            //
+            // What actually holds is narrower and was never named: on the JOIN path specifically,
+            // every endpoint-chosen value is sliced AT THE MINT, so no endpoint-sized message exists
+            // to be retained. An unnamed reason is an unpinned one, and this one now has a test
+            // rather than a sentence — `FF18` in `client_free_onboard.test.ts` drives the
+            // endpoint-chosen mints on the path at two magnitudes, then sweeps the region and
+            // requires every mint whose message is not a bare literal to be either one of those
+            // driven mints or listed there with the reason its interpolands are client-local.
+            //
+            // It does NOT pin that the driven mints are the only ones that interpolate, and a cut
+            // of this sentence said it did. The sweep's own comment says the opposite in as many
+            // words: driving two mints proves those two are fenced, it does not prove they are the
+            // only two. Adding ANY interpolating mint turns the sweep red — which is the property
+            // worth having, and is not the same claim.
+            //
+            // NO RENDERED LENGTH IS STATED HERE EITHER, for the reason the paragraph above gives
+            // about counts. A cut of this comment did state one — "a 4,000,043-character message
+            // renders as 299 characters" — and it was one fixture's output wearing the grammar of a
+            // property. `failText` renders a `SaihmEndpointError` as fixed chrome plus the fenced
+            // `code`, plus the decimal `status`, plus the message fenced at this budget, so the
+            // total moves with the code and the status and says nothing about the message. The
+            // bound that IS true of the message is the budget named two lines up, and it is named
+            // rather than evaluated.
+            //
+            // Do not replace this with a count of either half. The sweep is the artefact, not its
+            // result: mints are found with `new SaihmEndpointError`, not with a grep for this
+            // constant, and the message half is found by looking for `${` inside a mint that has no
+            // `.slice(` — which is a command anyone can re-run, unlike a number in prose.
             typeof claim.error === 'string'
               ? claim.error.slice(0, MAX_ERROR_CODE_CHARS)
               : 'free_onboard_denied',
