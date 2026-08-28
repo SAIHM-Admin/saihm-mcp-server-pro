@@ -283,9 +283,34 @@ const UPGRADE_HINT =
   'Upgrade to a monthly PRO subscription to keep going — your memories stay on this same key. ' +
   'Run `npx -y @saihm/mcp-server-pro upgrade` for a checkout link.';
 
+/**
+ * The ceiling a quota counter is bounded by BEFORE its grammar is checked, so the work is bounded by
+ * the ANSWER's size and not by the endpoint's input.
+ *
+ * `server.ts`'s `MAX_NUMERIC_CHARS` applies this same principle to the display numbers in
+ * `saihm_status`; the sweep that produced it did not reach here, though these counters arrive through
+ * the same unvalidated cast from the same endpoint-chosen body. Unbounded, this ran its regex and then
+ * `BigInt()` over whatever fit inside `MAX_RESPONSE_BYTES`. MEASURED at 16 MiB of digits: the regex
+ * costs 27.6 ms and `BigInt()` costs 6,124.8 ms, and `maybeNagFromResult` calls this twice per
+ * response on the main thread of a stdio server. Unlike the sibling — whose whole cost was one 212 ms
+ * scan, and whose comment says plainly that no end-to-end impact was demonstrated — that is a stall a
+ * caller would notice. It is still not a boundary breach: the endpoint pays nothing and reads nothing.
+ *
+ * The bound also removes the reason the threshold arithmetic could go wrong, which is the half worth
+ * keeping. `fraction` is `Number(used) / Number(limit)`, and a bigint past ~1.8e308 converts to
+ * `Infinity`, so TWO huge counters gave `NaN` and the `pct >= t` loop then fired nothing — a quota
+ * reported as exhausted produced silence rather than the 100% nag. Every value that survives this cap
+ * converts to a finite double, so that branch is gone rather than merely unlikely.
+ *
+ * 32 clears every real counter with room to spare, and nothing is lost above it: a double stops being
+ * exact at 16 digits, so a value needing more than 32 is not one this client could act on anyway.
+ */
+const MAX_COUNTER_CHARS = 32;
+
 /** Parse a non-negative decimal-string bigint (as bridges serialise counters); `null` if not one. */
 function parseDecimalBig(v: unknown): bigint | null {
-  if (typeof v !== 'string' || !/^[0-9]+$/.test(v)) return null;
+  if (typeof v !== 'string' || v.length > MAX_COUNTER_CHARS) return null;
+  if (!/^[0-9]+$/.test(v)) return null;
   try {
     return BigInt(v);
   } catch {

@@ -1114,3 +1114,52 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
     });
   });
 });
+
+describe('UN25: a quota counter is bounded before it is parsed', () => {
+  // The cap is pinned from BOTH sides at its exact value, so it cannot drift silently: 32 digits must
+  // still nag, 33 must not. Only this pair is a real regression test. The other half of the defect —
+  // two counters past ~1.8e308 converting to `Infinity`, giving `fraction = NaN` and firing NOTHING —
+  // is NOT testable through behaviour, because "fires nothing" is also what the fix produces. Writing
+  // a case for it would assert something true before and after and read as coverage it is not.
+  it('a 33-digit used is unusable data => no nag (the write still succeeds)', async () => {
+    await withMock(
+      async (m) => {
+        const nags: QuotaNag[] = [];
+        const c = freeClient(m.base, 41, (n) => nags.push(n));
+        await c.remember('hello');
+        assert.equal(m.rememberCount(), 1, 'the write is unaffected by unusable telemetry');
+        // Unbounded, this parsed to a bigint and `Number()` divided it by 250 into a huge fraction,
+        // firing a 100% nag off a value no counter can hold. `null` (=> silence) is what the function
+        // already documents for unusable data; the cap is what makes this value reach that branch.
+        assert.equal(nags.length, 0, 'an over-long counter nags not at all, rather than at 100%');
+      },
+      {
+        rememberQuota: [
+          { callType: 'remember', used: '1'.repeat(33), limit: '250' },
+        ],
+      },
+    );
+  });
+
+  it('a 32-digit used is still parsed and still nags', async () => {
+    await withMock(
+      async (m) => {
+        const nags: QuotaNag[] = [];
+        const c = freeClient(m.base, 42, (n) => nags.push(n));
+        await c.remember('hello');
+        assert.equal(m.rememberCount(), 1);
+        assert.equal(nags.length, 1, 'a value AT the ceiling is not rejected by it');
+        assert.equal(nags[0].threshold, 100);
+        assert.equal(nags[0].used, BigInt('1'.repeat(32)));
+        assert.equal(nags[0].limit, 250n);
+        // The clamp, not the raw ratio: `Math.min(1, fraction)` holds even at 1e30x over.
+        assert.equal(nags[0].fraction, 1);
+      },
+      {
+        rememberQuota: [
+          { callType: 'remember', used: '1'.repeat(32), limit: '250' },
+        ],
+      },
+    );
+  });
+});
