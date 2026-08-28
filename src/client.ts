@@ -837,12 +837,24 @@ class SeqState {
 // already carries; document + serialize same-cell writes across clients if you need both to land.
 class RecallCache {
   private cells = new Map<string, RecalledCell>();
+  // Bumped by every mutation that actually changed something. A recall snapshots this BEFORE its
+  // network call and re-checks it after: a response is only allowed to rewrite the cache if no local
+  // write landed while it was in flight. Without that check a response captured before a `forget`
+  // resurrects the cell it erased, and one captured before a `remember` deletes the cell it wrote —
+  // both silently, both defeating the self-write coherence this class exists to provide. A plain
+  // counter is enough because the only question asked of it is "did anything change", never "what".
+  private mutations = 0;
   constructor(private readonly path?: string) {
     if (this.path) this.load();
   }
 
   get configured(): boolean {
     return this.path !== undefined;
+  }
+
+  /** Monotonic mutation count — see `mutations`. Snapshot before an await, compare after. */
+  get version(): number {
+    return this.mutations;
   }
 
   /** Where the cache lives, for a residual message that tells the operator what to go and check. */
@@ -931,12 +943,16 @@ class RecallCache {
       this.cells.set(c.cellId, c);
       changed = true;
     }
-    if (changed) this.persist();
+    if (changed) {
+      this.mutations++;
+      this.persist();
+    }
   }
 
   /** Replace the whole cache from a full recall result, then persist. */
   replaceAll(cells: RecalledCell[]): void {
     this.cells = new Map(cells.map((c) => [c.cellId, c]));
+    this.mutations++;
     this.persist();
   }
 
@@ -946,6 +962,7 @@ class RecallCache {
   upsert(cell: RecalledCell): void {
     if (this.path === undefined) return;
     this.cells.set(cell.cellId, cell);
+    this.mutations++;
     this.persist();
   }
 
@@ -953,7 +970,10 @@ class RecallCache {
    *  endpoint has crypto-shredded (delta would not re-list it, so it must be removed here). */
   remove(cellId: string): void {
     if (this.path === undefined) return;
-    if (this.cells.delete(cellId)) this.persist();
+    if (this.cells.delete(cellId)) {
+      this.mutations++;
+      this.persist();
+    }
   }
 }
 
@@ -2118,9 +2138,22 @@ export class SaihmProClient {
       // already-echoed announcements from `added`, leaving this client with nothing to serve them from
       // and silently TRUNCATING the listing. Full re-announcement every recall is what makes the list
       // complete and lets it be replaced wholesale; the cost is a few hundred bytes per grant.
+      // Snapshotted BEFORE the await. `remember` and `forget` mutate this cache directly so a client
+      // stays coherent with its own writes, and both can land while this request is in flight: the SDK
+      // does not serialise tool handlers and this client is a process-wide singleton, so the endpoint
+      // picks the interleaving simply by choosing when to answer. Everything below rewrites the cache
+      // from a snapshot the endpoint took before those writes existed, so applying it unconditionally
+      // undoes them — measured, both directions: a `forget` during an in-flight recall had the erased
+      // cell's PLAINTEXT written back to disk after the tool reported `complete: true`, and a
+      // `remember` during one had the new cell dropped from the cache entirely.
+      const cacheVersion = this.recallCache.version;
       const resp = await this.call<unknown>('saihm_recall', {
         knownCellIds: this.recallCache.knownCellIds(),
       });
+      // A local write landed while this was in flight, so the response predates it and is not safe to
+      // apply. Skipping the cache write is always sound: this is a cache, the next recall rebuilds it,
+      // and the caller below is still answered from live state. Overwriting is the only unsound option.
+      const cacheIsStale = this.recallCache.version !== cacheVersion;
       // `liveCellIds` is narrowed to `unknown[]`, NOT `string[]`, because `Array.isArray` is all this
       // predicate checks and claiming otherwise would be a type-level lie in exactly the place a
       // reader looks for reassurance. `added` was already honestly typed `unknown[]`, which made the
@@ -2140,7 +2173,13 @@ export class SaihmProClient {
         // that set — so a response of `[null]` would evict the whole cache while looking well-formed.
         // The endpoint can already prune by sending `[]`, so this bounds a type confusion, not a
         // capability; it is here because the cast is what made the confusion invisible.
-        this.recallCache.merge(added, resp.liveCellIds.filter((id): id is string => typeof id === 'string'));
+        // `merge` prunes every cellId missing from the endpoint's live set, so a stale `liveCellIds`
+        // deletes a cell this client wrote after the snapshot. The delta branch cannot RESURRECT a
+        // forgotten cell — the endpoint omits it from `added` because the client already listed it as
+        // known — but it drops a concurrent write exactly as the full branch does, which is why the
+        // guard covers both and not just the one that reaches plaintext.
+        if (!cacheIsStale)
+          this.recallCache.merge(added, resp.liveCellIds.filter((id): id is string => typeof id === 'string'));
         return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated };
       }
       if (!Array.isArray(resp)) {
@@ -2151,7 +2190,7 @@ export class SaihmProClient {
         );
       }
       const { cells, announcements, announcementsTruncated } = this.openRecallRows(resp);
-      this.recallCache.replaceAll(cells);
+      if (!cacheIsStale) this.recallCache.replaceAll(cells);
       return { cells: filter(cells), announcements, announcementsTruncated };
     }
 
