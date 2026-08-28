@@ -1,0 +1,41 @@
+name: CI
+
+# Runs the gate on every push and PR to main.
+#
+# Added because this repository had NO push-triggered verification at all: `release.yml` runs the
+# same gate but only `on: release: published`, so a regression could sit on public main until the
+# next release cut. That ordering does protect what SHIPS -- `npm test` runs before `npm publish`
+# there -- but it is the last gate, not the first.
+#
+# Deliberately no lint or format step: this package declares neither script, and prettier must not
+# be run against this tree. Adding one here would rewrite files wholesale rather than report.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The declared floor (`engines.node` is >=20) and the runtime `release.yml` publishes on.
+        # Testing only one of the two leaves the other unverified, and they are the two that matter.
+        node-version: ['20.x', '24.x']
+    steps:
+      - uses: actions/checkout@v6
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
