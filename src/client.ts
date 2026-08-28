@@ -687,7 +687,7 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
     const secretHex = randomBytes(32).toString('hex');
     mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
     const tmp = `${keyPath}.tmp.${process.pid}.${Date.now()}`;
-    writeFileSync(tmp, secretHex, { mode: 0o600 });
+    writeFileSync(tmp, secretHex, { mode: 0o600, flag: 'wx' });
     renameSync(tmp, keyPath); // atomic; inherits the tmp file's 0600 mode
     created = true;
   }
@@ -757,9 +757,13 @@ class SeqState {
       const c = this.hwm.current(this.agentIdHashHex, cellId);
       if (c !== undefined) obj[cellId] = c.toString(10);
     }
-    mkdirSync(dirname(this.path), { recursive: true });
+    // `mode` applies ONLY when the directory is CREATED — an existing one keeps its own
+    // permissions, so this hardens the path we make and never re-permissions a shared one.
+    // Pinned rather than left to the umask, matching the identity writer above: under a
+    // umask of 0 the default is 0777, and this directory holds cell plaintext at rest.
+    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.tmp.${process.pid}.${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600, flag: 'wx' });
     renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
   }
 
@@ -835,9 +839,13 @@ class RecallCache {
     if (this.path === undefined) return;
     const obj: Record<string, RecalledCell> = {};
     for (const [id, c] of this.cells) obj[id] = c;
-    mkdirSync(dirname(this.path), { recursive: true });
+    // `mode` applies ONLY when the directory is CREATED — an existing one keeps its own
+    // permissions, so this hardens the path we make and never re-permissions a shared one.
+    // Pinned rather than left to the umask, matching the identity writer above: under a
+    // umask of 0 the default is 0777, and this directory holds cell plaintext at rest.
+    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.tmp.${process.pid}.${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600, flag: 'wx' });
     renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
   }
 

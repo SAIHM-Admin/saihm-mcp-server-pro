@@ -10,7 +10,14 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as pathJoin, resolve } from 'node:path';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import {
@@ -595,6 +602,42 @@ test("server.ts: `upgrade` delivers a fragment-bearing checkout URL whole, print
       }),
       dir,
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test("server.ts: a planted symlink at checkout-url.txt cannot redirect the write", async () => {
+  // The footgun this guards is a REVERSION, not a bug: writing the URL directly to a fixed path is
+  // the obvious implementation, and `writeFileSync` follows symlinks. MEASURED on this deployment:
+  // the default state dir `~/.saihm` is 0775 owned by a group with a second member, so a same-group
+  // local user can plant that name as a link to `master_secret.hex` sitting beside it — destroying
+  // the identity, and with it every cell, on the next `upgrade`. Two properties keep that shut and
+  // the test needs both: the tmp write uses `wx` (O_EXCL) so it refuses any path that already
+  // exists, and `renameSync` replaces the destination ENTRY rather than following a link at it.
+  const dir = mkdtempSync(pathJoin(tmpdir(), "saihm-symlink-"));
+  const victim = pathJoin(dir, "master_secret.hex");
+  writeFileSync(victim, "SECRET-IDENTITY-DO-NOT-CLOBBER\n");
+  symlinkSync(victim, pathJoin(dir, "checkout-url.txt"));
+  const mock = startMock({ checkoutUrl: HOSTED_URL });
+  await new Promise<void>((r) => mock.server.listen(0, "127.0.0.1", () => r()));
+  try {
+    const out = await runCli(mock.base() + "/mcp", ["join"], {
+      SAIHM_STATE_DIR: dir,
+    });
+    assert.equal(
+      readFileSync(victim, "utf8"),
+      "SECRET-IDENTITY-DO-NOT-CLOBBER\n",
+      "the symlink target must be untouched",
+    );
+    // Not just "the victim survived": the planted link must have been REPLACED by a real file
+    // holding the URL. A write that silently failed would also leave the victim intact, so this is
+    // what separates the fix from a regression into best-effort silence.
+    const to = pathJoin(dir, "checkout-url.txt");
+    assert.ok(!lstatSync(to).isSymbolicLink(), "the planted link is replaced, not followed");
+    assert.equal(readFileSync(to, "utf8"), HOSTED_URL + "\n");
+    assertCheckoutDelivered(out, dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));

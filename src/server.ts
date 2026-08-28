@@ -24,7 +24,7 @@
  * Boot from env (self-onboard): SAIHM_ENDPOINT_URL, SAIHM_MASTER_SECRET_HEX,
  *   SAIHM_TIER, SAIHM_PAYMENT_METHOD. Advanced/legacy: SAIHM_AUTH_HEADER (static).
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as pathJoin } from 'node:path';
@@ -1040,9 +1040,26 @@ if (selfJoinEnabled()) {
 function persistCheckoutUrl(fenced: string): string {
   try {
     const dir = process.env.SAIHM_STATE_DIR || pathJoin(homedir(), '.saihm');
+    // BOTH `mode` options here apply ONLY ON CREATION — an existing directory or file keeps whatever
+    // permissions it already had, and neither call reports that it did nothing. MEASURED on this
+    // deployment: `~/.saihm` is 0775 owned by a group with a second member, so the 0o700 below is
+    // inert on the path this actually runs against. The mode is still correct to request (it hardens
+    // a directory we DO create) and is deliberately not followed by a `chmodSync`: this directory is
+    // shared with the rest of the SAIHM toolchain, and silently re-permissioning it would reach well
+    // outside this function.
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const to = pathJoin(dir, 'checkout-url.txt');
-    writeFileSync(to, fenced + '\n', { mode: 0o600 });
+    // Write-then-rename with O_EXCL, matching every other persister in this codebase — this was the
+    // one that wrote DIRECTLY to a fixed, fully predictable path in a group-writable directory.
+    // `writeFileSync` follows symlinks, so a same-group local user could plant `checkout-url.txt` as
+    // a link to any file this process can write — `master_secret.hex` beside it being the obvious
+    // target, which would destroy the identity and with it every cell. Two properties close that, and
+    // both are needed: `wx` (O_EXCL) makes the tmp write REFUSE any path that already exists,
+    // including a symlink, and `renameSync` replaces the destination entry itself rather than
+    // following a link at it. The tmp name carries pid + ms so concurrent CLI runs cannot collide.
+    const tmp = `${to}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmp, fenced + '\n', { mode: 0o600, flag: 'wx' });
+    renameSync(tmp, to); // atomic; inherits the tmp file's 0600 mode even if `to` pre-existed at 0644
     return to;
   } catch {
     return '';
