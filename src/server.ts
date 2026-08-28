@@ -1239,21 +1239,81 @@ async function runUpgrade(): Promise<void> {
   );
 }
 
+// argv[2] absent means "run as an MCP server" — the package's primary job, and the default that must
+// not change. An argv[2] that is PRESENT but unrecognized is a different situation: someone mistyped
+// a verb, or reached for `--help`. Matching only the known verbs and letting everything else fall
+// through folded those two cases together, so a typo started a stdio server that waited on stdin
+// forever and printed nothing. The README sends people to a terminal, which made that silence the
+// first thing a mistaken user saw. Discriminate on PRESENCE first, then on match.
+// Spelled as `npx -y @saihm/mcp-server-pro`, not as the bare bin name: no documented install path
+// puts that name on anyone's PATH, and every invocation in the README is the npx form. Printing the
+// bare name would answer a mistyped command with a command that is not found either.
+const CLI_USAGE: string = [
+  `@saihm/mcp-server-pro ${PACKAGE_VERSION}`,
+  '',
+  'Usage:',
+  '  npx -y @saihm/mcp-server-pro                 run as an MCP server over stdio (default)',
+  '  npx -y @saihm/mcp-server-pro free-join       join the free tier — nothing to configure',
+  '  npx -y @saihm/mcp-server-pro join            join a paid tier directly',
+  '  npx -y @saihm/mcp-server-pro upgrade [TIER]  move a free identity to a monthly paid tier',
+  '',
+  'Environment:',
+  '  free-join  nothing — it generates and stores your key for you',
+  '  join       SAIHM_MASTER_SECRET_HEX or SAIHM_MASTER_SECRET_FILE, plus SAIHM_TIER',
+  '             and SAIHM_PAYMENT_METHOD',
+  '  upgrade    your key, and SAIHM_TIER=FREE. TIER defaults to PRO and can also be',
+  '             given as SAIHM_UPGRADE_TIER',
+  '',
+  'Options:',
+  '  -h, --help     show this message',
+  '  -v, --version  print the version',
+  '',
+].join('\n');
+
 async function main(): Promise<void> {
-  if (process.argv[2] === 'join') {
+  const verb = process.argv[2];
+
+  if (verb === undefined || verb === '') {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    return;
+  }
+  if (verb === 'join') {
     await runJoin();
     return;
   }
-  if (process.argv[2] === 'free-join') {
+  if (verb === 'free-join') {
     await runFreeJoin();
     return;
   }
-  if (process.argv[2] === 'upgrade') {
+  if (verb === 'upgrade') {
     await runUpgrade();
     return;
   }
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  if (verb === '-h' || verb === '--help' || verb === 'help') {
+    process.stdout.write(CLI_USAGE);
+    return;
+  }
+  if (verb === '-v' || verb === '--version') {
+    process.stdout.write(`${PACKAGE_VERSION}\n`);
+    return;
+  }
+  // The rejected argument gets a line of its own, undelimited, the way every other caller-supplied
+  // value in this file is printed. Wrapping it in quotes instead hands it an escape: the fence
+  // collapses control characters and the label metacharacters, but not the delimiter, so an argument
+  // carrying a quote closes the field early and continues in prose that reads as ours.
+  //
+  // safeScalar, not safeField: a verb is a short token, and the wider budget is documented as a
+  // verification-URI size. Under it a rejected argument echoes back far more attacker-chosen text
+  // than any real verb is long.
+  //
+  // exitCode rather than exit(): stderr is a pipe as often as a terminal, and exit() can drop a
+  // write that has not drained. Returning lets the process end on its own once this one has.
+  process.stderr.write(
+    ['saihm: unrecognized argument', `  ${safeScalar(verb)}`, '', CLI_USAGE].join('\n'),
+  );
+  process.exitCode = 2;
+  return;
 }
 
 main().catch((e) => {
