@@ -375,11 +375,15 @@ server.registerTool(
         // than a cited one — it is an unfalsifiable one, and it failed the same way twice.
         //
         // The argument for including a bare CR — a host honouring it starts a fresh visual line —
-        // applies verbatim to all ten. This is the one render site where they survive, because it
-        // deliberately does not scrub; every other site's `safeField` replaces the whole
-        // below-U+0020 range, which is why the gap was unique to this line. Normalising a line ending
-        // is the one alteration worth making — every other byte of the memory survives verbatim,
-        // which is the property scrubbing could not offer.
+        // applies verbatim to all ten. This site deliberately does not scrub AND marks every line
+        // that survives, and it is the only one that does both. "The one render site where
+        // terminators survive" would be too broad, and this comment said it: own-cell `plaintext` is
+        // interpolated raw in the branch below, so all ten survive there too — a residual the
+        // `sharedLines` block states rather than closes. What is unique here is WHOSE content it is.
+        // Every site that fences an ENDPOINT-chosen value scrubs the whole below-U+0020 range through
+        // `safeField`, which is why the gap existed on these two lines and nowhere else. Normalising
+        // a line ending is the one alteration worth making — every other byte of the memory survives
+        // verbatim, which is the property scrubbing could not offer.
         //
         // Length is deliberately NOT capped, matching the own-memory branch: truncating a memory the
         // agent explicitly requested would corrupt the answer to its own question. The residual is a
