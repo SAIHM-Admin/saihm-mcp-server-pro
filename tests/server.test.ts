@@ -489,11 +489,15 @@ test('server.ts: `join` CLI cannot have extra instructions forged into it', asyn
 // opaque padding to the measured length, drawn only from the alphabet that measurement attests
 // (base64 plus percent-escapes).
 //
-// RESIDUAL, stated because it cannot be closed from here: only the first 40 characters of a live
-// fragment were ever recorded, so the full alphabet is unattested. `safeField` replaces `[`, `]` and
-// `|` with `?`, so a live fragment containing one of those unescaped would be delivered corrupt.
-// Nothing observed suggests it does, and inventing such a character here would assert a premise no
-// measurement supports.
+// RESIDUAL, now DISCHARGED — kept because what closed it was the grammar, not a longer capture.
+// Only the first 40 characters of a live fragment were ever recorded, so its alphabet is unattested
+// HERE, and `safeField` replaces `[`, `]` and `|` with `?`. RFC 3986 settles it independently: `[`
+// and `]` are gen-delims reserved for an IP-literal HOST and `|` is outside the URI grammar, so no
+// conforming fragment carries any of the three unescaped, while every character admitted by
+// `fragment = *( pchar / "/" / "?" )` is printable ASCII outside the scrub set. server_render_fence
+// .test.ts pins that whole alphabet through the fence byte-identical. The live risk is therefore no
+// longer an unmeasured fragment — it is a future edit WIDENING the scrub, and that is what is now
+// guarded.
 const FRAGMENT = (
   "fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSd2cG" +
   "Jyd2YGB3c2B2YFVrJz8nZGZmYHZxWjA0S0BLPWFEZ21NRlZQNTFXcXR3TktMNTNx%2F".repeat(

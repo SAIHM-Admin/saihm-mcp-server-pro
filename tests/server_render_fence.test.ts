@@ -14,6 +14,7 @@ import { strict as assert } from 'node:assert';
 import { readFileSync, readdirSync } from 'node:fs';
 import {
   MALFORMED,
+  MAX_CHECKOUT_URL_CHARS,
   MAX_ERROR_MESSAGE_CHARS,
   MAX_JOIN_FIELD_CHARS,
   MAX_SCALAR_CHARS,
@@ -126,6 +127,53 @@ test('safeField neutralises the characters that give a memory line its shape', (
   assert.ok(!out.includes('\n'), 'no newline may survive — one line in, one line out');
   assert.ok(!/[[\]|]/.test(out), 'the bracket/pipe skeleton must be gone');
   assert.ok(!mints(out), 'the payload must not read as an authenticated memory');
+});
+
+test('every character RFC 3986 permits in a fragment survives the fence — checkout is delivered whole', () => {
+  // The counterpart to the test above. That one pins what the scrub MUST remove; this one pins what it
+  // must NOT, and the paid path is why the second half matters. `runJoin`/`runUpgrade` fence the
+  // hosted-checkout URL ONCE and hand the SAME `fenced` string to both delivery channels — the printed
+  // block and `persistCheckoutUrl` — so widening this scrub by a single character corrupts the printed
+  // link and the saved file together, and Stripe refuses the result as incomplete. Nothing goes red on
+  // that path; the only observer is a payer who cannot pay.
+  //
+  // `tests/server.test.ts` states a residual against exactly this: only the first 40 characters of a
+  // live fragment were ever recorded, so its alphabet is unattested, and inventing a `[` in that
+  // FIXTURE would assert a premise no measurement supports. That reticence is right for a fixture and
+  // unnecessary here, because the alphabet is attested by the GRAMMAR rather than by any capture. RFC
+  // 3986 gives `fragment = *( pchar / "/" / "?" )` with `pchar = unreserved / pct-encoded / sub-delims
+  // / ":" / "@"`. `[` and `]` are gen-delims reserved for an IP-literal HOST, and `|` is outside the
+  // URI grammar altogether, so no conforming fragment can carry any of the three unescaped — which
+  // makes enumerating what the grammar DOES permit a COMPLETE test of the legal alphabet, not a guess.
+  const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  const unreserved = `${ALPHA}0123456789-._~`;
+  const subDelims = "!$&'()*+,;=";
+  const legal = `${unreserved}${subDelims}:@/?`;
+
+  // The invariant in one line: the legal alphabet and the scrub set are DISJOINT. Asserted rather than
+  // left to the comment, because it is the whole reason the identity below holds.
+  assert.ok(!/[[\]|]/.test(legal), 'no RFC 3986 fragment character may sit in the scrub set');
+  assert.ok(!/[^\x20-\x7E]/.test(legal), 'the entire legal alphabet is printable ASCII');
+
+  assert.equal(
+    safeField(legal, MAX_CHECKOUT_URL_CHARS),
+    legal,
+    'a conforming fragment must cross the fence byte-identical — one `?` here is a dead payment link',
+  );
+
+  // The escaped forms are how a live fragment legitimately carries the three scrubbed characters, and
+  // the measured fixture is full of `%2F`. They must survive AS TEXT, never decoded and then scrubbed.
+  assert.equal(safeField('%5B%5D%7C%20', MAX_CHECKOUT_URL_CHARS), '%5B%5D%7C%20');
+
+  // Non-vacuity: deleting the scrub must not satisfy this test. The RAW characters still have to go.
+  assert.equal(safeField('a[b]c|d', MAX_CHECKOUT_URL_CHARS), 'a?b?c?d');
+
+  // The budget is the other way to corrupt a link, since a truncation marker breaks it just as surely
+  // as a `?`. The measured hosted URL is 523 characters against 2048, so assert the headroom exists
+  // rather than trusting it.
+  const realistic = `https://checkout.stripe.com/c/pay/cs_live_${'a'.repeat(58)}#${legal.repeat(4)}`;
+  assert.ok(realistic.length < MAX_CHECKOUT_URL_CHARS, 'the fixture must sit inside the budget');
+  assert.equal(safeField(realistic, MAX_CHECKOUT_URL_CHARS), realistic);
 });
 
 test('an endpoint-supplied ellipsis is collapsed — the truncation marker is unforgeable', () => {
