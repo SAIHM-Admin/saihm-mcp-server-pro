@@ -261,8 +261,10 @@ Tracked separately.
 
 ### Compatibility
 
-No error's `message` changes, and neither does the tool LIST nor the public API of
-`index.js`. Nine narrower things do change. ONE is a regression for some inputs and is
+The tool LIST does not change, and neither does the public API of `index.js`. Ten
+narrower things do change, and one of them is that some error MESSAGES change — an
+earlier draft of this section opened by claiming none did, which was wrong on three
+boot messages and is corrected in its own bullet below. ONE is a regression for some inputs and is
 marked as such below; two more are breaking without being regressions (the
 `SaihmConfigError` class change and the generated types); the rest are fixes:
 
@@ -330,8 +332,15 @@ marked as such below; two more are breaking without being regressions (the
   get longer and stop mangling non-ASCII. Measured with a 400-character home, one
   such message goes from 257 to 437 characters — measured on `ENAMETOOLONG` from
   `mkdir` under a 400-character `SAIHM_HOME`, which is the shape the figure names.
-- **Three configuration errors that name a path or URL now throw
-  `SaihmConfigError` rather than `Error`.** The message is byte-identical, but
+- **Four configuration errors that name a path or URL now throw
+  `SaihmConfigError` rather than `Error`.** Three of the four keep a byte-identical
+  message — the invalid `SAIHM_ENDPOINT_URL`, the unreadable
+  `SAIHM_MASTER_SECRET_FILE` and the unreadable self-join identity file. The fourth
+  is the malformed-secret pair described in the message bullet above, whose text
+  changes as well, and which throws `SaihmConfigError` only when the secret came from
+  a FILE (`SAIHM_MASTER_SECRET_FILE` or the self-join identity file) and a plain
+  `Error` when it came from `SAIHM_MASTER_SECRET_HEX`, because only a path has a path
+  to widen the render to. For the three that keep their text,
   `e.name`, `String(e)`, the first line of `e.stack`, `JSON.stringify(e)` and
   `Object.keys(e)` differ — the last two because `SaihmConfigError` carries TWO new
   enumerable own properties: `valueKind` (`'path'` or `'url'`), which is how the
@@ -340,6 +349,20 @@ marked as such below; two more are breaking without being regressions (the
   against `[]` for a plain `Error`. Code matching `/^Error: SAIHM_/` against one of them
   should match the message or use `instanceof` instead. Other configuration errors
   still throw plain `Error`. `SaihmEndpointError` has always presented this shape.
+- **Three boot error messages change.** A malformed secret used to be reported
+  against `SAIHM_MASTER_SECRET_HEX` whatever its actual source, so a corrupt self-join
+  identity file produced `SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex.`
+  for a caller who had never set that variable. The message now names the source it
+  read: `SAIHM_MASTER_SECRET_FILE <path>`, `SAIHM_MASTER_SECRET_HEX`, or
+  `the self-join identity file <path>`. Two consequences for anyone matching on the
+  text: `must be canonical lowercase hex` is now `must hold canonical lowercase hex`,
+  which changes for EVERY source including `SAIHM_MASTER_SECRET_HEX`; and
+  `must decode to >= 32 bytes` keeps its wording but gains a different prefix whenever
+  the secret came from a file. Third, `SAIHM_MASTER_SECRET_HEX (or
+  SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars).` is gone from the
+  configured-but-empty path, replaced by the two messages in the empty-secret bullet
+  above. Match on `instanceof SaihmConfigError`, or on the variable name, rather than
+  on these strings.
 - **Generated types for deep paths change:** `dist/render_fence.d.ts` loses
   `MAX_CHECKOUT_URL_CHARS` and gains `safePathField` plus four constants;
   `dist/client.d.ts` gains `SaihmConfigError`, `markPathBearing`, `isPathBearing` and

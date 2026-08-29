@@ -404,7 +404,15 @@ export class SaihmEndpointError extends Error {
  * The value stays IN the message. An earlier cut carried it out to a separate field and dropped it
  * from the message, which regressed a documented library entry point: consumers of `bootFromEnv()`
  * catch these and read `.message`, and `.message` was never the truncated thing — only the render
- * was. `.message` is byte-identical to what these sites threw before.
+ * was.
+ *
+ * `.message` is byte-identical to what these sites threw before at THREE of the four — the invalid
+ * `SAIHM_ENDPOINT_URL`, the unreadable `SAIHM_MASTER_SECRET_FILE` and the unreadable self-join
+ * identity file. It is NOT at the fourth, and this line used to say it was of all of them.
+ * `badSecret` rewrote its own text in the same release, to name the source it actually read instead
+ * of blaming `SAIHM_MASTER_SECRET_HEX` for a corrupt file the caller never set — a fix, but a
+ * message change, and the two facts were stated as one. The type change and the text change are
+ * independent and are disclosed separately in CHANGELOG.md.
  *
  * Not "nothing changes", which was the first wording and is refuted by measurement: `name` goes
  * `Error` -> `SaihmConfigError`, so `String(e)`, the first line of `e.stack`, and `JSON.stringify(e)`
