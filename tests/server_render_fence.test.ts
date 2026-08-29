@@ -240,6 +240,49 @@ const fenceOf = (n: ts.Node): 'safeField' | 'safePathField' | null => {
   return null;
 };
 
+/**
+ * The caller-actionable values this file is about, and what counts as NAMING one.
+ *
+ * A name, however it is SPELLED - and a spelling is not only a token. `s['key' + 'Path']` and
+ * s[`key${''}Path`] reach the same property as `s.keyPath`, and both were measured rendering a
+ * caller-chosen path unfenced with the whole suite green, because the previous cut asked for a
+ * string LITERAL. It said it privileged no position; it privileged a SHAPE, which is the same
+ * mistake one level down. So a string-valued expression is FOLDED - concatenation and template
+ * substitution, to any depth, while every part is constant - and a fragment of a larger constant
+ * string is not a second occurrence of it.
+ *
+ * RESIDUAL, measured and written down rather than claimed away: this is keyed on the NAME, so a
+ * value reached WITHOUT naming it - `Object.entries(s)`, a `for...in`, a spread - is outside it by
+ * construction, and no widening of a name matcher reaches it. That class is enumerated by its own
+ * instrument instead, because the honest closure for "no name appears" is a different question.
+ */
+const SEEDS = ['keyPath', 'secretFile', 'savedTo', 'localCacheResidual', 'SAIHM_HOME'];
+const foldString = (n: ts.Node): string | null => {
+  if (ts.isStringLiteralLike(n)) return n.text;
+  if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n)) return foldString(n.expression);
+  if (ts.isTemplateExpression(n)) {
+    let out = n.head.text;
+    for (const sp of n.templateSpans) {
+      const v = foldString(sp.expression);
+      if (v === null) return null;
+      out += v + sp.literal.text;
+    }
+    return out;
+  }
+  if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const l = foldString(n.left);
+    const r = foldString(n.right);
+    return l === null || r === null ? null : l + r;
+  }
+  return null;
+};
+const seedOf = (n: ts.Node): string | null => {
+  if (ts.isIdentifier(n)) return SEEDS.includes(n.text) ? n.text : null;
+  if (n.parent !== undefined && foldString(n.parent) !== null) return null;
+  const t = foldString(n);
+  return t !== null && SEEDS.includes(t) ? t : null;
+};
+
 /** The same treatment for a LOCAL declaration - a helper that is never exported, such as `ok`. */
 const localSymbol = (file: string, name: string): ts.Symbol => {
   const sf = SOURCES().find((x) => x.file === file)?.sf;
@@ -1441,6 +1484,24 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       const budget = (c as ts.CallExpression).arguments[1];
       const key = `${fn}:${budget === undefined ? '<missing>' : budget.getText(sf)}`;
       tally[key] = (tally[key] ?? 0) + 1;
+      // THE VALUE, which this sweep names as its subject and did not read. The pair below is
+      // checked fence-against-budget; the ARGUMENT was never looked at, so `safeField(s.keyPath ??
+      // '', MAX_JOIN_FIELD_CHARS)` - a caller-chosen PATH through the ASCII-collapsing fence at a
+      // non-path budget - is a consistent pair, leaves the tally byte-identical because only the
+      // argument changed, and passed 45 of 45. The occurrence sweep cannot cover it either: it
+      // EXEMPTS everything inside a fence call's arguments, by design. So the defect class this
+      // file is named for had no mechanism at all, in either direction.
+      const arg0 = (c as ts.CallExpression).arguments[0];
+      const carried = arg0 === undefined ? [] : walk(arg0).map(seedOf).filter((x) => x !== null);
+      if (carried.length > 0)
+        assert.equal(
+          fn,
+          'safePathField',
+          `${file}:${sf.getLineAndCharacterOfPosition(c.getStart(sf)).line + 1}: \`` +
+            `${carried[0]}\` is a caller-actionable value rendered through the ASCII fence, which ` +
+            'collapses every non-ASCII code unit to `?`. That produces a bounded path that does ' +
+            'not exist - actionable-looking and not actionable. Use safePathField at a path budget',
+        );
     }
     // THE INVARIANT, not merely the tally: a path budget may be rendered ONLY through the path
     // fence, and the path fence may render ONLY a path budget. safeField collapses every non-ASCII
@@ -2425,7 +2486,6 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // the whole suite. That is the exact defect this sweep's preamble cites as its reason to exist,
   // re-opened by the sweep's own convenience. An alias can only ever REMOVE names from the count,
   // so it has no safe form here: the fence SPAN is the only exemption, and it is positional.
-  const SEEDS = ['keyPath', 'secretFile', 'savedTo', 'localCacheResidual', 'SAIHM_HOME'];
   const ALLOWED: Record<string, Record<string, number>> = {
     // Every entry is an argument, a declaration, a truthiness test or an env write - none reach a
     // rendered line. The one that DOES is `secretFile` at the throw site: deliberately unfenced
@@ -2466,30 +2526,7 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       keyPath: 9,
     },
   };
-  // An occurrence is a NAME, however it is spelled. Counting only `ts.isIdentifier` meant
-  // `s['keyPath']` and `process.env['SAIHM_HOME']` were not occurrences at all, so an unfenced
-  // caller-chosen path shipped green through the one sweep whose entire job is catching a value
-  // rendered with NO fence - measured, twice, at 43 pass / 0 fail. Bracket notation is a spelling,
-  // and this file's whole argument is that a guard keyed on spelling is a guard with an exit.
-  //
-  // ANY string literal that spells a seed, in ANY position - which is a widening of the cut above,
-  // and the reason is that the cut above replaced one spelling gate with another. It admitted a seed
-  // literal ONLY as the argument of an ElementAccessExpression, so `Reflect.get(s, 'keyPath')` was
-  // not an occurrence: same value, same caller-chosen path, reached by a different property-access
-  // primitive. MEASURED both ways - planted at a render site in `server.ts`, the previous rule stayed
-  // at 45 pass and this one goes red. Enumerating the property-access primitives that count
-  // (`Reflect.get`, `Object.getOwnPropertyDescriptor`, ...) would be the hand-kept list this file
-  // indicts on every other page, so no position is privileged at all.
-  //
-  // The widening cost NOTHING here, measured: not one ALLOWED count changed, because `src/` spells
-  // these names as identifiers everywhere else. Where it does cost something later - a seed name
-  // appearing inside a message string - the answer is the one this sweep always gives: write it down
-  // with its reason. A false positive costs a line in ALLOWED; a false negative ships an unfenced
-  // path on the line naming the only key to the caller's memory.
-  const seedOf = (n: ts.Node): string | null => {
-    if (ts.isIdentifier(n)) return SEEDS.includes(n.text) ? n.text : null;
-    return ts.isStringLiteralLike(n) && SEEDS.includes(n.text) ? n.text : null;
-  };
+  // `seedOf` is defined once, at module scope, with the widening and the residual it carries.
   // Proved on the SPELLINGS, not only on the tree it is about to read. `src/` contains no seed
   // string literal at all today, so every string-literal branch above is unexercised by the sweep
   // itself - an instrument whose interesting half never runs on the real input is an instrument
@@ -2498,6 +2535,9 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     ['identifier', 'const x = keyPath;', 1],
     ['element access', "const x = s['keyPath'];", 1],
     ['Reflect.get', "const x = Reflect.get(s, 'keyPath');", 1],
+    ['concatenation', "const x = s['key' + 'Path'];", 1],
+    ['template', 'const x = s[`key${``}Path`];', 1],
+    ['fragment counts once', "const x = s['keyPath' + ''];", 1],
     ['descriptor lookup', "const x = Object.getOwnPropertyDescriptor(s, 'savedTo');", 1],
     ['object key', "const x = { 'secretFile': 1 };", 1],
     ['unrelated name', 'const x = somethingElse;', 0],
@@ -2536,6 +2576,53 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     ALLOWED,
     'a caller-chosen value occurs outside a fence at a site not written down here. Fence it, or ' +
       `add it to ALLOWED with the reason it is safe. Every occurrence found:\n${where.join('\n')}`,
+  );
+
+  // THE ANONYMOUS CLASS, which no name matcher reaches at any width. `for (const [k, v] of
+  // Object.entries(s))` renders the same caller-chosen path with the name written NOWHERE, and it
+  // was measured shipping an unfenced keyPath straight past the sweep above. Widening `seedOf`
+  // closed two spellings and cannot close this one, because there is no name to spell. So the reads
+  // that need no name are ENUMERATED, on the same terms as everything else here: pinned per file,
+  // each with the reason it is safe. A new one costs a line in this table, and that line is where
+  // someone has to say why iterating an object into a rendered string is not this file's defect
+  // wearing a shape the sweep above is blind to.
+  //
+  // Both of today's are seq-state parsing in `client.ts`, over cellIds, reaching no renderer.
+  const ANON: Record<string, number> = { 'client.ts': 2 };
+  const anonIn = (sf: ts.SourceFile): ts.Node[] =>
+    walk(sf).filter(
+      (n) =>
+        ts.isForInStatement(n) ||
+        (ts.isCallExpression(n) &&
+          ts.isPropertyAccessExpression(n.expression) &&
+          ts.isIdentifier(n.expression.expression) &&
+          n.expression.expression.text === 'Object' &&
+          ['entries', 'values', 'keys', 'getOwnPropertyNames', 'getOwnPropertySymbols'].includes(
+            n.expression.name.text,
+          )),
+    );
+  // Proved able to FIND before it is trusted to report a count, on both primitives and on a shape
+  // it must NOT claim.
+  for (const [shape, src, want] of [
+    ['entries', 'for (const [k, v] of Object.entries(s)) void k;', 1],
+    ['keys', 'const x = Object.keys(s);', 1],
+    ['for-in', 'for (const k in s) void k;', 1],
+    ['a named read', 'const x = s.keyPath;', 0],
+  ] as const)
+    assert.equal(anonIn(parse(src)).length, want, `the anonymous-read finder is wrong on: ${shape}`);
+  const anon: Record<string, number> = {};
+  const anonWhere: string[] = [];
+  for (const { file, sf } of SOURCES())
+    for (const n of anonIn(sf)) {
+      anon[file] = (anon[file] ?? 0) + 1;
+      anonWhere.push(`${file}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`);
+    }
+  assert.deepEqual(
+    anon,
+    ANON,
+    'an object is read WITHOUT naming its properties, at a site not written down here. The name ' +
+      'sweep above cannot see this shape at any width. Write it down with the reason it reaches ' +
+      `no renderer, or fence what it renders. Every anonymous read found:\n${anonWhere.join('\n')}`,
   );
 });
 
