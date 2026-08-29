@@ -366,6 +366,28 @@ const parse = (text: string): ts.SourceFile =>
  * That is the same failure this whole rewrite exists to end, one layer down, so the traversal is
  * positive-controlled at each call site by `assertWalked` rather than trusted.
  */
+// The render helpers a value can be fenced THROUGH. Module-scoped because more than one sweep needs
+// it: it lived inside the labelSafe sweep, and the delimiter sweep directly above it kept asking
+// `fenceOf` alone - which knows two names of five - so three fences were invisible to it. That is the
+// same one-arm shape this list was introduced to close, one sweep over.
+// Every function render_fence.ts exports, classified. Five are the SCALAR_FENCES below; three are
+// the closed-set checkers, which answer a marker rather than fencing free text; `labelSafe` scrubs
+// `=` and is applied ON TOP of a fence rather than instead of one; `failText` composes a message out
+// of the others. A name appearing here that is not in one of those groups is the question this pin
+// exists to ask.
+const SAFESCALAR_SITES_PIN = 23;
+const RENDER_HELPER_EXPORTS: string[] = [
+  'boundedOrMarker', 'epochOrMarker', 'failText', 'hexOrMarker', 'labelSafe',
+  'safeField', 'safePathField', 'safeScalar', 'scopeOrMarker', 'shortScalar',
+];
+const SCALAR_FENCES = [
+  'safeField', 'safePathField', 'safeScalar', 'shortScalar', 'boundedOrMarker',
+];
+const isFenceCall = (d: ts.Node): boolean => {
+  const dd = calleeDecl(d);
+  return dd !== undefined && SCALAR_FENCES.some((f) => dd === declOf('render_fence.ts', f));
+};
+
 const walk = (n: ts.Node, out: ts.Node[] = []): ts.Node[] => {
   out.push(n);
   n.forEachChild((c) => {
@@ -2423,7 +2445,7 @@ test('the closed-set checkers are `=`-free, which is why labelSafe skips them', 
   assert.ok(!MALFORMED.includes('='), 'the shared marker itself');
 });
 
-test('the closed-set checkers survive a NON-STRING, all three of them', () => {
+test('every exported renderer survives a NON-STRING - three checkers AND three fences', () => {
   // Written as ONE sweep over all three deliberately. The `typeof` guard was first added to
   // `epochOrMarker` alone, over a sentence asserting "its two siblings resist structurally (one by
   // strict equality, one by a length guard)". Half of that was false, and the false half was the
@@ -2461,6 +2483,37 @@ test('the closed-set checkers survive a NON-STRING, all three of them', () => {
       }
       assert.strictEqual(typeof out, 'string', `${name} must return the type it declares`);
       assert.strictEqual(out, MALFORMED, `${name} rendered a non-string value instead of the marker`);
+    }
+
+  // The FENCES take the same input class under the same module-header disclaimer, and this list is
+  // where the previous fix stopped: it was keyed on a list precisely so a fix could not reach one
+  // arm, and then the list held only the checkers. `safeField` and its siblings DEREFERENCE their
+  // argument, so a non-string cost the whole response exactly as a checker did.
+  //
+  // The budgeted fences appear at two very different `max` values because the guard must sit BEFORE
+  // the slice: one placed after it still throws on the shapes whose `.length` is a lie.
+  const FENCES = [
+    ['safeField@8', (v: unknown) => safeField(v as string, 8)],
+    ['safeField@64', (v: unknown) => safeField(v as string, 64)],
+    ['safePathField@8', (v: unknown) => safePathField(v as string, 8)],
+    ['safePathField@4096', (v: unknown) => safePathField(v as string, 4096)],
+    ['labelSafe', (v: unknown) => labelSafe(v as string)],
+  ] as const;
+  for (const v of HOSTILE)
+    for (const [name, fn] of FENCES) {
+      let out: string;
+      try {
+        out = fn(v);
+      } catch (e) {
+        assert.fail(
+          `${name}(${String(typeof v)}) THREW ${(e as Error).message} - a render helper that throws ` +
+            'costs the whole tool response, not one field',
+        );
+      }
+      assert.strictEqual(typeof out, 'string', `${name} must return the type it declares`);
+      // Not asserted against a literal: each fence applies its OWN budget and scrub, so the property
+      // is that a non-string is rendered exactly as the marker STRING would be through that fence.
+      assert.strictEqual(out, fn(MALFORMED), `${name} did not fence a non-string as the marker`);
     }
 });
 
@@ -2621,7 +2674,15 @@ test('EVERY `safeScalar` call site takes the DEFAULT budget — the sweep itself
   // A sweep that found nothing would pass this test while asserting nothing, which is the failure
   // mode that makes a clean count untrustworthy. Pin that the matcher actually ran, and pin that it
   // reached BOTH modules - the exact coverage the prose it replaces did not have.
-  assert.ok(sites.length > 0, 'the sweep matched no call sites at all - the matcher is broken, not the source');
+  // A COUNT, not a `> 0`, matching its three sibling sweeps. `> 0` cannot tell "the matcher still
+  // works" from "the matcher now sees one site of nine": a predicate that narrows keeps this green
+  // while the sweep quietly stops covering most of what it names.
+  assert.equal(
+    sites.length,
+    SAFESCALAR_SITES_PIN,
+    'the safeScalar sweep matched a different number of call sites than it is pinned to. If a site ' +
+      'was added or removed on purpose, update the pin in that commit and name the site that moved',
+  );
   assert.ok(
     modules.has('render_fence.ts') && modules.has('server.ts'),
     `the sweep must reach every module that calls safeScalar; it saw ${[...modules].sort().join(', ')}`,
@@ -3731,7 +3792,54 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   );
 });
 
+test('the render-helper export set is PINNED, so a sixth fence cannot join unnoticed', () => {
+  // `SCALAR_FENCES` is a hand-kept list of five names, and every sweep that asks "is this value
+  // fenced" trusts it. Nothing asserted the list was COMPLETE: adding a sixth exported helper and
+  // rendering an endpoint value through it left every sweep green, because a fence they cannot name
+  // is not a fence they can miss. The examined-slot pins do not catch it either - a slot the
+  // predicate cannot see is a slot it never counted, so the count stays put.
+  //
+  // Pinned as a SET rather than derived by a shape heuristic: any rule for "which exports are
+  // fences" is itself a predicate that can be too narrow, which is the defect one level up. A new
+  // export is a red line that asks the author one question - is this a fence? - and the answer goes
+  // in `SCALAR_FENCES` or in the exclusion below, in the same commit.
+  const sf = SOURCES().find((s) => s.file === 'render_fence.ts');
+  assert.ok(sf, 'render_fence.ts is not among the swept sources');
+  const exported: string[] = [];
+  sf.sf.forEachChild((n) => {
+    const mods = ts.canHaveModifiers(n) ? ts.getModifiers(n) : undefined;
+    if (!mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return;
+    if (ts.isFunctionDeclaration(n) && n.name) exported.push(n.name.text);
+    else if (ts.isVariableStatement(n))
+      for (const d of n.declarationList.declarations)
+        if (
+          ts.isIdentifier(d.name) &&
+          d.initializer &&
+          (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))
+        )
+          exported.push(d.name.text);
+  });
+  assert.deepEqual(
+    exported.sort(),
+    RENDER_HELPER_EXPORTS,
+    'the exported render helpers of render_fence.ts changed. If you ADDED one, decide whether it ' +
+      'fences an endpoint-chosen value: if it does, add it to SCALAR_FENCES so every sweep can see ' +
+      'it, and if it does not, say so here. A helper missing from that list is invisible to all ' +
+      'four sweeps at once',
+  );
+  // The fences among them, restated so the two lists cannot drift apart silently.
+  for (const f of SCALAR_FENCES)
+    assert.ok(exported.includes(f), `SCALAR_FENCES names ${f}, which render_fence.ts does not export`);
+});
+
 test('a fenced value is never rendered INSIDE a delimiter it could close', () => {
+  // NON-VACUITY, which the sibling label sweep carries and this one did not. Every predicate failure
+  // this sweep has had presented the same way: GREEN because nothing was examined. A count, not a
+  // `> 0`, so that a predicate narrowing which silently drops slots is a red line rather than a
+  // quieter pass. The number is measured from real `src/`; if a render site is legitimately added or
+  // removed, update it in the same commit and say which site moved.
+  const EXAMINED_SPANS_PIN = 45;
+  let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
   // shipped, and a path holding `)` closes the parenthetical early, inside a tool result a human
@@ -3832,8 +3940,14 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
         // A span CARRIES a fenced value when it calls a fence, or names one of the caller-chosen
         // values this file is about - which covers `${keyPath}`, a local bound from a fence call
         // above, as well as the fence call written inline.
-        const carries = walk(sp.expression).some((d) => fenceOf(d) !== null || seedOf(d) !== null);
+        // `isFenceCall` as well as `fenceOf`: the latter knows `safeField`/`safePathField` only, so a
+        // value fenced through `safeScalar`, `shortScalar` or `boundedOrMarker` was not seen to be a
+        // fenced value at all, and this sweep skipped it before ever looking at its delimiters.
+        const carries = walk(sp.expression).some(
+          (d) => fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d),
+        );
         if (!carries) return;
+        examinedSpans++;
         // The value's rendered LINE, not the chunk up to the next span. `sp.literal.text` stops at
         // the following interpolation, so `(${fence(x)}${flag ? ', y' : ''})` rendered a
         // parenthetical this sweep could not see. Interpolations contribute no static text - what
@@ -3848,6 +3962,13 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
       });
     }
   }
+  assert.equal(
+    examinedSpans,
+    EXAMINED_SPANS_PIN,
+    'the delimiter sweep examined a different number of fenced values than it was pinned to. If a ' +
+      'render site was added or removed on purpose, update the pin in that commit; if not, a ' +
+      'predicate just narrowed and this sweep is now looking at less than it claims',
+  );
   assert.deepEqual(
     found,
     [],
@@ -3948,13 +4069,6 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
   };
   // `boundedOrMarker` is in this list because it is an exported fence that does NOT scrub `=`;
   // leaving it out would have made it the one renderable fence with no labelled-line obligation.
-  const SCALAR_FENCES = [
-    'safeField', 'safePathField', 'safeScalar', 'shortScalar', 'boundedOrMarker',
-  ];
-  const isFenceCall = (d: ts.Node): boolean => {
-    const dd = calleeDecl(d);
-    return dd !== undefined && SCALAR_FENCES.some((f) => dd === declOf('render_fence.ts', f));
-  };
   const rendersFenced = (n: ts.Expression): boolean =>
     walk(hop(n)).some((d) => fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d));
   // APPLIED, not merely PRESENT, and resolved through the CHECKER rather than by name. Containment

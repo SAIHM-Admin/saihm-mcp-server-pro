@@ -6,6 +6,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
+
+// How long a spawned-CLI oracle waits for its line on stdout before rejecting. These four oracles
+// are the only WALL-CLOCK assertions in the suite, so they are the only ones whose result depends on
+// what else the machine is doing. At the previous value two of them rejected within 30 ms of the
+// deadline while three full suites shared four cores, and the same tree passed run alone - a false
+// RED in a review whose whole method is "did my mutation turn this red". Raised, and named, so the
+// next author changing it knows the number is a contention margin and not a behavioural bound.
+const CLI_ORACLE_TIMEOUT_MS = 60_000;
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -299,7 +307,7 @@ function startServer(
       setTimeout(() => {
         if (waiters.delete(id))
           rej(new Error(`rpc timeout ${method}; stderr=${stderr}`));
-      }, 12000);
+      }, CLI_ORACLE_TIMEOUT_MS);
     });
   const notify = (method: string, params?: unknown): void => {
     proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
@@ -449,7 +457,7 @@ test('server.ts: `join` CLI prints the hosted Stripe checkout link', async () =>
       setTimeout(() => {
         d.proc.kill();
         rej(new Error('join timeout'));
-      }, 12000);
+      }, CLI_ORACLE_TIMEOUT_MS);
     });
     assert.ok(
       out.includes(URL_OUT),
@@ -486,7 +494,7 @@ test('server.ts: `join` CLI cannot have extra instructions forged into it', asyn
       setTimeout(() => {
         d.proc.kill();
         rej(new Error('join timeout'));
-      }, 12000);
+      }, CLI_ORACLE_TIMEOUT_MS);
     });
     // Built with escapes: a literal U+2028 in this SOURCE file is itself a line terminator and
     // breaks the parse, which is the same property being asserted about the rendered output.
@@ -575,7 +583,7 @@ function runCli(
     setTimeout(() => {
       d.proc.kill();
       rej(new Error(`${args[0]} timeout`));
-    }, 12000);
+    }, CLI_ORACLE_TIMEOUT_MS);
   });
 }
 

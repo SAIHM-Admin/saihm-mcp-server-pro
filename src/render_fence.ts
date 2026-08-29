@@ -45,6 +45,13 @@ import {
  * is a discriminator on the field, which that branch does not yet carry.
  */
 export const safeField = (s: string, max: number): string => {
+  // A NON-STRING is fenced as the marker rather than dereferenced. The module header promises this
+  // renderer is safe for ANY input, and this line is part of what makes that true: every branch
+  // below calls `.length`, `.slice` or `.replace`, so `null`, a number, or an object with a spoofed
+  // `.length` used to THROW - and a throw here escapes to the tool handler's catch and costs the
+  // WHOLE response, not one field. The closed-set checkers took this guard first; the fences did
+  // not, and the sweep that was meant to stop exactly that was keyed on a list holding only them.
+  if (typeof s !== 'string') s = MALFORMED;
   // SLICE FIRST, then scrub — and that ordering is load-bearing for COST, not for correctness.
   //
   // Correctness first, because it is what licenses the reordering: neither regex carries the `u` flag,
@@ -76,8 +83,9 @@ export const safeField = (s: string, max: number): string => {
   // several-fold ACROSS shapes, so no single number describes both columns. In production the value arrives from
   // `JSON.parse` already flat, so even that first-touch cost is never paid.
   // NO FIGURE IS QUOTED HERE AS THE ANSWER, deliberately - the numbers that remain are named as
-  // failures, which is the only role a wall-clock figure can hold in this file. Five published
-  // numbers have now failed to reproduce - three ratios and two absolutes - and nothing pins them, because a wall-clock assertion is the one
+  // failures, which is the only role a wall-clock figure can hold in this file. FOUR published
+  // numbers have now failed to reproduce - two ratios (`50-64x`, `43x-72x`) and two absolutes (the
+  // flat `15-37 ms`, and the fourth figure described above) - and nothing pins them, because a wall-clock assertion is the one
   // kind this suite cannot hold without becoming load-dependent itself. What survives measurement
   // is structural: cutting to `max` first makes the work proportional to what is KEPT rather than
   // to what arrived. (That cut also claimed the 16 MiB field
@@ -138,14 +146,16 @@ export const BLANK_SYMBOLS = '\u2800\u2d7f\u{16FE4}\u{1D159}\u{13441}\u{13442}';
  * ESCAPED, not spliced. Each entry goes in as `\u{...}` because a raw splice into a character class
  * is safe only while every member happens to be inert there: `]` and `\` would throw at module load,
  * loudly, but `-` and `^` would COMPILE and silently change what the class MEANS - a `-` between two
- * entries makes a RANGE, and between U+2800 and U+2D7F that is 1408 code points scrubbed instead of
- * 3. `^` is the sharper of the two and only in FIRST position, where it does not widen but NEGATES:
- * 65,534 BMP code points match rather than 3, which scrubs nearly everything a path is made of.
+ * entries makes a RANGE: the 1408-code-point span U+2800..U+2D7F is swept in, so the class matches
+ * 1412 code points instead of 6. `^` is the sharper of the two and only in FIRST position, where it
+ * does not widen but NEGATES: 65534 BMP code points match rather than 2, which scrubs nearly
+ * everything a path is made of.
  * That count includes the surrogate range: the residual paragraph below rules a lone surrogate a
  * code unit an attacker can write, and a `u`-flagged negated class matches one. Counting the BMP
  * without them is the blind spot a prior cut was withdrawn for, and it stood here one round longer
  * than it stood there.
- * Between entries it is inert - 3, unchanged. Both spellings measured. No entry is one of
+ * Between entries it is NOT inert either: it joins the class as a literal member, so 7 code points
+ * match rather than 6, 3 BMP rather than 2. Both spellings measured. No entry is one of
  * those four today; the list has grown by hand from three to six, so the shape is removed rather
  * than watched.
  */
@@ -343,6 +353,9 @@ const BLANK_AND_FORMAT = new RegExp(
  * trap the day one of them reaches past U+FFFF.
  */
 export const safePathField = (s: string, max: number): string => {
+  // Same guard, same reason as {@link safeField} - see the note there. Kept per-function rather than
+  // hoisted into a shared wrapper because a wrapper is one edit away from covering five of six.
+  if (typeof s !== 'string') s = MALFORMED;
   const over = s.length > max;
   const flat = (over ? s.slice(0, max) : s)
     .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, '?')
@@ -397,7 +410,9 @@ export const safePathField = (s: string, max: number): string => {
  * scrubs, because that is what keeps its slice-then-scrub ≡ scrub-then-slice equivalence true. Written
  * as a deletion or an escape it would silently invalidate that proof and the cost argument built on it.
  */
-export const labelSafe = (s: string): string => s.replace(/=/g, '?');
+export const labelSafe = (s: string): string =>
+  // Non-string fenced as the marker, as in {@link safeField}: `.replace` dereferences too.
+  (typeof s === 'string' ? s : MALFORMED).replace(/=/g, '?');
 
 /**
  * Budget for a single endpoint-chosen scalar in a receipt/status line. These are short by nature.
@@ -472,7 +487,9 @@ export const MAX_SCALAR_CHARS = 64;
  * unsolicited pointer list.
  *
  * A value that is not a PRIMITIVE becomes {@link MALFORMED} rather than a stringification of itself,
- * matching {@link boundedOrMarker} on every NON-primitive. The two still diverge ON primitives, as
+ * matching {@link boundedOrMarker} on every value outside `PRIMITIVE` - which is this file's own set
+ * of four typeof names, NOT the JS primitive set, so `undefined` and a Symbol take the MALFORMED arm
+ * in both and agree. The two diverge on the primitives they DO admit, as
  * the paragraph below says in its own terms: a number renders as itself here and as {@link MALFORMED}
  * there, so one endpoint field can carry both spellings across the two halves of one response.
  * "Exactly" stood here until the divergence was measured. Those two functions render the same endpoint field into
@@ -543,7 +560,8 @@ export const MAX_JOIN_FIELD_CHARS = 256;
  * Named for the VALUE CLASS, not for the checkout. It was `MAX_CHECKOUT_URL_CHARS` until
  * `SAIHM_ENDPOINT_URL` needed the same bound, and a constant whose name is narrower than its class
  * is precisely how a value ends up wearing a budget sized for a different one — the defect this file
- * has now recorded three times over ({@link MAX_JOIN_FIELD_CHARS}, {@link MAX_PATH_FIELD_CHARS}, and
+ * has now recorded four times over ({@link MAX_JOIN_FIELD_CHARS}, {@link MAX_PATH_FIELD_CHARS}, the
+ * `MAX_RESIDUAL_MESSAGE_CHARS` rename recorded below, and
  * the rename that produced this sentence). Renaming rather than documenting around it, because the
  * name is what the next author reads at the call site; the docblock is not.
  *
@@ -786,7 +804,9 @@ export const boundedOrMarker = (v: unknown, max: number = MAX_STRUCTURED_SCALAR_
  */
 export const MALFORMED = '(malformed)';
 /**
- * agentIdHash: sha256 hex. This IS the pin the footer asks for, so it renders in full or not at all.
+ * `sharer` (an agent-id hash): sha256 hex. Named for the FIELD it renders - `server.ts` interpolates
+ * it as `sharer=`, and the docblock said `agentIdHash`, which is what the value MEANS but not what a
+ * reader greps for. This IS the pin the footer asks for, so it renders in full or not at all.
  *
  * LOWERCASE ONLY, deliberately: the shipped `fromHex` tests `/^[0-9a-f]*$/` and THROWS on uppercase,
  * so an `AA…`-form pin would render as a full, authentic-looking 64-char hash that the agent then
@@ -824,7 +844,9 @@ export const scopeOrMarker = (s: string): string =>
  * `hexOrMarker({length: 64, toString: () => 'de'.repeat(32)})` returned the OBJECT, because the
  * regex coerced what the length test had already admitted. A throw from a render helper is worse
  * than a bad render: it escapes to the handler's catch and costs the WHOLE tool response, own
- * memories included. All three now take the same guard. Unreachable through today's client, and the
+ * memories included. All three now RESIST, though NOT by one mechanism: the two regex checkers carry
+ * this `typeof` guard, while `scopeOrMarker` resists by strict equality against a closed set, which
+ * never dereferences at all. The three FENCES took the guard later still. Unreachable through today's client, and the
  * module header disclaims relying on that - which is the disclaimer this fix was justified by, so it
  * had to reach every arm it covers.
  */
@@ -969,8 +991,10 @@ function configErrorText(e: SaihmConfigError): string {
  *     the caps in `client.ts` permit, on the same `saihm_recall` call. That denominator is 55,078
  *     bytes and is a JOINT maximum, not a sum: the two channels are maximised by DIFFERENT epoch
  *     representations (the 3,595-byte text block needs a 20-digit epoch string on every rendered
- *     row; the 51,483-byte `structuredContent` needs `null` epochs, `null` costing 4 JSON chars),
- *     so their independent maxima (3,595 + 51,515 = 55,110) are not jointly reachable. Both
+ *     row; the 51,515-byte `structuredContent` needs `null` epochs, `null` costing 4 JSON chars),
+ *     so their independent maxima (3,595 + 51,515 = 55,110) are not jointly reachable. In the joint
+ *     configuration the structured channel carries 51,483 bytes, which is the figure 55,078 sums.
+ *     Both
  *     per-channel figures reproduce exactly; earlier cuts recorded 54,216 (one channel only, ratio
  *     619x) and 55,112 (a fixture that cannot exist). Re-derive rather than copy.
  *   - INJECTION. Measured: a 109-byte 400 response carrying

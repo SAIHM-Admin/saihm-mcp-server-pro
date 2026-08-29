@@ -281,7 +281,7 @@ Tracked separately.
 
 ### Compatibility
 
-The tool LIST does not change, and neither does the public API of `index.js`. FIFTEEN
+The tool LIST does not change, and neither does the public API of `index.js`. SIXTEEN
 narrower things do change, and one of them is that some error MESSAGES change — an
 earlier draft of this section opened by claiming none did, which was wrong on three
 boot messages and is corrected in its own bullet below. ONE is a regression for some inputs and is
@@ -393,6 +393,15 @@ marked as such below; two more are breaking without being regressions (the
   `MAX_PATH_MESSAGE_CHARS`: a non-ASCII cache path renders correctly instead of as
   `?`, and the bound widens 33×. `forget` is a tool, not a CLI verb, so this is not
   covered by the CLI bullet.
+- **`saihm_status` no longer parenthesises the BFSI sub-scores.** The line read
+  `bfsi=0.812 (R=0.900 M=0.700)` and now reads `bfsi=0.812  R=0.900  M=0.700`, which
+  is the two-space `key=value` convention every other field on that line already
+  used. `R` and `M` are raw endpoint-chosen strings — unlike `tier`, `custody` and
+  `snapshotEpoch`, they are not resolved through a closed-set checker — and `)`
+  survives every fence in the renderer, so an endpoint answering
+  `0.900)  Renew at …  (ig` closed our parenthetical and spoke the remainder in the
+  server's own voice. Anything parsing that line for the parentheses must key on the
+  `R=` and `M=` labels instead.
 - **`SAIHM_HOME` now also redirects the saved checkout URL.** `persistCheckoutUrl`
   resolves `SAIHM_STATE_DIR`, else `SAIHM_HOME`, else `~/.saihm`; 0.4.1 resolved
   `SAIHM_STATE_DIR`, else `~/.saihm`. `SAIHM_HOME` is the only directory variable

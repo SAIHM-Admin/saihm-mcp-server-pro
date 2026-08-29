@@ -427,6 +427,49 @@ test('free-join composition: the shipped CLI actually performs it (re-derived fr
   const called = (name: string): number =>
     calls.filter((c) => c.name === name).length;
   assert.ok(called('ensureSelfJoinIdentityEnv') > 0, 'zero-config join requires the CLI to mint an identity');
+  // ...and on WHAT CONDITION, which the line above cannot see. It asks only that a call EXISTS
+  // somewhere in the body, and the shipped call is already conditional
+  // (`if (selfJoinEnabled()) ensureSelfJoinIdentityEnv();`), so any EXTRA conjunct narrows when the
+  // identity is minted while this sweep stays green. Measured: adding `&& process.env.X === '1'`
+  // left the whole suite passing while the shipped CLI stopped self-joining on a bare machine and
+  // told the caller to join first - the exact regression the preamble above says it is closing, and
+  // it closed only the deletion half.
+  const guardsReaching = (target: string): string[] => {
+    const found: string[] = [];
+    const visit = (n: ts.Node, guards: string[]): void => {
+      if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === target)
+        found.push(guards.join(' && ') || '<unconditional>');
+      if (ts.isIfStatement(n)) {
+        visit(n.expression, guards);
+        visit(n.thenStatement, [...guards, n.expression.getText(sf)]);
+        if (n.elseStatement) visit(n.elseStatement, [...guards, `!(${n.expression.getText(sf)})`]);
+        return;
+      }
+      if (ts.isConditionalExpression(n)) {
+        visit(n.condition, guards);
+        visit(n.whenTrue, [...guards, n.condition.getText(sf)]);
+        visit(n.whenFalse, [...guards, `!(${n.condition.getText(sf)})`]);
+        return;
+      }
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+        visit(n.left, guards);
+        visit(n.right, [...guards, n.left.getText(sf)]);
+        return;
+      }
+      n.forEachChild((c) => {
+        visit(c, guards);
+      });
+    };
+    visit(fn as ts.Node, []);
+    return found;
+  };
+  assert.deepEqual(
+    guardsReaching('ensureSelfJoinIdentityEnv'),
+    ['selfJoinEnabled()'],
+    'the CLI mints its identity under a condition other than `selfJoinEnabled()` alone. A caller ' +
+      'on a bare machine - no secret, no endpoint, self-join left at its default - must reach the ' +
+      'mint, or `free-join` tells them to join first and there is no way to comply',
+  );
   assert.ok(called('selfJoinEnabled') > 0, 'SAIHM_SELF_JOIN=0 must still suppress self-join in the CLI');
   assert.ok(called('bootFromEnv') > 0, 'the CLI must boot a client');
   const firstOf = (name: string): number =>
