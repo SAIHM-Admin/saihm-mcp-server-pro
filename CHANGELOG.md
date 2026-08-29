@@ -273,15 +273,16 @@ Tracked separately.
 
 ### Compatibility
 
-The tool LIST does not change, and neither does the public API of `index.js`. Eleven
+The tool LIST does not change, and neither does the public API of `index.js`. TWELVE
 narrower things do change, and one of them is that some error MESSAGES change — an
 earlier draft of this section opened by claiming none did, which was wrong on three
 boot messages and is corrected in its own bullet below. ONE is a regression for some inputs and is
 marked as such below; two more are breaking without being regressions (the
 `SaihmConfigError` class change and the generated types); the rest are fixes:
 
-- **CLI and server stderr output changes where it was wrong.** `join` ("Also written to") and
-  `free-join` ("Back up") now render a non-ASCII path correctly instead of
+- **CLI and server output changes where it was wrong.** `join` ("Also written to") and
+  `free-join` ("Back up") - both on STDOUT, so a consumer capturing only `2>` sees neither -
+  now render a non-ASCII path correctly instead of
   replacing each non-ASCII character with `?`. The group/world-readable warning
   on `SAIHM_MASTER_SECRET_FILE`, which wrote the path to stderr with no fence at all,
   now renders it through the same one. That advisory is written from `bootFromEnv()`,
@@ -314,14 +315,17 @@ marked as such below; two more are breaking without being regressions (the
   made unreachable, while `key file:` was unconditional and the pending-join line
   branched only on whether the key had just been created. Two of the three gain a
   branch here; one gets a reachable one. The return type is now `keyPath: string | null`, and those
-  lines name the variable instead of pointing at a file that does not exist. Anyone
-  destructuring `keyPath` from that function has to handle `null`.
+  lines name the variable instead of pointing at a file that does not exist. That signature is
+  MODULE-INTERNAL and no consumer can be holding it: `ensureSelfJoinIdentityEnv` is not in the
+  barrel and `exports` has only `"."`. What reaches a consumer is the changed TEXT, not the type -
+  an earlier draft told them to handle a `null` they cannot receive.
 - **A configured but EMPTY secret is now an error instead of a silent switch to a
   different identity.** `bootFromEnv` guarded its self-join fallback on whether a
   secret VALUE was present rather than on whether one had been CONFIGURED, so a
   zero-byte `SAIHM_MASTER_SECRET_FILE` fell through to the default self-join identity:
-  the process booted a different key while every backup line, and `identityKeyFile()`
-  with it, named the file the operator had configured. Reproduced end to end — the
+  the process booted a different key while every backup line named the file the operator
+  had configured. (`identityKeyFile()` did not exist at 0.4.1 — it is part of this fix, not of
+  the defect it describes.) Reproduced end to end — the
   operator backs up an empty file and the only key to their memory is never named. It
   now raises `SaihmConfigError` naming the file. Anyone relying on an empty secret file
   as an opt-in to self-join must unset the variable instead. Two limits worth stating
@@ -347,11 +351,14 @@ marked as such below; two more are breaking without being regressions (the
   `free-identity.key`, no such variable set anywhere — was told to protect something
   that does not exist and never told the file that does. This is the same defect
   `free-join` fixed sixty lines away in the same module, in the copy nobody
-  propagated to. Both verbs now resolve the key through one exported
-  `identityKeyFile()`, whose precedence mirrors `bootFromEnv`.
-- **The `join` key line's ordinary-case wording changed.** `Using your existing memory
-  key (<path>).` is now `Using your existing memory key: <path>`, for every returning
-  caller — including an ASCII path the fence leaves untouched. The parenthetical went
+  propagated to. Both verbs now resolve the key through one shared
+  `identityKeyFile()` - exported from the module, NOT from the package - whose precedence
+  mirrors `bootFromEnv`.
+- **The `saihm_join` TOOL's key line changed wording in the ordinary case.** `Using your
+  existing memory key (<path>).` is now `Using your existing memory key: <path>`, for every
+  returning caller — including an ASCII path the fence leaves untouched. This is a TOOL result,
+  not CLI output: the line lives in `joinPendingText`, which the CLI `join` verb never reaches,
+  so an agent integrator matching on it is the audience for this bullet. The parenthetical went
   because a fenced value must not sit inside a delimiter it can itself close; the
   bullets above disclose only the scrubbing and the null branch. Match the prefix
   rather than the whole line.
@@ -386,7 +393,9 @@ marked as such below; two more are breaking without being regressions (the
   against `[]` for a plain `Error`. "Byte-identical" is a claim about `e.message`
   only: what the OPERATOR SEES changes, because these now render through the widened
   path/URL budget rather than 256. Measured, a long invalid `SAIHM_ENDPOINT_URL` goes
-  from 257 to 2,305 characters and an unreadable long secret file from 257 to 609. Code matching `/^Error: SAIHM_/` against one of them
+  from 257 to 2,305 characters — it is budget-capped, so that figure is exact. The unreadable
+  secret file message is NOT capped, so it grows with the path and no single figure states it;
+  an earlier draft gave one without naming its input. Code matching `/^Error: SAIHM_/` against one of them
   should match the message or `e.name === 'SaihmConfigError'` instead. The class is
   NOT exported — the barrel does not re-export it and `exports` has only `"."` — so
   `instanceof` is not available to consumers; `e.name` and the message are. Two further sites are NEW rather than reclassified (the

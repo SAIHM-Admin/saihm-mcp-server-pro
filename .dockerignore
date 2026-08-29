@@ -14,3 +14,5 @@ coverage
 *.tsbuildinfo
 Dockerfile
 .dockerignore
+.claude
+.round*-findings.md
