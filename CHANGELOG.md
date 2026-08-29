@@ -401,7 +401,9 @@ marked as such below; two more are breaking without being regressions (the
   survives every fence in the renderer, so an endpoint answering
   `0.900)  Renew at …  (ig` closed our parenthetical and spoke the remainder in the
   server's own voice. Anything parsing that line for the parentheses must key on the
-  `R=` and `M=` labels instead.
+  `R=` and `M=` labels instead — and note that `bfsi_R` and `bfsi_M` have no
+  `structuredContent` counterpart (that channel carries `bfsi` alone), so the text
+  line is the only place they appear.
 - **`SAIHM_HOME` now also redirects the saved checkout URL.** `persistCheckoutUrl`
   resolves `SAIHM_STATE_DIR`, else `SAIHM_HOME`, else `~/.saihm`; 0.4.1 resolved
   `SAIHM_STATE_DIR`, else `~/.saihm`. `SAIHM_HOME` is the only directory variable

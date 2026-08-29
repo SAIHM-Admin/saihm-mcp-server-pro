@@ -1172,6 +1172,10 @@ async function runJoin(): Promise<void> {
   const c = SaihmProClient.bootFromEnv();
   const url = await c.requestCheckoutUrl();
   const fenced = safeField(url, MAX_URL_FIELD_CHARS);
+  // Resolved ONCE. It was called twice below - as the condition, then again inside the branch with
+  // an `as string` cast re-asserting what the condition had just proved. Two reads of process env
+  // either side of a branch can disagree with each other, and the cast is what hid that they could.
+  const keyFile = identityKeyFile();
   process.stdout.write(
     [
       '',
@@ -1188,8 +1192,8 @@ async function runJoin(): Promise<void> {
       // fixed 60 lines below and which nobody propagated here: a caller who reached `join` after
       // `saihm_join` has a generated key FILE and no such variable, and this told them to protect
       // the wrong thing while never naming the file they must actually back up.
-      identityKeyFile()
-        ? `  Back up ${safePathField(identityKeyFile() as string, MAX_PATH_FIELD_CHARS)} — it is`
+      keyFile
+        ? `  Back up ${safePathField(keyFile, MAX_PATH_FIELD_CHARS)} — it is`
         : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is',
       '  the only key to your memory and cannot be recovered. After payment, start the server',
       '  normally (drop the "join" argument) and it connects automatically.',
@@ -1236,6 +1240,8 @@ async function runFreeJoin(): Promise<void> {
         ].join('\n'),
       ),
   });
+  // Resolved ONCE, as in `join` above.
+  const keyFile = identityKeyFile();
   process.stdout.write(
     [
       '',
@@ -1252,8 +1258,8 @@ async function runFreeJoin(): Promise<void> {
       // Not `identity?.keyPath` alone: under SAIHM_SELF_JOIN=0 nothing is ensured, yet a caller
       // who supplied SAIHM_MASTER_SECRET_FILE still has a FILE to back up. Reading env directly
       // covers that case too, so the only caller told to keep the HEX var is one who set it.
-      identityKeyFile()
-        ? `  Back up ${safePathField(identityKeyFile() as string, MAX_PATH_FIELD_CHARS)} — it is the only key to your`
+      keyFile
+        ? `  Back up ${safePathField(keyFile, MAX_PATH_FIELD_CHARS)} — it is the only key to your`
         : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your',
       '  memory and cannot be recovered. Start the server normally (drop the "free-join" argument)',
       '  and it connects automatically. Upgrading to a paid plan later attaches to THIS same key —',

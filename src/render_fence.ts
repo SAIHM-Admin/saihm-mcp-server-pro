@@ -145,7 +145,11 @@ export const BLANK_SYMBOLS = '\u2800\u2d7f\u{16FE4}\u{1D159}\u{13441}\u{13442}';
  *
  * ESCAPED, not spliced. Each entry goes in as `\u{...}` because a raw splice into a character class
  * is safe only while every member happens to be inert there: `]` and `\` would throw at module load,
- * loudly, but `-` and `^` would COMPILE and silently change what the class MEANS - a `-` between two
+ * loudly, while `-` and `^` USUALLY compile and silently change what the class MEANS. Usually, not
+ * always: a `-` is quiet only where the entries either side happen to ascend, and on the shipped
+ * list one of the five inter-entry positions throws `Range out of order in character class` instead.
+ * Do not read that as a safety net - which position is loud depends on the ORDER of a list that is
+ * maintained by hand. A `-` between two
  * entries makes a RANGE: the 1408-code-point span U+2800..U+2D7F is swept in, so the class matches
  * 1412 code points instead of 6. `^` is the sharper of the two and only in FIRST position, where it
  * does not widen but NEGATES: 65534 BMP code points match rather than 2, which scrubs nearly
@@ -801,6 +805,18 @@ export const boundedOrMarker = (v: unknown, max: number = MAX_STRUCTURED_SCALAR_
  * field on a labelled line the one character the grammar is built from.
  *
  * A malformed value is never silently normalised into a plausible one: it is shown as malformed.
+ *
+ * THE MARKER ITSELF IS FORGEABLE, in the text channel as well as the structured one. It is printable
+ * ASCII carrying no bracket, pipe, newline or `=`, so every fence in this module passes the literal
+ * `(malformed)` through verbatim - measured on `safeField`, `safePathField` and `safeScalar`. An
+ * endpoint that spells it is indistinguishable from a value a fence rejected. {@link boundedOrMarker}
+ * discloses this for structured output and gives a structured-specific reason; the text channel has
+ * the same residual for a different reason, and until now only the structured half was written down.
+ * It fails SAFE - a reader distrusts the field either way - but it does bound what the marker proves,
+ * and it undercuts the argument that `(malformed)` "reads as what it is" where `undefined` would read
+ * as a value the endpoint sent: an endpoint can send this one too. The truncation marker is a
+ * different case and genuinely unforgeable, because the fences scrub it; do not carry that property
+ * across to this one.
  */
 export const MALFORMED = '(malformed)';
 /**
@@ -992,9 +1008,13 @@ function configErrorText(e: SaihmConfigError): string {
  *     bytes and is a JOINT maximum, not a sum: the two channels are maximised by DIFFERENT epoch
  *     representations (the 3,595-byte text block needs a 20-digit epoch string on every rendered
  *     row; the 51,515-byte `structuredContent` needs `null` epochs, `null` costing 4 JSON chars),
- *     so their independent maxima (3,595 + 51,515 = 55,110) are not jointly reachable. In the joint
- *     configuration the structured channel carries 51,483 bytes, which is the figure 55,078 sums.
- *     Both
+ *     so their independent maxima (3,595 + 51,515 = 55,110) are not jointly reachable. How 55,078
+ *     itself DECOMPOSES is under-determined and unpinned: 3,595 + 51,483 and 3,563 + 51,515 both
+ *     give it exactly, the two readings differing by the sixteen rendered rows times the two
+ *     characters by which `(malformed)` exceeds `readwrite`. `server.ts` measures the second text
+ *     figure under a legal scope. Nothing in this tree distinguishes them, and an earlier revision
+ *     of this line asserted the first as though it had been measured rather than subtracted.
+ *     Re-derive before quoting either. Both
  *     per-channel figures reproduce exactly; earlier cuts recorded 54,216 (one channel only, ratio
  *     619x) and 55,112 (a fixture that cannot exist). Re-derive rather than copy.
  *   - INJECTION. Measured: a 109-byte 400 response carrying
@@ -1007,7 +1027,37 @@ function configErrorText(e: SaihmConfigError): string {
  * contain — accepted: legibility of our diagnostics is worth less than a channel the endpoint cannot
  * write lines through.
  */
+/**
+ * The LAST RESORT, made total.
+ *
+ * The composition below reads properties and runs `instanceof` before it reaches the `coerce` arm
+ * that was written to be unkillable - and `instanceof` invokes `getPrototypeOf`, while `e.code`,
+ * `e.message` and `isPathBearing(e)` invoke getters. A revoked Proxy, or one whose trap throws,
+ * therefore threw out of the FIRST line of a function whose docblock promises that "a thrown value
+ * of any shape reaches here". Round 14 gave the three fences a non-string guard on the strength of
+ * the module header's ANY-INPUT promise and did not reach this, the one renderer whose contract is
+ * that it never crashes.
+ *
+ * The blast radius is why this is a wrapper and not another per-dereference guard: `server.ts` calls
+ * it from twelve tool handlers whose comment is "never crash the server", and from
+ * `main().catch(...)` - where a throw is an unhandled rejection, so the `process.exit(1)` beside it
+ * never runs and the operator gets no diagnostic at all. A guard per dereference protects the
+ * dereferences that exist today; a wrapper protects the ones a later edit adds.
+ */
 export function failText(e: unknown): string {
+  try {
+    return failTextOf(e);
+  } catch {
+    // Deliberately a constant, not another render of `e`: everything that could describe `e` has
+    // already thrown by the time we are here. It is distinctive so that an operator seeing it knows
+    // the error was unrenderable rather than empty.
+    return UNRENDERABLE;
+  }
+}
+
+const UNRENDERABLE = '(unrenderable error)';
+
+function failTextOf(e: unknown): string {
   return e instanceof SaihmEndpointError
     // `||`, not `??`: a 4xx body of `{"error":""}` sets `code` to the EMPTY STRING, which `??`
     // retains and renders as `SAIHM error [] (status 400)` — an absent code reads better as

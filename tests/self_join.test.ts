@@ -563,3 +563,37 @@ test('a FILESYSTEM failure carries the path NODE embedded through the fence whol
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a corrupt self-join identity names the FILE on the join paths too, not a variable nobody set', () => {
+  // `ensureSelfJoinIdentityEnv` writes the minted key path into `SAIHM_MASTER_SECRET_FILE` so the
+  // boot path can read it, and that made `secretSource` unable to tell a file the OPERATOR
+  // configured from one we configured for them. Measured before the fix: the `free-join` verb and
+  // the `saihm_join` tool - the two entry points that mint FIRST, and the two a caller reaches by
+  // following the advice the other message's own hint gives them - answered
+  // `SAIHM_MASTER_SECRET_FILE <path>`, naming a variable absent from their MCP config, from
+  // `server.json` and from the install UI. Same file, same session, two different names.
+  //
+  // Pinned on the MESSAGE rather than on the branch, because the branch is one refactor away from
+  // being spelled differently and the message is what the operator has to act on.
+  const home = mkdtempSync(join(tmpdir(), 'saihm-selfjoin-label-'));
+  withEnv(
+    { SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: undefined, SAIHM_MASTER_SECRET_FILE: undefined },
+    () => {
+      ensureSelfJoinIdentityEnv();
+      writeFileSync(join(home, 'free-identity.key'), 'ZZZZ not canonical hex');
+      assert.throws(
+        () => SaihmProClient.bootFromEnv(),
+        (e: Error) => {
+          assert.match(
+            e.message,
+            /^the self-join identity file /,
+            `a corrupt self-join identity must name the FILE it read, not a variable the caller ` +
+              `never set. Got: ${e.message}`,
+          );
+          return true;
+        },
+      );
+    },
+  );
+  rmSync(home, { recursive: true, force: true });
+});

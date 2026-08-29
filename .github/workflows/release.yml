@@ -53,6 +53,14 @@ jobs:
           test "$LOCKPKG" = "$TAG" || { echo "::error::package-lock.json packages[''].version mismatch ($LOCKPKG != $TAG)"; exit 1; }
           test "$SRV" = "$TAG"    || { echo "::error::server.json version mismatch ($SRV != $TAG)"; exit 1; }
           test "$SRVPKG" = "$TAG" || { echo "::error::server.json packages[0].version mismatch ($SRVPKG != $TAG)"; exit 1; }
+          # The CHANGELOG is gated too, for the same reason the lockfile is: it SHIPS. This branch
+          # added it to `files`, so it is now most of the tarball and the newest section of the npm
+          # page. Five version fields could all read 0.5.0 while the newest heading still said
+          # `[Unreleased]`, linking a diff against a moving `HEAD` - a published page documenting
+          # nothing about the version it ships. Same class as the lockfile: a shipping artifact
+          # outside the gate.
+          grep -q "^## \[$TAG\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## [$TAG]' heading"; exit 1; }
+          grep -q "^\[$TAG\]:" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '[$TAG]:' link definition"; exit 1; }
 
       - name: Install
         run: npm ci

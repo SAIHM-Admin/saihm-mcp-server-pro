@@ -282,7 +282,7 @@ The derived `saihm.agentIdHash` is the `sub` the endpoint binds your tenant to �
 | `SAIHM_TIER`               | self-onboard only | Tier label baked into sealed metadata (`FREE`, `PRO`, …). Required when self-onboarding; otherwise optional — resolved via `status()` if unset.                                                                    |
 | `SAIHM_SEQ_STATE_PATH`     | no                | Persists per-cell sequence high-water marks (mode 600) for cross-restart updates. |
 | `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool ("prompt your agent to Join SAIHM"), which self-generates + persists a non-custodial identity and activates the free trial — no master secret needed. **On by default**; set to `0` to suppress the tool and disable every self-join path. |
-| `SAIHM_HOME` | no | Base dir for the self-join identity file (`$SAIHM_HOME/free-identity.key`, mode 600). Defaults to `~/.saihm`.                                                                                                                                 |
+| `SAIHM_HOME` | no | Base dir for the self-join identity file (`$SAIHM_HOME/free-identity.key`, mode 600). Also the fallback state directory when `SAIHM_STATE_DIR` is unset, which is where `checkout-url.txt` is written. Defaults to `~/.saihm`.                                                                                                                                 |
 
 > **Self-onboarding (paste once):** with `SAIHM_AUTH_HEADER` unset, the client proves
 > control of your identity via the endpoint's ML-DSA challenge/response and mints its own

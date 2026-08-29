@@ -1457,11 +1457,25 @@ export class SaihmProClient {
     // hex" - naming a variable the operator never set, about a file it never named, on the one
     // error whose whole job is to say what to go and fix. That is this release's defect class in a
     // sentence: the value is actionable and it is the wrong one.
+    //
+    // `secretFile` MAY HAVE BEEN SET BY US. `ensureSelfJoinIdentityEnv` writes the minted key path
+    // into `SAIHM_MASTER_SECRET_FILE` so the boot below can read it, and after that this branch
+    // could no longer tell a file the operator configured from one we configured for them. It named
+    // the variable on precisely the two entry points that mint FIRST - the `free-join` verb and the
+    // `saihm_join` tool - which are the paths a caller reaches by following the advice this very
+    // message's `setupHint` gives them. Same file, same session, two different variable names, and
+    // the one they were shown is absent from their config, from `server.json` and from the install
+    // UI. Comparing against `defaultIdentityPath()` rather than tracking a flag: both sides call the
+    // same function, so they cannot disagree, and an operator who points the variable AT the
+    // self-join file is told the truth either way.
+    const selfJoinIdentity = defaultIdentityPath();
     const secretSource: { label: string; kind: 'path' | 'env' } = secretFile
-      ? { label: `SAIHM_MASTER_SECRET_FILE ${secretFile}`, kind: 'path' }
+      ? secretFile === selfJoinIdentity
+        ? { label: `the self-join identity file ${secretFile}`, kind: 'path' }
+        : { label: `SAIHM_MASTER_SECRET_FILE ${secretFile}`, kind: 'path' }
       : process.env.SAIHM_MASTER_SECRET_HEX
         ? { label: 'SAIHM_MASTER_SECRET_HEX', kind: 'env' }
-        : { label: `the self-join identity file ${defaultIdentityPath()}`, kind: 'path' };
+        : { label: `the self-join identity file ${selfJoinIdentity}`, kind: 'path' };
     const badSecret = (why: string): Error =>
       secretSource.kind === 'path'
         ? new SaihmConfigError(`${secretSource.label} ${why}.` + setupHint(), 'path')

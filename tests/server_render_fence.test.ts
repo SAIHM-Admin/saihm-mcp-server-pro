@@ -843,7 +843,7 @@ test('safeScalar rejects a NON-PRIMITIVE instead of stringifying it into the tex
   // response, and they disagreed about what an unusable value looks like: `boundedOrMarker` rejected
   // these outright while `safeScalar` stringified them into the channel an LLM reads as instructions.
   // MEASURED against an endpoint returning `{}`: `FORGOTTEN [c1] complete=undefined`, `REVOKED ...
-  // revoked=undefined`, and `bfsi=(malformed) (R=undefined M=undefined)` — one line carrying BOTH
+  // revoked=undefined`, and `bfsi=(malformed)  R=(malformed)  M=(malformed)` — one line carrying BOTH
   // markers for one failure class, with `complete=undefined` standing as the receipt for an
   // irreversible erasure. Same input, same verdict, in both halves.
   for (const v of [undefined, null, [[1], [2]], { a: 1 }, () => 1, Symbol('s')]) {
@@ -2445,7 +2445,7 @@ test('the closed-set checkers are `=`-free, which is why labelSafe skips them', 
   assert.ok(!MALFORMED.includes('='), 'the shared marker itself');
 });
 
-test('every exported renderer survives a NON-STRING - three checkers AND three fences', () => {
+test('every exported renderer survives a NON-STRING - all TEN of them', () => {
   // Written as ONE sweep over all three deliberately. The `typeof` guard was first added to
   // `epochOrMarker` alone, over a sentence asserting "its two siblings resist structurally (one by
   // strict equality, one by a length guard)". Half of that was false, and the false half was the
@@ -2467,6 +2467,16 @@ test('every exported renderer survives a NON-STRING - three checkers AND three f
     null, undefined, 12345, 0, 10n, true, false,
     ['de'.repeat(32)], { length: 64, toString: () => 'de'.repeat(32) },
     new String('de'.repeat(32)), Object.create(null) as object, Symbol.iterator,
+    // PROXIES, which the list this replaces did not carry although the finding that produced it
+    // measured one. They are the only shapes that break `instanceof` and property READS rather than
+    // coercion, so they are the only ones that reach past a `typeof` guard into a dereference.
+    (() => {
+      const r = Proxy.revocable({}, {});
+      r.revoke();
+      return r.proxy;
+    })(),
+    new Proxy({}, { getPrototypeOf() { throw new Error('trap'); } }),
+    new Proxy(new Error('real'), { get() { throw new Error('trap'); } }),
   ];
   for (const v of HOSTILE)
     for (const [name, fn] of CHECKERS) {
@@ -2514,6 +2524,30 @@ test('every exported renderer survives a NON-STRING - three checkers AND three f
       // Not asserted against a literal: each fence applies its OWN budget and scrub, so the property
       // is that a non-string is rendered exactly as the marker STRING would be through that fence.
       assert.strictEqual(out, fn(MALFORMED), `${name} did not fence a non-string as the marker`);
+    }
+
+  // The REMAINING four exports, so the list covers all ten rather than the six its old title named.
+  // These do not answer the marker for every hostile shape - `safeScalar(12345)` is `'12345'`,
+  // because a number IS a primitive - so the property asserted is the one they all share: a render
+  // helper RETURNS, it does not throw. `failText` is the sharpest case and was the one that broke.
+  const TOTAL = [
+    ['safeScalar', (v: unknown) => safeScalar(v)],
+    ['shortScalar', (v: unknown) => shortScalar(v)],
+    ['boundedOrMarker', (v: unknown) => boundedOrMarker(v)],
+    ['failText', (v: unknown) => failText(v as Error)],
+  ] as const;
+  for (const v of HOSTILE)
+    for (const [name, fn] of TOTAL) {
+      let out: string;
+      try {
+        out = fn(v);
+      } catch (e) {
+        assert.fail(
+          `${name}(${String(typeof v)}) THREW ${(e as Error).message} - a render helper that throws ` +
+            'costs the whole tool response, and from `main().catch` it costs the diagnostic too',
+        );
+      }
+      assert.strictEqual(typeof out, 'string', `${name} must return the type it declares`);
     }
 });
 
@@ -3145,7 +3179,12 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // the secret's actual source was, and started naming the file they were really about.
       // TEN: one more than the note below, for the whitespace-only guard that names the CONDITION
       // rather than printing the value - the `secretFile.trim()` test itself. It renders nothing.
-      secretFile: 10,
+      // TWO MORE, from the self-join label fix: `secretFile === selfJoinIdentity` compares it, and
+      // the arm that comparison selects interpolates it into `the self-join identity file <path>`.
+      // Neither is a rendered line on its own - the label goes into a `SaihmConfigError` message and
+      // `failText` fences THAT through `safePathField`, the same deliberate shape the note above
+      // documents for the throw site.
+      secretFile: 12,
     },
     'index.ts': {},
     'render_fence.ts': {},
@@ -3892,7 +3931,10 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // `> 0`, so that a predicate narrowing which silently drops slots is a red line rather than a
   // quieter pass. The number is measured from real `src/`; if a render site is legitimately added or
   // removed, update it in the same commit and say which site moved.
-  const EXAMINED_SPANS_PIN = 45;
+  // 46, not 45, since the self-join label fix: the third `secretSource` arm gained a template that
+  // interpolates a caller-chosen path, so there is one more slot to examine. The pin moving is the
+  // guard working - a render site was added and the count says so.
+  const EXAMINED_SPANS_PIN = 46;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
