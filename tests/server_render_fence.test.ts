@@ -1483,11 +1483,19 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     EXCLUDED.length,
     'EXCLUDED names a method that does not reach persist() - the exclusion is stale',
   );
-  // SWALLOWS means the exception does not leave the catch. Any throw in the clause's own scope is
+  // SWALLOWS means the exception does not leave the catch. Any throw ANYWHERE under the clause is
   // enough to fail this: a CONDITIONAL rethrow propagates on exactly the path the exclusion claims
-  // is impossible, so this is deliberately fail-closed rather than a check for an unconditional one.
-  // Scoped like every other predicate here, so a throw inside a nested callback is not counted.
-  const swallows = (cc: ts.CatchClause): boolean => !walkScope(cc.block).some(ts.isThrowStatement);
+  // is impossible, so this is deliberately fail-closed.
+  //
+  // `walk`, NOT `walkScope`, and the direction is the whole point. Every other predicate here asks
+  // "does something ESCAPE this scope", where a nested function body is correctly out of scope - a
+  // `return` inside a callback does not return from the catch. This one asks the opposite question,
+  // "is it CERTAIN that nothing escapes", and a throw inside a nested arrow is not certain to be
+  // unreachable: `catch { void (() => { throw e; })(); }` propagates. Measured - written with
+  // `walkScope`, that exact shape planted at an excluded call site left the suite at 45 pass. The
+  // conservative answer to an uninvoked callback that throws is a false RED, which costs a person a
+  // minute; the conservative answer the other way ships an exemption whose premise is false.
+  const swallows = (cc: ts.CatchClause): boolean => !walk(cc.block).some(ts.isThrowStatement);
   // The WRAPPER, structurally: the catch clause rethrows the binding it caught, marked. The regex cut
   // spelled it `catch \(e\) \{` letter for letter, so `catch(e)` or `catch (err)` read as an
   // UNWRAPPED call site. Fail-closed, so it was never going to ship a hole - but it fails on the
