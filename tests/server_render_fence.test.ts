@@ -3089,6 +3089,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'index.ts': {},
     'render_fence.ts': {},
     'server.ts': {
+      // An env read into a local, the same shape as the `client.ts` allowance above. It is here
+      // because `persistCheckoutUrl` now honours `SAIHM_HOME` as a fallback for `SAIHM_STATE_DIR`:
+      // two names for ONE directory, both defaulting to `~/.saihm`, so relocating `SAIHM_HOME` left
+      // this file written under the old path with no declared variable to redirect it.
+      SAIHM_HOME: 1,
       localCacheResidual: 1, // truthiness selecting whether the residual line renders at all
       savedTo: 2, // parameter declaration, and the truthiness guarding its (fenced) render
       // TWO calls to `identityKeyFile()`, the key-file resolver this release's own fix routes the

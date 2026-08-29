@@ -87,7 +87,8 @@ export const safeField = (s: string, max: number): string => {
   // sites this function fences run at three different budget VALUES, so no single length states it. The repair
   // then vouched for "the receipts that carry it measure 152 and ~246 bytes", and re-measuring every
   // site with one 16 MiB field and the rest plausible — 37 combinations — lands on 79, 95-96, 117-130,
-  // 134-136, 141-188, 201, 227, 271 and 299 bytes. Nothing measures 152; 151 and 153 bracket it. A
+  // 134-136, 141-188, 201, 227, 271 and 299 bytes - a SPARSE set of measured values, not
+  // contiguous ranges; 37 combinations cannot fill one. Nothing measures 152; 151 and 153 bracket it. A
   // correction that swaps one unreproducible figure for two is not a correction, so the numbers are
   // gone and the measurable claim is what remains.)
   //
@@ -247,7 +248,9 @@ const BLANK_AND_FORMAT = new RegExp(
  *     points, category Mn) are a strictly larger channel than the TAG block and Cf does not touch
  *     them. Measured through this fence at that cut: 2048 smuggled bytes survive at
  *     MAX_PATH_FIELD_CHARS and 4224 at MAX_PATH_MESSAGE_CHARS. Both are ENCODER measurements - what
- *     one astral-only encoder achieved - and not the channel optimum, which is 2390. The residual
+ *     one astral-only encoder achieved - and not the channel optimum, which is 2390 AT 4096 UNITS.
+ *     The second figure sits at a 2.0625x wider budget, where the comparable optimum is larger; one
+ *     pair is ranked on one basis and the other rides along. The residual
  *     paragraph below states why the distinction matters and where mixing the two went wrong.
  *   - the fourth scrubbed the union of Cf and Default_Ignorable and was STILL a narrowing, for the
  *     third time and for the same reason: those classes mean "invisible FORMATTING", which is not
@@ -500,7 +503,7 @@ export const safeScalar = (v: unknown, max: number = MAX_SCALAR_CHARS): string =
  * become one. The single coercion point for both the text fence and the structured bound.
  *
  * `String(v)` is not total, which is the whole reason this exists. It recurses through nested arrays,
- * so a deeply nested one overflows the stack — MEASURED: a JSON array nested 4,000 deep is an 8,003
+ * so a deeply nested one overflows the stack — MEASURED: a JSON array nested 4,000 deep is an 8,001
  * byte body, `JSON.parse` accepts it happily, and `String()` then throws `RangeError: Maximum call
  * stack size exceeded`. That escaped every fence and every `try` in the tool handlers reported it as a
  * bare "Maximum call stack size exceeded" with no `SAIHM error [...]` prefix, no status and no

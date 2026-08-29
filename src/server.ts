@@ -1084,7 +1084,13 @@ if (selfJoinEnabled()) {
  */
 function persistCheckoutUrl(fenced: string): string {
   try {
-    const dir = process.env.SAIHM_STATE_DIR || pathJoin(homedir(), '.saihm');
+    // `SAIHM_HOME` is honoured as a fallback. These are two names for ONE directory and both
+    // defaulted to `~/.saihm`, so an operator who relocated `SAIHM_HOME` - the containerised or
+    // read-only-$HOME install this function is written for - still had this file written under
+    // `~/.saihm`, with no declared variable to redirect it and nothing saying so. `SAIHM_STATE_DIR`
+    // still wins where both are set.
+    const dir =
+      process.env.SAIHM_STATE_DIR || process.env.SAIHM_HOME || pathJoin(homedir(), '.saihm');
     // BOTH `mode` options here apply ONLY ON CREATION — an existing directory or file keeps whatever
     // permissions it already had, and neither call reports that it did nothing. Where `~/.saihm`
     // already exists - which is the common case, since the rest of the SAIHM toolchain creates it -

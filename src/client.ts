@@ -1350,9 +1350,11 @@ export class SaihmProClient {
       // A WHITESPACE-ONLY value is named as one rather than printed. `SAIHM_MASTER_SECRET_FILE=" "`
       // is truthy, so it reached the read and failed with `could not be read:  .` - a diagnostic
       // whose whole subject is invisible in it, and one an operator cannot tell from a bug. It is
-      // not quoted to make it visible: this value is rendered downstream inside a fenced
-      // `label=value` line, and wrapping it in delimiters hands it an escape. The CONDITION is
-      // stated instead, which needs no value at all.
+      // not quoted to make it visible: wrapping a value in delimiters hands it an escape. The
+      // CONDITION is stated instead, which needs no value at all. (This once said the value is
+      // "rendered downstream inside a fenced `label=value` line". It is not - it reaches
+      // `configErrorText` and lands as standalone text; `safePathField` does not scrub `=` and no
+      // site of its own is a labelled line. The reasoning above holds on delimiters alone.)
       if (secretFile.trim().length === 0)
         throw new SaihmConfigError(
           'SAIHM_MASTER_SECRET_FILE is set to a whitespace-only value, which is not a path. Unset ' +

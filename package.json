@@ -27,7 +27,8 @@
     "dist",
     "LICENSE",
     "README.md",
-    "llms-install.md"
+    "llms-install.md",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public"
