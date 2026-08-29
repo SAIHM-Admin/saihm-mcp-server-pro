@@ -3192,6 +3192,50 @@ test('an INVISIBLE ENCODING inside a path is destroyed, and the class is closed 
   );
 });
 
+test('the blank list is ESCAPED into its character class, not spliced raw', () => {
+  // BEHAVIOURALLY INERT TODAY, which is exactly why it needs a pin rather than an output test.
+  // None of the six members is a class metacharacter, so reverting the escape to `(c) => c` was
+  // measured GREEN across this whole suite - a change with no failing test is a change nothing is
+  // holding. What it protects is the NEXT member: the list has grown by hand from three to six, and
+  // the day one of them is `-`, `^`, `]` or `\` the raw spelling stops meaning what it says.
+  const src = readFileSync(new URL('render_fence.ts', SRC_ROOT), 'utf-8');
+  const decl = /const BLANK_CLASS = ([\s\S]*?);\n/.exec(src);
+  assert.ok(decl, 'BLANK_CLASS is no longer declared where this pin looks for it');
+  assert.match(
+    (decl as RegExpExecArray)[1] as string,
+    /codePointAt\(0\)[\s\S]*toString\(16\)/,
+    'BLANK_CLASS no longer converts each member to a `\\u{...}` escape - a raw splice into a ' +
+      'character class is safe only while every member happens to be inert there',
+  );
+
+  // ...and WHY, demonstrated rather than asserted, on members the shipped list does NOT contain, so
+  // this proves the property on a shape nobody wrote for it. `-` between two entries is the quiet
+  // case (a RANGE); `^` in first position is the loud one (a NEGATION).
+  const esc = (c: string): string => `\\u{${(c.codePointAt(0) as number).toString(16)}}`;
+  const members = [...BLANK_SYMBOLS].slice(0, 2);
+  const matched = (cls: string): number => {
+    const re = new RegExp(`[${cls}]`, 'u');
+    let n = 0;
+    for (let cp = 0; cp <= 0xffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (re.test(String.fromCodePoint(cp))) n++;
+    }
+    return n;
+  };
+  assert.equal(matched(members.map(esc).join('')), 2, 'the escaped class must match its members and nothing else');
+  assert.equal(matched(members.join('-')), 1408, 'a raw `-` between two entries silently makes a RANGE');
+  assert.equal(matched(`^${members.join('')}`), 63486, 'a raw `^` in first position NEGATES the class');
+  assert.equal(matched(members.join('^')), 3, 'a raw `^` between entries is inert, which is what makes it quiet');
+  // The two spellings that would fail LOUDLY are worth stating too: they throw at module load
+  // rather than widening, which is the one shape of this bug that could not ship silently.
+  for (const bad of [']', '\\'])
+    assert.throws(
+      () => new RegExp(`[${members[0]}${bad}${members[1]}]`, 'u'),
+      SyntaxError,
+      `a raw ${JSON.stringify(bad)} fails loudly rather than silently, and is not what this guards`,
+    );
+});
+
 test('every printable ASCII character survives a path except the three the fence removes', () => {
   // The cheap pin for an expensive class of mistake. `ᴕ9` inside a character class with no `u`
   // flag is `ᴕ` followed by a literal `9`, so adding one astral blank glyph to the BMP-only

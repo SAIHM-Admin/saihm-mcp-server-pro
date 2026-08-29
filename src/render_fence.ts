@@ -59,10 +59,14 @@ export const safeField = (s: string, max: number): string => {
   //
   // Cost is why the order is this one and not the other. Scrubbing the FULL input bounded the OUTPUT
   // but not the WORK, and the work is a single-threaded event loop every concurrent tool call shares.
-  // Re-measured over 16,777,216 code units, scrub-first: ASCII 56 ms, non-ASCII 4,024 ms (72x),
-  // control characters 3,148 ms (56x), astral 2,403 ms (43x) — so the range is 43x-72x, and an
-  // earlier cut of this comment stating "50-64x" excluded the very case it named. Cutting to `max`
-  // first makes the work proportional to what is kept. (That cut also claimed the 16 MiB field
+  // Re-measured over 16,777,216 code units: scrub-first costs tens of times what slice-first does on
+  // every non-ASCII shape. A RATIO is deliberately NOT quoted. The multipliers move with execution
+  // ORDER - the same shape measured 36x on a forward pass and 76x on a reverse one, and the shape an
+  // earlier cut named as cheapest measured dearest when the order was flipped. Two cuts have now
+  // published a range ("50-64x", then "43x-72x") that the next measurement did not reproduce, which
+  // makes the range a property of the harness rather than of this function. What IS stable across
+  // orderings is the claim the order rests on: slice-first is flat at 15-37 ms whatever the input,
+  // scrub-first is not, and cutting to `max` first makes the work proportional to what is kept. (That cut also claimed the 16 MiB field
   // "reduced to a 189-byte line"; no render site in this tree produces 189 bytes from one such field.
   // What is reproducible is the part this function owns: safeField emits 65 characters. The repair
   // then vouched for "the receipts that carry it measure 152 and ~246 bytes", and re-measuring every
@@ -82,8 +86,8 @@ export const safeField = (s: string, max: number): string => {
 };
 
 /**
- * Blank glyphs that belong to NO ignorable Unicode class, listed because there is no property to
- * derive them from.
+ * Blank glyphs that belong to NO ignorable Unicode class, listed because no single Unicode property
+ * derives them.
  *
  * EXPORTED so the guard can pin the list rather than a copy of it. It was a literal inside the
  * regex below, and the test that checks this fence hand-kept its own two-entry copy: when the list
@@ -116,8 +120,11 @@ export const BLANK_SYMBOLS = '\u2800\u2d7f\u{16FE4}\u{1D159}\u{13441}\u{13442}';
  *
  * ESCAPED, not spliced. Each entry goes in as `\u{...}` because a raw splice into a character class
  * is safe only while every member happens to be inert there: `]` and `\` would throw at module load,
- * loudly, but `-` and `^` would COMPILE and silently widen - a `-` between two entries makes a RANGE,
- * and between U+2800 and U+2D7F that is 1408 code points scrubbed instead of 3. No entry is one of
+ * loudly, but `-` and `^` would COMPILE and silently change what the class MEANS - a `-` between two
+ * entries makes a RANGE, and between U+2800 and U+2D7F that is 1408 code points scrubbed instead of
+ * 3. `^` is the sharper of the two and only in FIRST position, where it does not widen but NEGATES:
+ * 63,486 BMP code points match rather than 3, which scrubs nearly everything a path is made of.
+ * Between entries it is inert - 3, unchanged. Both spellings measured. No entry is one of
  * those four today; the list has grown by hand from three to six, so the shape is removed rather
  * than watched.
  */
@@ -160,7 +167,8 @@ const BLANK_AND_FORMAT = new RegExp(
  *     code point whose Indic_Syllabic_Category is Invisible_Stacker.
  *     The second said U+16FE4 has the IDENTICAL profile to U+2D7F - nonspacing mark, not Cf, not
  *     default-ignorable, not whitespace. That is not a distinction; it is the profile of all 1794
- *     marks the residual below says must NEVER be scrubbed, U+0301 COMBINING ACUTE among them. An
+ *     NONSPACING marks the residual below says must NEVER be scrubbed - 2278 counting Mc and Me
+ *     with them - U+0301 COMBINING ACUTE among them. An
  *     argument that would scrub the entire residual is not an argument for scrubbing six characters.
  *     So: six invisible characters found by reading, not a class, and not closed. They stay scrubbed
  *     because in a plain-text line each one draws nothing and this function exists to make a line
@@ -169,11 +177,14 @@ const BLANK_AND_FORMAT = new RegExp(
  *     pay, and the only honest defence is that those scripts will effectively never name a file on
  *     a machine reading this line. The list does NOT grow to the stackers: those reshape the
  *     characters around them, so a path that loses one is corrupted rather than flattened.
- *     Whoever widens it next has a property to start from rather than a reading list -
- *     Indic_Syllabic_Category and the NamesList annotations are both greppable, so "there is no
- *     property to derive them from" was stronger than what was measured. And the honest size of the
- *     whole argument is in the residual below: everything this fence removes, all 4299 code points,
- *     is a SMALLER channel than the marks it must keep.
+ *     Whoever widens it next has somewhere to START rather than a reading list -
+ *     Indic_Syllabic_Category and the NamesList annotations are both greppable. That is a starting
+ *     point, NOT a derivation, and an earlier cut of this paragraph overstated it into one: between
+ *     them those two properties account for a single entry in the list above and propose no further
+ *     admissible candidate, which is why the sentence at the top of this block still says no
+ *     property derives it. The honest size of the whole argument is in the residual below: what
+ *     this fence removes and what it must keep are channels of the same order, and neither
+ *     dominates the other by enough to carry an argument.
  *     U+13443 LOST SIGN is the control and is correctly KEPT; it is a hatched box, which is ink.
  *     They ride in the `u`-flagged regex with the format classes, NOT in the BMP-only bracket class
  *     below, because U+1D159 is astral: written `\u1d159` in a class without `u` it is
@@ -217,8 +228,9 @@ const BLANK_AND_FORMAT = new RegExp(
  *     third time and for the same reason: those classes mean "invisible FORMATTING", which is not
  *     the property being reached for. 16 non-ASCII WHITESPACE code points survived it, together
  *     with U+2800 and U+2D7F, which are blank glyphs in no ignorable class at all. Measured: an
- *     18-symbol alphabet is 4 bits per unit, so 2048 smuggled bytes at MAX_PATH_FIELD_CHARS - the
- *     same capacity as the variation-selector channel the union had just been widened to close, and
+ *     18-symbol alphabet is 4.17 bits per unit, so 2135 smuggled bytes at MAX_PATH_FIELD_CHARS - a
+ *     capacity of the same order as the variation-selector channel the union had just been widened
+ *     to close (2390), and
  *     a capacity 0.4.1's collapse had given it none of.
  * The union is necessary because Default_Ignorable_Code_Point is the property that MEANS "renders as
  * nothing": 4174 code points, overlapping Cf in 138, and neither class is a subset of the other -
@@ -282,12 +294,15 @@ const BLANK_AND_FORMAT = new RegExp(
  * DEFENDED AT A COST, which the earlier wording denied by claiming the trade was homoglyphs "and
  * only those": every character in the scrub is removed even when it is genuinely IN the path, so a
  * path that legitimately contains one no longer round-trips. The common case is an emoji folder
- * name, and BOTH U+200D ZERO WIDTH JOINER and U+FE0F VARIATION SELECTOR-16 cost. A cut of this
- * sentence named ZWJ, a later one "corrected" it to FE0F, and the correction was the error: ZWJ is
- * orthographically REQUIRED in Persian and in Indic half-forms and joins every multi-person emoji
- * sequence, so it is the strictly larger cost of the two. FE0F is real as well - a text-default
- * symbol such as U+26A0, U+2764 or U+2714 is rendered as an emoji only by appending it - and a
- * directory named with either renders here as a file that does not exist. That is this function's own defect class, paid
+ * name, and THREE characters cost here, not two: U+200D ZERO WIDTH JOINER, U+200C ZERO WIDTH
+ * NON-JOINER and U+FE0F VARIATION SELECTOR-16 are all scrubbed. One cut of this sentence named ZWJ,
+ * a later one "corrected" it to FE0F, and a third ranked ZWJ "the strictly larger cost of the two" -
+ * which ranks two of three, and rests the ranking on Persian, where it is the NON-joiner that does
+ * the orthographic work. Each has its own role: ZWJ joins every multi-person emoji sequence and
+ * forms Indic half-forms, ZWNJ prevents a join the default would make, and FE0F is what renders a
+ * text-default symbol such as U+26A0, U+2764 or U+2714 as an emoji at all. No ranking is drawn
+ * between them, because a directory named with ANY of the three renders here as a file that does
+ * not exist. That is this function's own defect class, paid
  * deliberately. A non-breaking space in a path now costs the same way. The substitution is a visible
  * `?` rather than a silent swap, so the reader sees mangling instead of being misled, and that is
  * the whole of the mitigation.
