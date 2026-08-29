@@ -2423,6 +2423,47 @@ test('the closed-set checkers are `=`-free, which is why labelSafe skips them', 
   assert.ok(!MALFORMED.includes('='), 'the shared marker itself');
 });
 
+test('the closed-set checkers survive a NON-STRING, all three of them', () => {
+  // Written as ONE sweep over all three deliberately. The `typeof` guard was first added to
+  // `epochOrMarker` alone, over a sentence asserting "its two siblings resist structurally (one by
+  // strict equality, one by a length guard)". Half of that was false, and the false half was the
+  // half asserted instead of measured: a LENGTH GUARD does not resist, it DEREFERENCES.
+  // `hexOrMarker(null)` THREW, and `hexOrMarker({length: 64, toString: () => 'de'.repeat(32)})`
+  // returned the OBJECT, because the regex coerced what the length test had already admitted.
+  //
+  // A throw here is worse than a bad render: it escapes to the tool handler's catch and costs the
+  // WHOLE response - every own memory in a recall, not just the offending row. A per-function test
+  // is what let the first fix reach one arm, so this one is keyed on the LIST.
+  const CHECKERS = [
+    ['hexOrMarker', hexOrMarker],
+    ['scopeOrMarker', scopeOrMarker],
+    ['epochOrMarker', epochOrMarker],
+  ] as const;
+  // `Object.create(null)` has no `toString`, so any coercion of it THROWS - it is the probe that
+  // catches a guard placed after the coercion rather than before it.
+  const HOSTILE: unknown[] = [
+    null, undefined, 12345, 0, 10n, true, false,
+    ['de'.repeat(32)], { length: 64, toString: () => 'de'.repeat(32) },
+    new String('de'.repeat(32)), Object.create(null) as object, Symbol.iterator,
+  ];
+  for (const v of HOSTILE)
+    for (const [name, fn] of CHECKERS) {
+      // `null` is a DECLARED input for the expiry checker, where it means "no expiry".
+      if (name === 'epochOrMarker' && v === null) continue;
+      let out: string;
+      try {
+        out = fn(v as string);
+      } catch (e) {
+        assert.fail(
+          `${name}(${String(typeof v)}) THREW ${(e as Error).message} - a render helper that throws ` +
+            'costs the whole tool response, not one field',
+        );
+      }
+      assert.strictEqual(typeof out, 'string', `${name} must return the type it declares`);
+      assert.strictEqual(out, MALFORMED, `${name} rendered a non-string value instead of the marker`);
+    }
+});
+
 test('shortScalar emits the truncation marker ONLY when it actually cut something', () => {
   // A survivor from the mutation sweep: appending `…` unconditionally left every suite green, because
   // no assertion ever looked at a value SHORT enough for the two to differ. The marker is the one
@@ -3029,7 +3070,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // value carried INSIDE a `SaihmConfigError` message. The second is the deliberate shape
       // documented on that class - the value stays in the message and the RENDERER widens the
       // fence to a path budget - which is why it is an allowance here and not a fence call.
-      keyPath: 12,
+      //
+      // AND A THIRTEENTH, of that same deliberate shape: the UNREADABLE arm of that read now
+      // carries the path in a `SaihmConfigError` too, instead of re-throwing Node's errno. Both
+      // arms of one read now name the file; before, only one did.
+      keyPath: 13,
       // SEVEN OCCURRENCES, not seven lines: the delete/rewrite carries three on one line (the
       // condition, the property write and the value read). A count of occurrences described as a
       // list of lines reads as an off-by-two to anyone who checks it.
@@ -3861,37 +3906,90 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
   // The property, stated structurally: when the static text immediately before a rendered value
   // ends in `<label>=`, that value sits in the value half of a `label=value` pair and can spell a
   // second pair unless its `=` is taken away.
-  const LABEL = /[A-Za-z][A-Za-z0-9_]*=$/;
-  // What counts as a fenced value HERE is wider than `fenceOf`. The labelled lines render through
-  // `safeScalar` and `shortScalar`, not `safeField` directly - and the first cut of this sweep
-  // reused `fenceOf` alone, so dropping labelSafe from `shard=${safeScalar(shardId)}` left it
-  // green. The guard written to close a one-arm defect shipped with one. Measured, not reasoned:
-  // the mutation survived a full run before this line existed.
-  const SCALAR_FENCES = ['safeField', 'safePathField', 'safeScalar', 'shortScalar'];
-  const rendersFenced = (n: ts.Node): boolean =>
-    walk(n).some((d) => {
-      if (fenceOf(d) !== null || seedOf(d) !== null) return true;
-      const dd = calleeDecl(d);
-      return dd !== undefined && SCALAR_FENCES.some((f) => dd === declOf('render_fence.ts', f));
-    });
-  const labelSafed = (n: ts.Node): boolean =>
-    walk(n).some(
-      (d) => ts.isCallExpression(d) && ts.isIdentifier(d.expression) && d.expression.text === 'labelSafe',
-    );
-  const scan = (sf: ts.SourceFile, file: string, out: string[]): void => {
+  // A LABEL POSITION is not only `name=`. The bracket slot on a receipt line is one too -
+  // `  [<id>] seq=<n>` - and `server.ts:552` says so in its own words ("cellId and seq land in
+  // LABEL position, exactly as in the REMEMBERED and SHARED-RECALL receipts"). The first cut of
+  // this pattern could not reach ANY of the four shipped bracket-slot sites; deleting labelSafe
+  // from `FORGOTTEN [${safeScalar(id)}]` ran the full suite green, while the identical deletion
+  // one field to the right on the SAME LINE went red.
+  // ...but a bracket is only a label slot ON A LABELLED LINE, which is the invariant's own wording
+  // ("EVERY fenced field on a labelled LINE"). Widening it to every `[` claimed
+  // `SAIHM error [${safeField(e.code, ...)}] (status 400): ...`, a line carrying no `label=value`
+  // pair for a forged one to sit beside. The receipt lines all carry one (`seq=`, `complete=`);
+  // that line does not, so the value there shadows nothing and the sweep must not claim it.
+  const isLabelPosition = (before: string, after: string): boolean => {
+    const lineBefore = before.slice(before.lastIndexOf('\n') + 1);
+    if (/[A-Za-z][A-Za-z0-9_]*=$/.test(lineBefore)) return true;
+    if (!lineBefore.endsWith('[')) return false;
+    return /[A-Za-z][A-Za-z0-9_]*=/.test(lineBefore + (after.split('\n')[0] ?? ''));
+  };
+  // ONE HOP through a name - the allowance the structured sweep at the `okSym` block already makes.
+  // Hoisting a subexpression into a local is an ordinary readability refactor, and a predicate that
+  // cannot follow it is defeated BY readability at every site at once. Measured: rewriting
+  // `seq=${safeScalar(c.seq)}` as a hoisted `const seqText` deleted the fence from this sweep's
+  // view with the suite still at 275/275.
+  const unwrap = (n: ts.Expression): ts.Expression => {
+    let e = n;
+    while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e)) e = e.expression;
+    return e;
+  };
+  const hop = (n: ts.Expression): ts.Expression => {
+    const e = unwrap(n);
+    if (!ts.isIdentifier(e)) return e;
+    const d = symbolOf(e)?.declarations?.[0];
+    return d !== undefined && ts.isVariableDeclaration(d) && d.initializer !== undefined
+      ? unwrap(d.initializer)
+      : e;
+  };
+  // `boundedOrMarker` is in this list because it is an exported fence that does NOT scrub `=`;
+  // leaving it out would have made it the one renderable fence with no labelled-line obligation.
+  const SCALAR_FENCES = [
+    'safeField', 'safePathField', 'safeScalar', 'shortScalar', 'boundedOrMarker',
+  ];
+  const isFenceCall = (d: ts.Node): boolean => {
+    const dd = calleeDecl(d);
+    return dd !== undefined && SCALAR_FENCES.some((f) => dd === declOf('render_fence.ts', f));
+  };
+  const rendersFenced = (n: ts.Expression): boolean =>
+    walk(hop(n)).some((d) => fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d));
+  // APPLIED, not merely PRESENT, and resolved through the CHECKER rather than by name. Containment
+  // (`walk(n).some(isLabelSafeCall)`) exempted a whole part because a labelSafe call existed
+  // ANYWHERE beneath it, so a one-arm ternary whose other branch is dead bought a free pass for the
+  // reachable one - the catch-all class this release closed in `configErrorText`, reopened one
+  // level up inside the guard written after it. And matching the NAME made this the only predicate
+  // in this file not resolved through the program: a local `const labelSafe = (v: string) => v`
+  // replaced all four applications on one receipt with the identity function and the fence suite
+  // stayed 48/48. Both measured, both green before this rewrite.
+  const labelSafedApplied = (n: ts.Expression): boolean => {
+    const e = hop(n);
+    if (ts.isStringLiteralLike(e) || ts.isNoSubstitutionTemplateLiteral(e)) return true;
+    if (ts.isConditionalExpression(e))
+      return labelSafedApplied(e.whenTrue) && labelSafedApplied(e.whenFalse);
+    if (!ts.isCallExpression(e)) return false;
+    const d = calleeDecl(e);
+    return d !== undefined && d === declOf('render_fence.ts', 'labelSafe');
+  };
+  // Pinned, not derived: the count of fenced values this sweep finds in a label position across
+  // `src/`. Measured, and updated deliberately when a labelled render line is added or removed.
+  const LABELLED_SLOTS = 25;
+  let checkedSlots = 0;
+  const scan = (sf: ts.SourceFile, file: string, out: string[], requireApplied = true): void => {
     const staticText = (xs: ts.Expression[]): string =>
       xs.map((x) => (ts.isStringLiteralLike(x) ? x.text : '')).join('');
-    const check = (part: ts.Expression, before: string): void => {
-      if (!LABEL.test(before)) return;
+    const check = (part: ts.Expression, before: string, after: string): void => {
+      if (!isLabelPosition(before, after)) return;
       if (!rendersFenced(part)) return;
-      if (labelSafed(part)) return;
+      checkedSlots++;
+      if (requireApplied && labelSafedApplied(part)) return;
       const line = sf.getLineAndCharacterOfPosition(part.getStart(sf)).line + 1;
       out.push(`${file}:${line} ...${before.slice(-20)}${part.getText(sf)}`);
     };
     for (const n of walk(sf)) {
       if (ts.isTemplateExpression(n)) {
         const chunks = [n.head.text, ...n.templateSpans.map((sp2) => sp2.literal.text)];
-        n.templateSpans.forEach((sp, i) => check(sp.expression, chunks.slice(0, i + 1).join('')));
+        n.templateSpans.forEach((sp, i) =>
+          check(sp.expression, chunks.slice(0, i + 1).join(''), chunks.slice(i + 1).join('')),
+        );
         continue;
       }
       let parts: ts.Expression[] | null = null;
@@ -3920,7 +4018,9 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
           parts = [...n.elements];
       }
       if (parts === null) continue;
-      parts.forEach((part, i) => check(part, staticText(parts.slice(0, i))));
+      parts.forEach((part, i) =>
+        check(part, staticText(parts.slice(0, i)), staticText(parts.slice(i + 1))),
+      );
     }
   };
   const found: string[] = [];
@@ -3928,6 +4028,14 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
     assertWalked(file, walk(sf));
     scan(sf, file, found);
   }
+  // NON-VACUITY, which its three sibling sweeps all carry and this one did not: a `scan` that
+  // matches nothing in real `src/` passed silently on `deepEqual(found, [])`. Every predicate
+  // failure above presented exactly that way - green because nothing was examined.
+  assert.ok(
+    checkedSlots > 0,
+    'the label sweep examined NO fenced value in a label position. It is passing vacuously, which ' +
+      'is how every one of its predicate failures presented before they were measured',
+  );
   assert.deepEqual(
     found,
     [],
@@ -3944,10 +4052,24 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
     return out.length;
   };
   assert.equal(probe('const m = `cell=${keyPath}`;'), 1, 'the label sweep is blind to a bare fenced value');
-  assert.equal(probe('const m = `cell=${labelSafe(keyPath)}`;'), 0, 'the label sweep claims a wrapped value');
   assert.equal(probe('const m = `cell: ${keyPath}`;'), 0, 'the label sweep claims an UNlabelled value');
   assert.equal(probe(`const m = ['cell=', keyPath].join('');`), 1, "the label sweep cannot see a `.join('')` render");
-  assert.equal(probe(`const m = ['cell=', labelSafe(keyPath)].join('');`), 0, 'the label sweep claims a wrapped join render');
+  // The WRAPPED-value control cannot live in a synthetic source: `labelSafedApplied` resolves
+  // `labelSafe` through the checker, which is null for anything parsed outside the program - the
+  // same limit this file records for `fenceOf`, and the reason the previous name-based predicate
+  // was evaded by a local `const labelSafe = (v) => v`. So the control runs on the REAL files:
+  // re-scan with the application test disabled and EVERY labelled slot must be reported. That pins
+  // three things the probes above cannot reach - that the sweep sees the shipped sites, that it
+  // sees a stable number of them, and that `labelSafedApplied` is what clears them.
+  const unguarded: string[] = [];
+  for (const { file, sf } of SOURCES()) scan(sf, file, unguarded, false);
+  assert.equal(
+    unguarded.length,
+    LABELLED_SLOTS,
+    `the label sweep sees ${unguarded.length} fenced values in label position, not ${LABELLED_SLOTS}. ` +
+      'If a labelled render line was added or removed deliberately, update this number; if not, a ' +
+      'predicate stopped reaching sites it used to reach:\n' + unguarded.join('\n'),
+  );
 });
 
 test('the truncation marker cannot be FORGED through a path', () => {

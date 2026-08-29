@@ -281,7 +281,7 @@ Tracked separately.
 
 ### Compatibility
 
-The tool LIST does not change, and neither does the public API of `index.js`. THIRTEEN
+The tool LIST does not change, and neither does the public API of `index.js`. FOURTEEN
 narrower things do change, and one of them is that some error MESSAGES change — an
 earlier draft of this section opened by claiming none did, which was wrong on three
 boot messages and is corrected in its own bullet below. ONE is a regression for some inputs and is
@@ -344,6 +344,20 @@ marked as such below; two more are breaking without being regressions (the
   purpose, because a registry install UI emits exactly that from a blank optional
   field. A whitespace-only `SAIHM_MASTER_SECRET_FILE` is now named as such rather than
   read, where it previously failed with the value invisible in its own message.
+- **An UNREADABLE self-join identity file now names the file and a remedy, not a bare errno.**
+  The same new read that detects the zero-byte case has two failure arms, and only one of them
+  was written. `ensureSelfJoinIdentityEnv()` re-threw Node's own error, so a permission or type
+  failure surfaced as `EACCES: permission denied, open '<path>'` — and under `EISDIR`, whose
+  message carries no path at all, with nothing identifying the file. At 0.4.1 there was no read
+  here: the failure reached `bootFromEnv()`, which wrapped it as `SAIHM_MASTER_SECRET_FILE could
+  not be read: <path>. …`. Moving the read earlier moved it out from behind that wrapper. It is
+  now a `SaihmConfigError` reading `the self-join identity file could not be read: <path>
+  (<errno>). Fix its permissions, or restore your backup of it — deleting it and running the join
+  again mints a NEW identity, which starts an EMPTY memory.` Consumers matching the old text, or
+  matching on `e.name === 'Error'` here, see a different string and `SaihmConfigError`. Match on
+  the VARIABLE NAME, as elsewhere in this section — the bare errno this replaces could not be
+  matched on at all.
+
 - **A zero-byte self-join identity file is an error instead of an unrecoverable loop.**
   `ensureSelfJoinIdentityEnv()` treated any existing file as provisioned and set
   `SAIHM_MASTER_SECRET_FILE` to it itself, so the empty secret fell through to the

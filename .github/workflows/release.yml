@@ -42,8 +42,15 @@ jobs:
           PKG="$(node -p "require('./package.json').version")"
           SRV="$(node -p "require('./server.json').version")"
           SRVPKG="$(node -p "require('./server.json').packages[0].version")"
-          echo "package.json=$PKG  server.json=$SRV  server.json.packages[0]=$SRVPKG  release-tag=$TAG"
+          # The LOCKFILE is gated too. It was not, and v0.4.1 shipped a tag whose
+          # package-lock.json still said 0.3.0 at both fields - repaired in-tree afterwards, never
+          # caught here. `npm version` updates it; a hand-edit of the two JSONs does not.
+          LOCK="$(node -p "require('./package-lock.json').version")"
+          LOCKPKG="$(node -p "require('./package-lock.json').packages[''].version")"
+          echo "package.json=$PKG  server.json=$SRV  server.json.packages[0]=$SRVPKG  package-lock.json=$LOCK/$LOCKPKG  release-tag=$TAG"
           test "$PKG" = "$TAG"    || { echo "::error::package.json version mismatch ($PKG != $TAG)"; exit 1; }
+          test "$LOCK" = "$TAG"    || { echo "::error::package-lock.json version mismatch ($LOCK != $TAG)"; exit 1; }
+          test "$LOCKPKG" = "$TAG" || { echo "::error::package-lock.json packages[''].version mismatch ($LOCKPKG != $TAG)"; exit 1; }
           test "$SRV" = "$TAG"    || { echo "::error::server.json version mismatch ($SRV != $TAG)"; exit 1; }
           test "$SRVPKG" = "$TAG" || { echo "::error::server.json packages[0].version mismatch ($SRVPKG != $TAG)"; exit 1; }
 

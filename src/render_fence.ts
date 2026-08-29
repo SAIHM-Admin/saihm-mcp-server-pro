@@ -613,8 +613,10 @@ export const ABBREV_CHARS = 16;
  * still bounds the slice. Drop the clamp AND pass `keep` through, and `shortScalar('a'.repeat(65), 65)`
  * becomes 65 unfenced characters instead of `'a'x64 + '…'`. Every call site
  * uses the default, so no rendered output ever differed; the defect was that the two constants had no
- * expressed relationship while `MAX_JOIN_FIELD_CHARS = 256` is declared 80 lines above - an
- * earlier cut said eleven, and the proximity it argued from has never existed at any commit. The
+ * expressed relationship while `MAX_JOIN_FIELD_CHARS = 256` is declared EARLIER IN THIS FILE - an
+ * earlier cut said eleven lines and a later one said eighty; the first was never true at any commit
+ * and the second stopped being true two commits after it was written. This file rewraps every round,
+ * so ANY line-distance claim in it is stale as soon as it is made, and none is quoted here now. The
  * hazard is not adjacency but that the two constants had no expressed relationship, so a call
  * could read as if it widened the fence. Pinned by test, not by this sentence.
  */
@@ -796,7 +798,7 @@ export const MALFORMED = '(malformed)';
  * survives that mistake.
  */
 export const hexOrMarker = (s: string): string =>
-  s.length === 64 && /^[0-9a-f]{64}$/.test(s) ? s : MALFORMED;
+  typeof s === 'string' && s.length === 64 && /^[0-9a-f]{64}$/.test(s) ? s : MALFORMED;
 /**
  * Grant scope: a closed set on both sides of the wire — and the set is {read, readwrite}, NOT the
  * three-value sharing-contract scope. A blind grant with scope `write` cannot exist: it is rejected
@@ -810,10 +812,18 @@ export const scopeOrMarker = (s: string): string =>
  *
  * The `typeof` guard is what makes that last clause true. `RegExp.test` COERCES, so a number reaching
  * here matched the all-digits test and was returned AS a number, out of a function declared to return
- * `string` - the declared type enforced by nothing. Its two siblings resist structurally (one by
- * strict equality, one by a length guard); this arm was the one that did not, which is this release's
- * own defect class turned inward. Unreachable through today's client, and the module header disclaims
- * relying on that.
+ * `string` - the declared type enforced by nothing.
+ *
+ * That guard was first added HERE ALONE, over a sentence claiming "its two siblings resist
+ * structurally (one by strict equality, one by a length guard)". Half of that was false, and the
+ * false half was the one asserted rather than measured: {@link scopeOrMarker} does resist, by strict
+ * equality, but a LENGTH GUARD resists nothing - it DEREFERENCES. `hexOrMarker(null)` THREW, and
+ * `hexOrMarker({length: 64, toString: () => 'de'.repeat(32)})` returned the OBJECT, because the
+ * regex coerced what the length test had already admitted. A throw from a render helper is worse
+ * than a bad render: it escapes to the handler's catch and costs the WHOLE tool response, own
+ * memories included. All three now take the same guard. Unreachable through today's client, and the
+ * module header disclaims relying on that - which is the disclaimer this fix was justified by, so it
+ * had to reach every arm it covers.
  */
 export const epochOrMarker = (s: string | null): string =>
   s === null ? 'never' : typeof s === 'string' && /^[0-9]{1,20}$/.test(s) ? s : MALFORMED;

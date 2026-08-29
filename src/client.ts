@@ -904,7 +904,21 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
     try {
       holdsSecret = readFileSync(keyPath, 'utf-8').trim().length > 0;
     } catch (e) {
-      throw markPathBearing(e);
+      // SYMMETRY with the empty-file arm below, which is the other outcome of THIS SAME read. That
+      // one names the file and says what clears it; this one used to re-throw Node's errno, so an
+      // unreadable identity surfaced as `EACCES: permission denied, open '<path>'` with no
+      // attribution and no remedy - and under `EISDIR`, whose message carries no path at all, not
+      // even the file. 0.4.1 had no read here: the failure reached `bootFromEnv`, which wrapped it.
+      // Moving the read forward moved it out from behind that wrapper, so the wrapper is restored
+      // here. The changelog's stated remedy for this whole class is "match on the VARIABLE NAME",
+      // which a bare errno cannot satisfy for any consumer.
+      throw new SaihmConfigError(
+        `the self-join identity file could not be read: ${keyPath} ` +
+          `(${(e as NodeJS.ErrnoException).code ?? 'unknown'}). Fix its permissions, or restore ` +
+          'your backup of it - deleting it and running the join again mints a NEW identity, which ' +
+          'starts an EMPTY memory.',
+        'path',
+      );
     }
     if (!holdsSecret)
       throw new SaihmConfigError(
