@@ -164,9 +164,33 @@ const symbolOf = (n: ts.Node): ts.Symbol | undefined => {
   return s;
 };
 
+/**
+ * WHAT a call invokes, seen through the two indirections that are spellings rather than different
+ * functions.
+ *
+ * `f.call(this, x)` and `f.apply(this, [x])` invoke `f`, but the checker resolves the SIGNATURE to
+ * `Function.prototype.call`, so both readers below named the wrong function. Measured: a fence call
+ * spelled with `.call` was invisible to `fenceOf`, and `this.persist.call(this)` was invisible to
+ * the sweep that derives which methods reach persist - both at 45/45. `.bind` was already caught,
+ * which is the shape of a partial closure: three spellings of one indirection, one of them covered.
+ *
+ * `this['persist']()` is the other: the name moves into a string, `getSymbolAtLocation` on the
+ * element access reports nothing, and the string literal is where the property symbol actually
+ * lives. That spelling was closed on the NAME path in an earlier round and reintroduced here when
+ * the sweep moved to symbols - the same class, re-opened by the fix for a different one.
+ */
+const calleeTarget = (n: ts.CallExpression): ts.Node => {
+  let e: ts.Expression = n.expression;
+  if (ts.isPropertyAccessExpression(e) && (e.name.text === 'call' || e.name.text === 'apply'))
+    e = e.expression;
+  return ts.isElementAccessExpression(e) && ts.isStringLiteralLike(e.argumentExpression)
+    ? e.argumentExpression
+    : e;
+};
+
 /** The symbol a CALL reaches, or undefined when the callee is not a resolvable name. */
 const calleeSymbol = (n: ts.Node): ts.Symbol | undefined =>
-  ts.isCallExpression(n) ? symbolOf(n.expression) : undefined;
+  ts.isCallExpression(n) ? symbolOf(calleeTarget(n)) : undefined;
 
 /** A named export of one `src/` module, resolved to the symbol every alias of it shares. */
 const exportSymbol = (module: string, name: string): ts.Symbol => {
@@ -195,8 +219,20 @@ const exportSymbol = (module: string, name: string): ts.Symbol => {
  * fields, parameters, namespace access and aliases alike, because it is what the compiler decided
  * the call invokes.
  */
-const calleeDecl = (n: ts.Node): ts.Node | undefined =>
-  ts.isCallExpression(n) ? CHECKER().getResolvedSignature(n)?.declaration : undefined;
+const calleeDecl = (n: ts.Node): ts.Node | undefined => {
+  if (!ts.isCallExpression(n)) return undefined;
+  // A resolved signature is the right instrument everywhere EXCEPT where the call goes through
+  // `Function.prototype`, which is exactly where it confidently reports the wrong declaration
+  // rather than none. There the target's own symbol is the answer, normalised the way `declOf`
+  // normalises it so an arrow assigned to a const compares equal either way.
+  const t = calleeTarget(n);
+  if (t !== n.expression) {
+    const d = symbolOf(t)?.declarations?.[0];
+    if (d !== undefined)
+      return ts.isVariableDeclaration(d) && d.initializer !== undefined ? d.initializer : d;
+  }
+  return CHECKER().getResolvedSignature(n)?.declaration;
+};
 
 const DECL_CACHE = new Map<string, ts.Node>();
 /** The declaration an exported function name resolves to, as `calleeDecl` would report it. */
@@ -1573,6 +1609,14 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
 });
 
 test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', () => {
+  // The filesystem mutations that exist today, each with the reason it is not an unwrapped
+  // persist-reaching call. Both `persist()` methods are the subject of this whole test; the other
+  // two write a key file and a checkout URL, neither of which is the seq/cell cache.
+  const FS_WRITES: Record<string, number> = {
+    'client.ts:ensureSelfJoinIdentityEnv': 4, // writes the self-join key file, not the cache
+    'client.ts:persist': 8, // the two persist() methods themselves, 4 calls each
+    'server.ts:persistCheckoutUrl': 4, // writes the checkout URL, and is already wrapped
+  };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
   // deleting all four left the suite green. The same shape had already cost a finding one commit
@@ -1657,6 +1701,52 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     EXCLUDED.length,
     'EXCLUDED names a method that does not reach persist() - the exclusion is stale',
   );
+  // THE THIRD SPELLING, which does not spell `persist` at all: a method that writes the cache file
+  // DIRECTLY. `writeFileSync(this.path, ...)` reaches the same file with the same failure mode and
+  // never names the method, so every sweep above - name, symbol, resolved signature - is blind to
+  // it by construction, and it was measured GREEN. What CAN be enumerated is the write itself:
+  // every filesystem mutation under `src/`, keyed by the function performing it. A new one is a
+  // line in this table, and that line is where someone says why a write outside `persist()` is not
+  // an unwrapped persist-reaching call wearing different clothes.
+  const FS_CALLS = [
+    'writeFileSync', 'appendFileSync', 'renameSync', 'unlinkSync', 'rmSync', 'rmdirSync',
+    'mkdirSync', 'openSync', 'copyFileSync', 'truncateSync', 'chmodSync', 'createWriteStream',
+  ];
+  const enclosing = (n: ts.Node): string => {
+    for (let p: ts.Node | undefined = n.parent; p !== undefined; p = p.parent) {
+      if (
+        (ts.isMethodDeclaration(p) || ts.isFunctionDeclaration(p) || ts.isVariableDeclaration(p)) &&
+        p.name !== undefined &&
+        ts.isIdentifier(p.name)
+      )
+        return p.name.text;
+    }
+    return '<module scope>';
+  };
+  const fsWrites: Record<string, number> = {};
+  for (const { file, sf } of SOURCES())
+    for (const n of walk(sf)) {
+      if (!ts.isCallExpression(n)) continue;
+      const t = calleeTarget(n);
+      const nm = ts.isIdentifier(t)
+        ? t.text
+        : ts.isPropertyAccessExpression(t)
+          ? t.name.text
+          : ts.isStringLiteralLike(t)
+            ? t.text
+            : '';
+      if (!FS_CALLS.includes(nm)) continue;
+      const k = `${file}:${enclosing(n)}`;
+      fsWrites[k] = (fsWrites[k] ?? 0) + 1;
+    }
+  assert.ok(Object.keys(fsWrites).length > 0, 'the filesystem-write finder found nothing - it is broken, not `src/`');
+  assert.deepEqual(
+    fsWrites,
+    FS_WRITES,
+    'a filesystem write was added, removed or moved between functions. If it writes the cache, it ' +
+      'is a persist-reaching call however it is spelled - wrap its call site. If it does not, add ' +
+      'it here with the reason',
+  );
   // SWALLOWS means the exception does not leave the catch. Any throw ANYWHERE under the clause is
   // enough to fail this: a CONDITIONAL rethrow propagates on exactly the path the exclusion claims
   // is impossible, so this is deliberately fail-closed.
@@ -1669,7 +1759,42 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // `walkScope`, that exact shape planted at an excluded call site left the suite at 45 pass. The
   // conservative answer to an uninvoked callback that throws is a false RED, which costs a person a
   // minute; the conservative answer the other way ships an exemption whose premise is false.
-  const swallows = (cc: ts.CatchClause): boolean => !walk(cc.block).some(ts.isThrowStatement);
+  // SWALLOWS means the exception cannot leave the catch, and a syntactic reader can only establish
+  // that by refusing everything that MIGHT leave. "No `throw` anywhere under the clause" was the
+  // previous bar and it is not enough: `catch (e) { rethrow(e); }`, with a one-line module-level
+  // helper that throws, contains no ThrowStatement at all and passed 45 of 45. Reachability through
+  // a callee is not something this file can compute, so the bar is INERTNESS - a catch that claims
+  // to swallow may not call anything, because any call may throw. Both of today's excluded catches
+  // are comment-only, so the rule costs nothing now and forces the judgement the first time it
+  // would cost something.
+  //
+  // MEASURED, and it corrects a report: a throw inside a callback in the catch - `[0].forEach(() =>
+  // { throw e; })` - was reported as an evasion and is not one. `walk` descends into nested function
+  // bodies, so it is found, and the site goes red. So does a `finally` that throws around the same
+  // call. The helper was the one that got through.
+  // Refined against the real site rather than against a rule: `catch { try { remove() } catch {} }`
+  // is how the one excluded catch is actually written, and a flat "no calls" bar calls it a leak.
+  // The property is not "nothing happens", it is "nothing LEAVES" - so anything that may complete
+  // abruptly must itself be contained by a try, inside this catch, whose own catch swallows.
+  const swallowingTry = (n: ts.Node, boundary: ts.Node): boolean => {
+    for (let child: ts.Node = n, p: ts.Node | undefined = n.parent; p !== undefined; child = p, p = p.parent) {
+      if (
+        ts.isTryStatement(p) &&
+        child === p.tryBlock &&
+        p.catchClause !== undefined &&
+        swallows(p.catchClause)
+      )
+        return true;
+      if (p === boundary) return false;
+    }
+    return false;
+  };
+  const swallows = (cc: ts.CatchClause): boolean =>
+    !walk(cc.block).some(
+      (n) =>
+        (ts.isThrowStatement(n) || ts.isCallExpression(n) || ts.isNewExpression(n)) &&
+        !swallowingTry(n, cc.block),
+    );
   // The WRAPPER, structurally: the catch clause rethrows the binding it caught, marked. The regex cut
   // spelled it `catch \(e\) \{` letter for letter, so `catch(e)` or `catch (err)` read as an
   // UNWRAPPED call site. Fail-closed, so it was never going to ship a hole - but it fails on the
@@ -1729,13 +1854,30 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     const bare = ts.isIdentifier(thrown) && thrown.text === bound.text;
     return bare && !walkScope(cc.block).some(ts.isReturnStatement);
   };
+  // ABRUPT COMPLETION of a `finally`, which discards the in-flight exception however it is spelled.
+  // `walkScope` is the right direction and deliberately so: a `return` inside a callback DECLARED in
+  // the finally returns from that callback and discards nothing. The question is what leaves THIS
+  // frame.
+  const abruptly = (b: ts.Block): boolean =>
+    walkScope(b).some(
+      (n) =>
+        ts.isReturnStatement(n) ||
+        ts.isThrowStatement(n) ||
+        ts.isBreakStatement(n) ||
+        ts.isContinueStatement(n),
+    );
   const markEscapes = (from: ts.Node): boolean => {
+    // THE NEAREST FINALLY OF ALL is the one on the try that holds the call, and the loop below never
+    // looked at it: it started at the PARENT and asked each ancestor whether the child it came from
+    // was that ancestor's try block. So `try { call() } catch (e) { throw mark(e) } finally { ... }`
+    // - one statement, catch and finally together - was outside the walk entirely. Measured: a
+    // `return` there left the suite green, and `return` is the case the check was written for. It
+    // was reported as "one keyword away"; it was one FRAME away as well.
+    if (ts.isTryStatement(from) && from.finallyBlock !== undefined && abruptly(from.finallyBlock))
+      return false;
     for (let child: ts.Node = from, p: ts.Node | undefined = from.parent; p !== undefined; child = p, p = p.parent) {
       if (!ts.isTryStatement(p) || child !== p.tryBlock) continue;
-      // A `finally` that RETURNS discards the in-flight exception entirely - measured, and invisible
-      // to a predicate that only looked at catch clauses.
-      if (p.finallyBlock !== undefined && walkScope(p.finallyBlock).some(ts.isReturnStatement))
-        return false;
+      if (p.finallyBlock !== undefined && abruptly(p.finallyBlock)) return false;
       if (p.catchClause !== undefined && !preservesMark(p.catchClause)) return false;
     }
     return true;
