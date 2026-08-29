@@ -923,9 +923,22 @@ export const MAX_URL_MESSAGE_CHARS =
  * process.
  */
 function configErrorText(e: SaihmConfigError): string {
-  return e.valueKind === 'path'
-    ? safePathField(e.message, MAX_PATH_MESSAGE_CHARS)
-    : safePathField(e.message, MAX_URL_MESSAGE_CHARS);
+  // A SWITCH, not a ternary. `valueKind` is a closed two-member union, so `kind === 'path' ? A : B`
+  // is exhaustive TODAY - but the else arm is a CATCH-ALL, and the day a third class is added it
+  // inherits the URL budget and the path fence in silence, with no compile error and no red test.
+  // That is this module's own defect class one level up: a value under a fence chosen for a
+  // different class. With no `default` and a declared `string` return, a third member instead makes
+  // this function fall off its end and stop type-checking (TS2366), which is a compile error the
+  // author cannot miss. Both budgets stay written out as literals at their call sites so the
+  // suite's `fence:budget` site tally keeps resolving them - routing them through a lookup table
+  // would buy the same exhaustiveness by making the budget an element access the sweep cannot fold,
+  // which trades a latent hole for a real loss of resolution.
+  switch (e.valueKind) {
+    case 'path':
+      return safePathField(e.message, MAX_PATH_MESSAGE_CHARS);
+    case 'url':
+      return safePathField(e.message, MAX_URL_MESSAGE_CHARS);
+  }
 }
 
 /**
