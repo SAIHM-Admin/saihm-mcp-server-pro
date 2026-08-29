@@ -312,7 +312,24 @@ const foldString = (n: ts.Node): string | null => {
   }
   return null;
 };
+/**
+ * Functions whose RETURN VALUE is a caller-actionable path.
+ *
+ * `SEEDS` is a list of NAMES, and the release's own fix routes two of the five
+ * `safePathField:MAX_PATH_FIELD_CHARS` sites through `identityKeyFile()` - a value that names no
+ * seed, so every value-keyed instrument in this file was blind to the identifier its own fix
+ * introduced. Kept SEPARATE from `SEEDS` deliberately: putting the bare name in there would count
+ * the declaration and every import as an occurrence of a caller-chosen value, which is not what
+ * either sweep means. It is the CALL that produces the path.
+ */
+const SEED_CALLS = ['identityKeyFile'];
 const seedOf = (n: ts.Node): string | null => {
+  if (
+    ts.isCallExpression(n) &&
+    ts.isIdentifier(n.expression) &&
+    SEED_CALLS.includes(n.expression.text)
+  )
+    return n.expression.text;
   if (ts.isIdentifier(n)) return SEEDS.includes(n.text) ? n.text : null;
   if (n.parent !== undefined && foldString(n.parent) !== null) return null;
   const t = foldString(n);
@@ -1253,12 +1270,20 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       // the environment does not supply one - a stated limit, in the sweep's own words, and the one
       // shape here where "give it its own `const`" is advice an author can act on. A position, an
       // index and a comparison have no such reading.
+      // A default is a number OR a digit-string: `parseInt(process.env.X ?? '4194304', 10)` is the
+      // idiomatic spelling of exactly the shape this fires on, and reading only the numeric one let
+      // it take the silent exit this guard exists to close. One arm again.
+      const numericDefault = (x: ts.Expression): boolean => {
+        if (typeof evaluate(x, scope) === 'number') return true;
+        const t = foldString(x);
+        return t !== null && /^[0-9]+$/.test(t);
+      };
       const defaulted = walk(init).some(
         (x) =>
           ts.isBinaryExpression(x) &&
           (x.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
             x.operatorToken.kind === ts.SyntaxKind.BarBarToken) &&
-          typeof evaluate(x.right, scope) === 'number',
+          numericDefault(x.right),
       );
       if (leaves === null && constVar && moduleScope(d) && !fnValued && defaulted)
         assert.ok(
@@ -1662,7 +1687,12 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       'safeField:MAX_ERROR_CODE_CHARS': 1,
       // the endpoint message, the unmarked plain-Error arm, and the non-Error coerce arm
       'safeField:MAX_ERROR_MESSAGE_CHARS': 3,
-      'safeField:MAX_URL_MESSAGE_CHARS': 1, // a config error naming a URL
+      // A config error naming a URL. It was `safeField:MAX_URL_MESSAGE_CHARS` until round 11: the
+      // BUDGET had been widened to fit the URL while the CHARACTER policy stayed on the prose
+      // fence, which is the defect class this release exists to close, surviving in the module
+      // that names it. The pairing was pinned here and argued by no sentence, so the table agreed
+      // with the code and neither was checked against the doctrine.
+      'safePathField:MAX_URL_MESSAGE_CHARS': 1,
       // a config error naming a PATH, and a marked filesystem error whose message embeds one
       'safePathField:MAX_PATH_MESSAGE_CHARS': 2,
     },
@@ -1728,21 +1758,33 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     // previous cut asked `budget === 'MAX_PATH_FIELD_CHARS' || budget === 'MAX_PATH_MESSAGE_CHARS'`
     // and so failed OPEN: a THIRD path budget is not recognised as one, and pairing it with the
     // ASCII-collapsing `safeField` therefore SATISFIES this invariant instead of violating it. That
-    // is not hypothetical - the URL/IDN fence deferred in this release is exactly that shape, and it
-    // is the hardcoded-list failure this file has now recorded four times, this time inside the
-    // guard written to mechanise the defect class.
+    // is not hypothetical - the URL/IDN fence was exactly that shape, and it is the hardcoded-list
+    // failure this file has now recorded four times, this time inside the guard written to
+    // mechanise the defect class. That fence is no longer deferred: it was closed in round 11, and
+    // the classes below are renamed because their old names were the reason it stayed open.
+    //
+    // WHAT THE CLASS ACTUALLY DECIDES is whether the embedded value must SURVIVE INTACT for the
+    // caller to act on it - not whether the budget's name contains PATH. Classifying by the name is
+    // how `MAX_URL_MESSAGE_CHARS` sat on the ASCII fence while `MAX_PATH_MESSAGE_CHARS` did not:
+    // the two carry the same KIND of value (ours, handed back so the operator can act) and differed
+    // only in spelling. The line that survives measurement is PROVENANCE. An ENDPOINT-chosen URL is
+    // attacker-capable and stays on `safeField`, where a mangled-but-visible URI is a failure the
+    // user can see and report - that is why `MAX_URL_FIELD_CHARS` (the checkout URL, server.ts:1152
+    // and :1273) is `prose` while `MAX_URL_MESSAGE_CHARS` (the operator's own SAIHM_ENDPOINT_URL,
+    // handed back so they can fix it) is `roundtrip`. Two URL budgets, opposite classes, one
+    // reason.
     //
     // UNCLASSIFIED IS RED. An author adding a budget has to say which class of value it fences,
     // which is the decision this whole sweep exists to force rather than to infer.
-    const BUDGET_CLASS: Record<string, 'path' | 'other' | 'passthrough'> = {
-      MAX_PATH_FIELD_CHARS: 'path',
-      MAX_PATH_MESSAGE_CHARS: 'path',
-      MAX_ANNOUNCEMENT_FIELD_CHARS: 'other',
-      MAX_JOIN_FIELD_CHARS: 'other',
-      MAX_URL_FIELD_CHARS: 'other',
-      MAX_URL_MESSAGE_CHARS: 'other',
-      MAX_ERROR_CODE_CHARS: 'other',
-      MAX_ERROR_MESSAGE_CHARS: 'other',
+    const BUDGET_CLASS: Record<string, 'roundtrip' | 'prose' | 'passthrough'> = {
+      MAX_PATH_FIELD_CHARS: 'roundtrip',
+      MAX_PATH_MESSAGE_CHARS: 'roundtrip',
+      MAX_ANNOUNCEMENT_FIELD_CHARS: 'prose',
+      MAX_JOIN_FIELD_CHARS: 'prose', // the endpoint's verificationUri
+      MAX_URL_FIELD_CHARS: 'prose', // the endpoint's checkout URL - attacker-capable
+      MAX_URL_MESSAGE_CHARS: 'roundtrip', // the operator's own SAIHM_ENDPOINT_URL, handed back
+      MAX_ERROR_CODE_CHARS: 'prose',
+      MAX_ERROR_MESSAGE_CHARS: 'prose',
       // Not one of ours: `safeScalar` forwards the CALLER's `max` to `safeField`, so it carries no
       // value class at this site. The caller's own call site is swept wherever it is written.
       max: 'passthrough',
@@ -1763,15 +1805,16 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       if (/PATH/.test(budget as string))
         assert.equal(
           cls,
-          'path',
+          'roundtrip',
           `${file}: \`${budget}\` is named as a path budget but classified as '${cls}'`,
         );
-      const isPathBudget = cls === 'path';
+      const mustRoundTrip = cls === 'roundtrip';
       assert.equal(
-        isPathBudget,
+        mustRoundTrip,
         fn === 'safePathField',
-        file + ': ' + key + ' pairs a fence with the wrong value class. A path budget takes ' +
-          'safePathField; every other budget takes safeField',
+        file + ': ' + key + ' pairs a fence with the wrong value class. A value that must ' +
+          'ROUND-TRIP for the caller to act on it takes safePathField; prose, and anything an ' +
+          'ENDPOINT chose, takes safeField',
       );
     }
     assert.deepEqual(
@@ -1923,19 +1966,45 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     'chmod', 'chmodSync', 'createWriteStream', 'write', 'writev',
   ]);
   const FS_SPECIFIERS = ['node:fs', 'node:fs/promises', 'fs', 'fs/promises'];
-  /** local name -> imported name, for every value imported from an fs module in this file. */
-  const fsBindings = (sf: ts.SourceFile): Map<string, string> => {
+  /**
+   * What this file imports from an fs module: named bindings (local -> imported) AND namespaces.
+   *
+   * The namespace arm is a REGRESSION FIX, not a widening. Before round 10 the reader matched
+   * `ts.isPropertyAccessExpression(t) ? t.name.text`, which saw `fs.writeFileSync` by accident of
+   * spelling; round 10 replaced it with `ts.isIdentifier(t) ? t.text` to stop claiming
+   * `process.stdout.write`, and took `import * as fs from 'node:fs'` out with it. The fix for one
+   * false positive removed a true one - this round's pattern, inside the guard that records it.
+   * Both arms are now explicit and neither is a side effect of the other.
+   */
+  const fsBindings = (sf: ts.SourceFile): { named: Map<string, string>; namespaces: Set<string> } => {
     const out = new Map<string, string>();
+    const ns = new Set<string>();
     for (const st of sf.statements) {
       if (!ts.isImportDeclaration(st) || st.importClause === undefined) continue;
       if (st.importClause.isTypeOnly || !ts.isStringLiteral(st.moduleSpecifier)) continue;
       if (!FS_SPECIFIERS.includes(st.moduleSpecifier.text)) continue;
       const nb = st.importClause.namedBindings;
+      if (nb !== undefined && ts.isNamespaceImport(nb)) {
+        ns.add(nb.name.text);
+        continue;
+      }
       if (nb === undefined || !ts.isNamedImports(nb)) continue;
       for (const el of nb.elements)
         if (!el.isTypeOnly) out.set(el.name.text, (el.propertyName ?? el.name).text);
     }
-    return out;
+    return { named: out, namespaces: ns };
+  };
+  /** `fs.writeFileSync` and `fs['writeFileSync']` alike: the object and the member it names. */
+  const memberOf = (t: ts.Node): { obj: string; member: string } | undefined => {
+    if (ts.isPropertyAccessExpression(t) && ts.isIdentifier(t.expression))
+      return { obj: t.expression.text, member: t.name.text };
+    if (
+      ts.isElementAccessExpression(t) &&
+      ts.isIdentifier(t.expression) &&
+      ts.isStringLiteralLike(t.argumentExpression)
+    )
+      return { obj: t.expression.text, member: t.argumentExpression.text };
+    return undefined;
   };
   /** The nearest named function, method or variable that lexically holds this call. */
   const enclosing = (n: ts.Node): string => {
@@ -1952,12 +2021,16 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   };
   const fsWrites: Record<string, number> = {};
   for (const { file, sf } of SOURCES()) {
-    const fsLocal = fsBindings(sf);
+    const { named: fsLocal, namespaces: fsNs } = fsBindings(sf);
     for (const n of walk(sf)) {
       if (!ts.isCallExpression(n)) continue;
       const t = calleeTarget(n);
-      const local = ts.isIdentifier(t) ? t.text : '';
-      const imported = fsLocal.get(local);
+      const mem = memberOf(t);
+      const imported = ts.isIdentifier(t)
+        ? fsLocal.get(t.text)
+        : mem !== undefined && fsNs.has(mem.obj)
+          ? mem.member
+          : undefined;
       if (imported === undefined || !MUTATORS.has(imported)) continue;
       const k = `${file}:${enclosing(n)}`;
       fsWrites[k] = (fsWrites[k] ?? 0) + 1;
@@ -1968,9 +2041,18 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   const probeFs = fsBindings(
     parse("\nimport { writeFile as wf, readFile } from 'node:fs/promises';\n"),
   );
-  assert.equal(probeFs.get('wf'), 'writeFile', 'the fs binding map does not follow an import alias');
-  assert.equal(probeFs.get('readFile'), 'readFile', 'the fs binding map missed a plain import');
-  assert.equal(probeFs.get('writeFile'), undefined, 'the fs binding map keyed on the wrong name');
+  assert.equal(
+    probeFs.named.get('wf'),
+    'writeFile',
+    'the fs binding map does not follow an import alias',
+  );
+  assert.equal(probeFs.named.get('readFile'), 'readFile', 'the fs binding map missed a plain import');
+  // ...and the NAMESPACE arm, on a source this tree does not contain, because the regression this
+  // fixes was invisible precisely because `src/` happens not to use the spelling.
+  const probeNs = fsBindings(parse("\nimport * as fs from 'node:fs';\n"));
+  assert.deepEqual([...probeNs.namespaces], ['fs'], 'the fs binding map missed a namespace import');
+  assert.equal(probeNs.named.size, 0, 'a namespace import must not also register a named binding');
+  assert.equal(probeFs.named.get('writeFile'), undefined, 'the fs binding map keyed on the wrong name');
   assert.ok(Object.keys(fsWrites).length > 0, 'the filesystem-write finder found nothing - it is broken, not `src/`');
   assert.deepEqual(
     fsWrites,
@@ -2896,6 +2978,13 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'server.ts': {
       localCacheResidual: 1, // truthiness selecting whether the residual line renders at all
       savedTo: 2, // parameter declaration, and the truthiness guarding its (fenced) render
+      // TWO calls to `identityKeyFile()`, the key-file resolver this release's own fix routes the
+      // `join` and `free-join` backup lines through. It carries a caller-actionable path and named
+      // no seed, so every value-keyed instrument here was blind to the identifier the fix
+      // introduced - and a SIXTH env-derived name was disclosed as the residual while this one sat
+      // in the tree. Both occurrences are inside a `safePathField` call; if a third appears
+      // unfenced, this count moves and the sweep says where.
+      identityKeyFile: 2,
       // Two of these nine (944, 945) DO render - through `keyPath`, the local bound at 939 to
       // `safePathField(...)` or to `null`. An earlier cut exempted such a local BY NAME, which
       // exempted all of them and any future one; an unfenced `${s.keyPath}` in the join result then
@@ -3201,11 +3290,60 @@ test('the blank list is ESCAPED into its character class, not spliced raw', () =
   const src = readFileSync(new URL('render_fence.ts', SRC_ROOT), 'utf-8');
   const decl = /const BLANK_CLASS = ([\s\S]*?);\n/.exec(src);
   assert.ok(decl, 'BLANK_CLASS is no longer declared where this pin looks for it');
-  assert.match(
-    (decl as RegExpExecArray)[1] as string,
-    /codePointAt\(0\)[\s\S]*toString\(16\)/,
-    'BLANK_CLASS no longer converts each member to a `\\u{...}` escape - a raw splice into a ' +
-      'character class is safe only while every member happens to be inert there',
+  // THE PROPERTY, not the tokens. The previous cut asserted the declaration TEXT matched
+  // /codePointAt\(0\)[\s\S]*toString\(16\)/, which any construction containing those tokens
+  // satisfies - including one that escapes only the ASTRAL members and splices the BMP ones raw, a
+  // belief a real author holds ("astral needs \u{...}, BMP characters are literal"). That mutant
+  // shipped GREEN across the whole suite. A pin on the SPELLING of a fix is not a pin on the fix.
+  //
+  // So the shipped construction is EXECUTED, over a member list nobody wrote it for: `A`, `-`, `Z`
+  // and one astral symbol. Escaped, that class matches exactly those four code points. Spliced raw
+  // - wholly or only in its BMP half - `A-Z` is a RANGE and it matches twenty-six more.
+  const exprSrc = ((decl as RegExpExecArray)[1] as string).replace(/BLANK_SYMBOLS/g, 'PROBE');
+  // `transpileModule` emits a STATEMENT, and under the default module target it prefixes a
+  // `"use strict";` prologue. Both have to come off before the expression can be wrapped - measured
+  // twice, not assumed: the first cut of this pin threw `Unexpected token ';'` on the trailing
+  // semicolon and the second threw it again on the prologue.
+  const js = ts
+    .transpileModule(`(PROBE) => (${exprSrc})`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    })
+    .outputText.trim()
+    .replace(/^["']use strict["'];?/, '')
+    .trim()
+    .replace(/;+$/, '');
+  const buildClass = new Function(`return (${js})`)() as (probe: string) => string;
+  const PROBE = `A-Z${String.fromCodePoint(0x16fe4)}`;
+  let built = '';
+  try {
+    built = buildClass(PROBE);
+  } catch (e) {
+    assert.fail(`the shipped BLANK_CLASS construction threw on a probe list: ${String(e)}`);
+  }
+  let cls: RegExp;
+  try {
+    cls = new RegExp(`[${built}]`, 'gu');
+  } catch (e) {
+    // `]` and `Q` fail LOUDLY at module load, which is the one shape of this bug that cannot ship
+    // silently. Reported rather than swallowed, so the reason is on the record either way.
+    assert.fail(`the class built from a probe list does not compile: ${String(e)}`);
+    return;
+  }
+  // ALL of Unicode, not the BMP and a bit. The first cut swept to 0x11000 and reported 3 of 4,
+  // because the astral probe member is at U+16FE4 and was never tested - an instrument that could
+  // not see the half of the alphabet the mutation is about.
+  let probeHits = 0;
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    cls.lastIndex = 0;
+    if (cls.test(String.fromCodePoint(cp))) probeHits++;
+  }
+  assert.equal(
+    probeHits,
+    [...PROBE].length,
+    'the shipped BLANK_CLASS construction does not escape every member: built from `A`, `-`, `Z` ' +
+      'and one astral symbol it matches ' + probeHits + ' code points instead of 4, so a `-` ' +
+      'between two entries is a RANGE. Escape EVERY member, not only the astral ones',
   );
 
   // ...and WHY, demonstrated rather than asserted, on members the shipped list does NOT contain, so
@@ -3304,7 +3442,7 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   // way five earlier paragraphs did. If this goes red, fix the sentence - not this test.
   //
   // PER UNIT, not per symbol, because `max` slices `.length`: an astral mark costs TWO UTF-16 units
-  // and 726 of these do. The first cut of this test took log2 of the whole 1795-symbol alphabet and
+  // and 725 of these do. The first cut of this test took log2 of the whole 1794-symbol alphabet and
   // certified 5534 bytes, a figure no input can reach - it encoded the same error as the sentence it
   // was written to police, which is how a self-checking number fails. The optimum over a mixed-width
   // alphabet is the dominant root of `bmp/c + astral/c^2 = 1`.
@@ -3482,6 +3620,30 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // `[`, `]` and `|` are absent below on purpose: both fences already scrub those three for the
   // `label=value` grammar, so a value cannot close them. These are the pairs nothing scrubs.
   const PAIRS: Record<string, string> = { '(': ')', '{': '}', '<': '>', '"': '"', "'": "'" };
+  /**
+   * The delimiter a value sits INSIDE, if any.
+   *
+   * Both arms used to read exactly one character on each side: `before.slice(-1)` and
+   * `after.slice(0, 1)`. So `key (${keyPath} — keep this file safe).` was invisible - the value is
+   * inside a parenthetical, a path containing `)` still closes it early, and the only thing that
+   * had changed was that the closer was no longer adjacent. Round 10 added the `+` arm as a COPY
+   * of the template arm, so it inherited the blind spot rather than being a second check.
+   *
+   * An opener already closed inside `before` does not enclose the value - that is what keeps an
+   * ordinary parenthetical earlier in the same sentence from counting. The closer is looked for on
+   * the value's own rendered LINE, because a `\n` ends the line the delimiter was opened on.
+   */
+  const wrappedBy = (before: string, after: string): string | undefined => {
+    const line = (after.split('\n')[0] ?? '') as string;
+    for (let i = before.length - 1; i >= 0; i--) {
+      const open = before[i] as string;
+      const close = PAIRS[open];
+      if (close === undefined) continue;
+      if (before.indexOf(close, i + 1) !== -1) continue; // closed before the value: not enclosing
+      if (line.includes(close)) return open;
+    }
+    return undefined;
+  };
   const found: string[] = [];
   for (const { file, sf } of SOURCES()) {
     const nodes = walk(sf);
@@ -3510,12 +3672,13 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
           if (!walk(part).some((d) => fenceOf(d) !== null || seedOf(d) !== null)) return;
           const prev = i > 0 ? parts[i - 1] : undefined;
           const next = parts[i + 1];
-          const open = prev !== undefined && ts.isStringLiteralLike(prev) ? prev.text.slice(-1) : '';
-          const close = next !== undefined && ts.isStringLiteralLike(next) ? next.text.slice(0, 1) : '';
-          if (open !== '' && PAIRS[open] === close)
+          const beforeText = prev !== undefined && ts.isStringLiteralLike(prev) ? prev.text : '';
+          const afterText = next !== undefined && ts.isStringLiteralLike(next) ? next.text : '';
+          const open = wrappedBy(beforeText, afterText);
+          if (open !== undefined)
             found.push(
               `${file}:${sf.getLineAndCharacterOfPosition(part.getStart(sf)).line + 1} ` +
-                `${open}...${close} around ${part.getText(sf)}`,
+                `${open}...${PAIRS[open]} around ${part.getText(sf)}`,
             );
         });
         continue;
@@ -3528,12 +3691,11 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
         const carries = walk(sp.expression).some((d) => fenceOf(d) !== null || seedOf(d) !== null);
         if (!carries) return;
         const before = i === 0 ? n.head.text : n.templateSpans[i - 1].literal.text;
-        const open = before.slice(-1);
-        const close = sp.literal.text.slice(0, 1);
-        if (open !== '' && PAIRS[open] === close)
+        const open = wrappedBy(before, sp.literal.text);
+        if (open !== undefined)
           found.push(
             `${file}:${sf.getLineAndCharacterOfPosition(sp.getStart(sf)).line + 1} ` +
-              `${open}...${close} around ${sp.expression.getText(sf)}`,
+              `${open}...${PAIRS[open]} around ${sp.expression.getText(sf)}`,
           );
       });
     }

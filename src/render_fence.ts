@@ -63,12 +63,23 @@ export const safeField = (s: string, max: number): string => {
   // every non-ASCII shape. A RATIO is deliberately NOT quoted. The multipliers move with execution
   // ORDER - the same shape measured 36x on a forward pass and 76x on a reverse one, and the shape an
   // earlier cut named as cheapest measured dearest when the order was flipped. Two cuts have now
-  // published a range ("50-64x", then "43x-72x") that the next measurement did not reproduce, which
-  // makes the range a property of the harness rather than of this function. What IS stable across
-  // orderings is the claim the order rests on: slice-first is flat at 15-37 ms whatever the input,
-  // scrub-first is not, and cutting to `max` first makes the work proportional to what is kept. (That cut also claimed the 16 MiB field
+  // published a range ("50-64x", then "43x-72x") that the next measurement did not reproduce - and
+  // then a THIRD figure, "slice-first is flat at 15-37 ms", which was not this function at all.
+  // Timed against a 16 MiB `.repeat()` fixture, the FIRST caller pays to materialise the rope, and
+  // whichever ordering ran first was charged for it. Materialise it with something that is not
+  // `safeField` - `s.charCodeAt(s.length - 1)` - and this function's own cost on a 16 MiB field is
+  // about a tenth of a millisecond on every shape, because it slices to `max` units before
+  // scrubbing, which is this paragraph's whole thesis. In production the value arrives from
+  // `JSON.parse` already flat, so even that first-touch cost is never paid.
+  // NO FIGURE IS QUOTED HERE, deliberately. Three published numbers have now failed to reproduce -
+  // two ratios and one absolute - and nothing pins them, because a wall-clock assertion is the one
+  // kind this suite cannot hold without becoming load-dependent itself. What survives measurement
+  // is structural: cutting to `max` first makes the work proportional to what is KEPT rather than
+  // to what arrived. (That cut also claimed the 16 MiB field
   // "reduced to a 189-byte line"; no render site in this tree produces 189 bytes from one such field.
-  // What is reproducible is the part this function owns: safeField emits 65 characters. The repair
+  // What is reproducible is the part this function owns: safeField emits `max + 1` characters - 65
+  // at MAX_SCALAR_CHARS, 257 at MAX_ERROR_MESSAGE_CHARS, 2049 at MAX_URL_FIELD_CHARS - and the
+  // sites this paragraph enumerates fence at three different budgets, so no single length states it. The repair
   // then vouched for "the receipts that carry it measure 152 and ~246 bytes", and re-measuring every
   // site with one 16 MiB field and the rest plausible — 37 combinations — lands on 79, 95-96, 117-130,
   // 134-136, 141-188, 201, 227, 271 and 299 bytes. Nothing measures 152; 151 and 153 bracket it. A
@@ -187,9 +198,12 @@ const BLANK_AND_FORMAT = new RegExp(
  *     dominates the other by enough to carry an argument.
  *     U+13443 LOST SIGN is the control and is correctly KEPT; it is a hatched box, which is ink.
  *     They ride in the `u`-flagged regex with the format classes, NOT in the BMP-only bracket class
- *     below, because U+1D159 is astral: written `\u1d159` in a class without `u` it is
- *     `\u1d15` followed by a literal `9`, which silently scrubbed every DIGIT 9 out of every path.
- *     Caught by a fixture whose temp directory happened to contain one.
+ *     below, because U+1D159 is astral. The reason this file USED to give - that `\u1d159` in a
+ *     class without `u` reads as `\u1d15` then a literal `9`, silently scrubbing every DIGIT 9 out
+ *     of every path - is history, and the `BLANK_CLASS` docblock above says so: the entries are
+ *     generated from a string now, so that spelling no longer exists to regress to. It is kept here
+ *     as the reason the class was MOVED, not as a hazard that remains. (Caught, at the time, by a
+ *     fixture whose temp directory happened to contain a 9.)
  *   - `[`, `]`, `|` - the `label=value` grammar layered on the block, as in {@link safeField}.
  *   - U+2026, so the truncation marker this function appends cannot be forged by the value.
  *   - unpaired surrogates - invalid UTF-16, which must not leave this process in a JSON field.
@@ -261,8 +275,9 @@ const BLANK_AND_FORMAT = new RegExp(
  *     4299 came from a sweep that skipped the surrogate range, and so did the test written to police
  *     it, so the instrument agreed with the sentence by sharing its blind spot.
  *     That alphabet does not compose freely, which makes the root formula above the wrong instrument
- *     for it - a high surrogate followed by a low one is a PAIR, already counted among the astral
- *     entries, so the two cannot be chosen independently. Counted exactly, over the automaton that
+ *     for it - a high surrogate followed by a low one forms a PAIR - one astral code point, which is
+ *     in the removal set for only 4130 of the 1048576 juxtapositions and otherwise not in this
+ *     alphabet at all - so the two cannot be chosen independently. Counted exactly, over the automaton that
  *     forbids that one juxtaposition, the whole scrub is worth 10.59 bits per unit and 5420 bytes:
  *     MORE than the 5152 that survives, not less. The margin is about five per cent, so this is
  *     stated as a measurement and not leaned on as an argument.
@@ -580,8 +595,10 @@ export const ABBREV_CHARS = 16;
  * still bounds the slice. Drop the clamp AND pass `keep` through, and `shortScalar('a'.repeat(65), 65)`
  * becomes 65 unfenced characters instead of `'a'x64 + '…'`. Every call site
  * uses the default, so no rendered output ever differed; the defect was that the two constants had no
- * expressed relationship while `MAX_JOIN_FIELD_CHARS = 256` sits eleven lines above, one edit away
- * from a call that would read as if it widened the fence. Pinned by test, not by this sentence.
+ * expressed relationship while `MAX_JOIN_FIELD_CHARS = 256` is declared 80 lines above - an
+ * earlier cut said eleven, and the proximity it argued from has never existed at any commit. The
+ * hazard is not adjacency but that the two constants had no expressed relationship, so a call
+ * could read as if it widened the fence. Pinned by test, not by this sentence.
  */
 export const shortScalar = (v: unknown, keep: number = ABBREV_CHARS): string => {
   const s = safeScalar(v);
@@ -634,7 +651,10 @@ export const MAX_STRUCTURED_SCALAR_CHARS = 256;
  * entering `structuredContent` is capped here at MAX_STRUCTURED_SCALAR_CHARS", followed by
  * "`saihm_status` carries the most such fields". Both are false, and the second is false by the
  * first's own measure — `saihm_recall` can carry up to `MAX_SHARED_ANNOUNCEMENTS` (declared in `client.ts`) announcement
- * rows of four endpoint-chosen fields each, against seven fields for `saihm_status`. Several
+ * rows of four endpoint-chosen fields each, against SIX endpoint-chosen fields for
+ * `saihm_status` - seven keys less the client-derived `agentIdHash`, as this same block says a few
+ * lines down. An earlier cut compared four ENDPOINT-CHOSEN against seven TOTAL, which is the
+ * two-bases error the residual paragraph records four cuts of. Several
  * families enter `structuredContent` and only one of them is bounded by this constant. The list
  * below is the ENDPOINT-CHOSEN part of that map, which is the part this module has an opinion
  * about; it is not the whole of what enters, and a cut of this block said "four families enter"
@@ -845,7 +865,9 @@ export const MAX_URL_MESSAGE_CHARS =
  * A path or URL spliced into a sentence is governed by the SENTENCE's budget. The two lines that
  * fenced a path DIRECTLY could be corrected by swapping the constant ({@link MAX_PATH_FIELD_CHARS});
  * the ones that EMBED it could not — `SAIHM_MASTER_SECRET_FILE could not be read: <path>` left 59
- * characters for the path once the sentence and the setup hint were counted.
+ * characters for the path once the sentence and the setup hint were counted - and fewer still when
+ * self-join is opted out, where the hint is longer. `client.ts` carries the two-arm version; this
+ * sentence quotes one.
  *
  * The value stays IN the message rather than being carried out to a line of its own. An earlier cut
  * split them, which rendered well and quietly regressed a documented library entry point: consumers
@@ -857,11 +879,23 @@ export const MAX_URL_MESSAGE_CHARS =
  * import budgets from this module without closing an import cycle. Safe to widen because these
  * messages are OURS or the RUNTIME's, never an endpoint's — see the arm below for why that
  * distinction cannot be extended to plain errors.
+ *
+ * BOTH arms take {@link safePathField}, and the `url` arm did not until it was measured. It widened
+ * the BUDGET to `MAX_URL_MESSAGE_CHARS` and left the CHARACTER policy on `safeField` - which is the
+ * defect class this module opens by naming, at the top of this file, in this file. The value it
+ * carries is the operator's own `SAIHM_ENDPOINT_URL` handed back so they can fix it, and an IDN
+ * endpoint rendered as `m?nchen.example/rpc` cannot be. `safePathField` is not path-specific: it
+ * removes the `label=value` structure and the truncation marker and keeps printable characters.
+ * The distinction that DOES survive is provenance, which is the sentence above: an ENDPOINT-chosen
+ * URI stays on `safeField` (see the `verificationUri` site in `server.ts`, where a mangled but
+ * visible URI is a failure the user can see and report), because that value is attacker-capable.
+ * This one is the operator's own configuration, and an attacker who can set it already owns the
+ * process.
  */
 function configErrorText(e: SaihmConfigError): string {
   return e.valueKind === 'path'
     ? safePathField(e.message, MAX_PATH_MESSAGE_CHARS)
-    : safeField(e.message, MAX_URL_MESSAGE_CHARS);
+    : safePathField(e.message, MAX_URL_MESSAGE_CHARS);
 }
 
 /**

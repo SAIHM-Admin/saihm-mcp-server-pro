@@ -63,10 +63,11 @@ carries the bump.
 `safeField` maps every non-ASCII code unit to `?`. That is correct for endpoint
 prose and wrong for a path: under a non-ASCII home directory it names a file that
 does not exist, on the line telling the operator to back that file up. The new
-`safePathField` renders all nine path-class CALL SITES — a count pinned per file
+`safePathField` renders all TEN round-trip CALL SITES — a count pinned per file
 by the call-site sweep, not asserted in prose. (The "four sites" above counts
-MESSAGES that embed a value in a sentence, which is a different unit, and one of
-those four is a URL rendered by `safeField`.) A path keeps every printable
+MESSAGES that embed a value in a sentence, which is a different unit. An earlier
+draft noted that one of those four was a URL still rendered by `safeField`; that
+was the last instance of this defect class in the tree, and it is closed below.) A path keeps every printable
 character a filesystem can hold, while removing the invisible and blank characters it
 can NAME — which is not the same as all of them, and the difference is the blank-symbol
 list below, hand-read and already grown from three to six in three rounds: line terminators, C0/C1 controls, the union of Unicode `Cf` and
@@ -273,7 +274,7 @@ Tracked separately.
 
 ### Compatibility
 
-The tool LIST does not change, and neither does the public API of `index.js`. TWELVE
+The tool LIST does not change, and neither does the public API of `index.js`. THIRTEEN
 narrower things do change, and one of them is that some error MESSAGES change — an
 earlier draft of this section opened by claiming none did, which was wrong on three
 boot messages and is corrected in its own bullet below. ONE is a regression for some inputs and is
@@ -404,6 +405,18 @@ marked as such below; two more are breaking without being regressions (the
   `SaihmConfigError` under a new message — seven construction sites ship in all.
   Configuration errors naming neither a path nor a URL still throw plain `Error`, as
   does a malformed `SAIHM_MASTER_SECRET_HEX`. `SaihmEndpointError` has always presented this shape.
+- **A configuration error naming a URL now round-trips that URL.** The invalid
+  `SAIHM_ENDPOINT_URL` message rendered through `safeField`, which maps every
+  non-ASCII code unit to `?`, so an IDN endpoint came back as `SAIHM_ENDPOINT_URL is
+  not a valid URL: m?nchen.example/rpc` — the operator's own configuration handed back
+  unreadable, on the line that exists so they can fix it. Its BUDGET had already been
+  widened to `MAX_URL_MESSAGE_CHARS`; only the CHARACTER policy was still the prose
+  one, which is this release's defect class surviving inside the module that names it.
+  It now renders through `safePathField` at the same budget. The line that decides is
+  PROVENANCE, not the value's shape: a URL an ENDPOINT chose is attacker-capable and
+  still collapses to ASCII, so `verificationUri` and the checkout URL are unchanged —
+  there a mangled-but-visible URI is a failure the operator can see and report. This
+  changes the RENDER only; `e.message` is untouched.
 - **Three boot error messages change.** A malformed secret used to be reported
   against `SAIHM_MASTER_SECRET_HEX` whatever its actual source, so a corrupt self-join
   identity file produced `SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex.`
