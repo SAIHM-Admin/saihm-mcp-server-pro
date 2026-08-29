@@ -14,3 +14,6 @@ coverage/
 # endpoint package); validated locally, not part of the public client repo.
 tests/client_pro.test.ts
 dist-mcpb/
+
+# Agent worktrees created by tooling; never part of the package.
+.claude/worktrees/

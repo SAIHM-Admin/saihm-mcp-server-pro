@@ -32,7 +32,7 @@ import {
   fromHex,
 } from '@saihm/client-pro';
 import {
-  MAX_CHECKOUT_URL_CHARS,
+  MAX_URL_FIELD_CHARS,
   MAX_JOIN_FIELD_CHARS,
   MAX_PATH_FIELD_CHARS,
 } from '../src/render_fence.js';
@@ -594,7 +594,7 @@ function assertCheckoutDelivered(out: string, dir: string): void {
   // can tell them apart.
   assert.ok(
     HOSTED_URL.length > MAX_JOIN_FIELD_CHARS &&
-      HOSTED_URL.length < MAX_CHECKOUT_URL_CHARS,
+      HOSTED_URL.length < MAX_URL_FIELD_CHARS,
     "fixture must exceed the join-field budget and fit the checkout budget",
   );
   // The delimiters exist so that truncation in transit is VISIBLE. Match them, and the URL is
@@ -853,6 +853,38 @@ test('server.ts: `join` names the SAVED FILE by a path budget, not a URI budget'
   }
 });
 
+test('server.ts: `join` names the KEY FILE, not an env var the caller never set', async () => {
+  // The defect this pins is the one `free-join` fixed and this verb did not. The line was
+  // unconditionally `Keep SAIHM_MASTER_SECRET_HEX safe`, so the caller who reaches `join` after
+  // `saihm_join` -- key in a generated FILE, no such variable set anywhere -- was told to protect a
+  // thing that does not exist and never told the file that does. Sixty lines apart in one module,
+  // one of the two copies fixed. Both verbs now resolve the key through a single
+  // `identityKeyFile()`, which is what stops them drifting again.
+  const dir = deepStateDir('saihm-join-key-');
+  const keyFile = pathJoin(dir, 'master-secret.hex');
+  writeFileSync(keyFile, MASTER_HEX + '\n', { mode: 0o600 });
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const out = await runCli(mock.base() + '/mcp', ['join'], {
+      SAIHM_MASTER_SECRET_HEX: undefined,
+      SAIHM_MASTER_SECRET_FILE: keyFile,
+      SAIHM_STATE_DIR: dir,
+    });
+    const line = /\n {2}Back up (.+) — it is\n/.exec(out);
+    assert.ok(line, `the backup line was not printed:\n${out}`);
+    assert.equal(line[1], keyFile, 'the key named for backup must be the file that exists');
+    assert.ok(
+      !/Keep SAIHM_MASTER_SECRET_HEX safe/.test(out),
+      'a caller with a key FILE must not be sent to an env var they never set',
+    );
+    assert.ok(!out.includes(MASTER_HEX), 'the master secret must never be printed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
 test('server.ts: `free-join` names the KEY TO BACK UP by a path budget, not a URI budget', async () => {
   const dir = deepStateDir('saihm-free-deep-');
   // The bring-your-own-key branch: no self-join identity, but a caller-supplied FILE that exists and
@@ -879,6 +911,201 @@ test('server.ts: `free-join` names the KEY TO BACK UP by a path budget, not a UR
     assert.equal(line[1], keyFile, 'the key named for backup must be the path that exists');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+
+test('server.ts: an INLINE secret is not told to back up a FILE that does not exist', async () => {
+  // The sibling of the test above, and the case it did not cover. With the secret inline in
+  // SAIHM_MASTER_SECRET_HEX there IS no key file, and `ensureSelfJoinIdentityEnv` used to say so by
+  // returning the string `(SAIHM_MASTER_SECRET_HEX)` in a field typed as a path. This line then read
+  // `Back up (SAIHM_MASTER_SECRET_HEX)` - a parenthesised variable NAME where a filename goes, sent
+  // to the one caller who most needs to take a real backup. The correct branch was already written
+  // directly beneath it and could never run, because a sentinel is truthy.
+  //
+  // Driven through the shipped CLI rather than asserted on the helper, because the defect was not in
+  // the helper's value - it was in what three render sites did with it.
+  const dir = deepStateDir('saihm-free-hex-');
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const out = await runCli(mock.base() + '/mcp', ['free-join'], {
+      SAIHM_TIER: 'FREE',
+      SAIHM_MASTER_SECRET_HEX: MASTER_HEX,
+      SAIHM_MASTER_SECRET_FILE: undefined,
+      // SELF-JOIN ON, which this harness turns OFF by default and which is where the defect lives.
+      // With it off, `identity` is undefined, the `??` falls through to SAIHM_MASTER_SECRET_FILE,
+      // and the correct line prints no matter what `ensureSelfJoinIdentityEnv` returns - so the
+      // first cut of this test passed against the sentinel it was written to catch. Measured, not
+      // reasoned: the mutation was applied and the test stayed green.
+      SAIHM_SELF_JOIN: undefined,
+      SAIHM_STATE_DIR: dir,
+    });
+    assert.ok(
+      !/\n {2}Back up /.test(out),
+      `no file exists to back up, so no backup line may be printed:\n${out}`,
+    );
+    assert.match(
+      out,
+      /\n {2}Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your\n/,
+      'the inline-secret caller must be told to keep the VARIABLE safe, and that branch must be live',
+    );
+    // And the secret itself never appears, which is the invariant the whole line is written around.
+    assert.ok(!out.includes(MASTER_HEX), 'the master secret must never be printed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: an unreadable SECRET FILE names the path IN FULL, not cut to fit the sentence', async () => {
+  // `SAIHM_MASTER_SECRET_FILE could not be read: <path>` was one string fenced at
+  // MAX_ERROR_MESSAGE_CHARS. The sentence and `setupHint()` spent 197 of those 256 characters, so the
+  // path got 59 -- on the error a FIRST-RUN operator is most likely to see, whose entire job is to
+  // name the file they should go and look at.
+  const deep = deepStateDir('saihm-secret-deep-');
+  const missing = pathJoin(deep, 'master.key'); // deliberately never created => readFileSync throws
+  assert.ok(
+    missing.length > 59 && missing.length < MAX_PATH_FIELD_CHARS,
+    'fixture must exceed the 59 characters the sentence used to leave for it',
+  );
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  // FILE wins over HEX when both are set, so the default secret this harness supplies does not
+  // mask the branch under test.
+  const d = startServer(mock.base() + '/mcp', [], {
+    SAIHM_MASTER_SECRET_FILE: missing,
+  });
+  try {
+    await handshake(d);
+    const { text, isError } = await callText(d, 3, 'saihm_status', {});
+    assert.equal(isError, true, 'an unreadable secret file is an error, not a silent fallback');
+    // Anchored on the clause AFTER the path: a path cut to fit the sentence takes the trailing
+    // setup hint with it, so this fails on the bug in a way `text.includes(missing)` would not.
+    // `. ` then a capital: the path, then whatever arm of setupHint() the env selected. Arm-agnostic
+    // on purpose -- this harness runs with SAIHM_SELF_JOIN=0, the other sites with it on.
+    const m = /could not be read: (.+?)\. [A-Z]/.exec(text);
+    assert.ok(m, `the path and the clause after it must both survive. got: ${text}`);
+    assert.equal(m![1], missing, 'and the path is whole');
+  } finally {
+    d.proc.kill();
+    rmSync(deep, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: a NON-ASCII secret-file path survives the fence WHOLE - the value class is load-bearing', async () => {
+  // The BUDGET was pinned here; the FENCE was not. Flipping SaihmConfigError's `valueKind` from
+  // 'path' to 'url' at that throw site left the ENTIRE suite green - because every path fixture in
+  // it was ASCII, and safeField and safePathField are byte-identical on ASCII. One token restores
+  // this release's headline defect: the operator is told to look at a file that does not exist.
+  //
+  // No other test renders a non-ASCII path through a REAL call site; the only non-ASCII path
+  // fixtures are direct unit calls to safePathField, which cannot see which fence a SITE selects.
+  const base = mkdtempSync(pathJoin(tmpdir(), 'saihm-nonascii-'));
+  const dir = pathJoin(base, 'h\u00e9-\u65e5\u672c-\u00dcn\u00efcode');
+  mkdirSync(dir, { recursive: true });
+  const missing = pathJoin(dir, 'master.key'); // never created => readFileSync throws
+  assert.ok(
+    /[^\u0020-\u007E]/.test(missing),
+    'the fixture MUST carry non-ASCII or it cannot discriminate the two fences',
+  );
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp', [], { SAIHM_MASTER_SECRET_FILE: missing });
+  try {
+    await handshake(d);
+    const { text, isError } = await callText(d, 3, 'saihm_status', {});
+    assert.equal(isError, true, 'an unreadable secret file is an error, not a silent fallback');
+    const m = /could not be read: (.+?)\. [A-Z]/.exec(text);
+    assert.ok(m, `the path and the clause after it must both survive. got: ${text}`);
+    assert.equal(
+      m![1],
+      missing,
+      'the non-ASCII path must render byte-for-byte - ASCII-collapsed, it names a file that does ' +
+        'not exist, which is the defect this release closes',
+    );
+  } finally {
+    d.proc.kill();
+    rmSync(base, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: the erasure residual names the CACHE PATH in full, sentence and all', async () => {
+  // Same defect one render site over, and the reason this release does not stop at the two lines
+  // that fence a path DIRECTLY: here the path is EMBEDDED in a 166-character sentence, so no swap of
+  // the value's budget reaches it. Under MAX_ERROR_MESSAGE_CHARS the path had 90 characters, and a
+  // path of 90-128 also cost the trailing clause. This is a GDPR Art.17 receipt: the line names the
+  // file that may still hold the plaintext the caller just asked to have destroyed.
+  const deep = deepStateDir('saihm-residual-deep-');
+  const cachePath = pathJoin(deep, 'recall.json');
+  assert.ok(
+    cachePath.length > 90 && cachePath.length < MAX_PATH_FIELD_CHARS,
+    'fixture must exceed the 90 characters the sentence used to leave for it',
+  );
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp', [], {
+    SAIHM_RECALL_CACHE_PATH: cachePath,
+  });
+  try {
+    await handshake(d);
+    const rem = await callText(d, 3, 'saihm_remember', { content: 'doomed' });
+    assert.equal(rem.isError, false);
+    const cellId = /REMEMBERED \[([^\]]+)\]/.exec(rem.text)?.[1];
+    assert.ok(cellId, 'need the id the receipt reported to drive the erasure');
+    // The cache has to be writable for the write and unwritable for the purge, and that is not
+    // fussiness about the fixture -- it is the only way the branch is reachable at all. Making the
+    // path a directory up front does not work: `remember`'s recovery (client.ts, "the recovery must
+    // not re-enter the operation that just failed") DROPS the entry when the cache is unwritable, so
+    // the same condition that fails the purge leaves nothing for it to purge. Swapped here rather
+    // than chmod'd so the test needs no privileges and no umask assumptions.
+    rmSync(cachePath);
+    mkdirSync(cachePath); // renameSync(tmp, <dir>) => EISDIR inside RecallCache.persist
+    const f = await callText(d, 4, 'saihm_forget', { id: cellId });
+    // The WHOLE line, anchored on the clause that FOLLOWS the path: a truncated path takes the
+    // trailing clause with it, so this fails on the bug in the way `includes(cachePath)` would not.
+    const m =
+      /\n {2}! .*plaintext may remain in (.+) until the next successful cache write$/.exec(f.text);
+    assert.ok(
+      m,
+      `the residual must render whole -- sentence, path, and closing clause. got: ${f.text}`,
+    );
+    assert.equal(m![1], cachePath);
+  } finally {
+    d.proc.kill();
+    rmSync(deep, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: an unwritable SEQ STATE path is reported with the path NODE named, whole', async () => {
+  // Behavioural proof for the marker mechanism on a site other than the identity writer. Four of
+  // its five call sites had NO coverage: removing all four left the suite at 257/0 while the
+  // rendered text lost the directory it was naming.
+  //
+  // The parent is a regular FILE, so `mkdirSync` fails ENOTDIR unprivileged and deterministically.
+  const root = mkdtempSync(pathJoin(tmpdir(), 'saihm-seq-'));
+  const blocker = pathJoin(root, 'blocker');
+  writeFileSync(blocker, 'not a directory');
+  const dir = pathJoin(blocker, ...Array<string>(6).fill(DEEP_SEGMENT));
+  const seqPath = pathJoin(dir, 'seq.json');
+  assert.ok(dir.length > 256, 'fixture must exceed the narrow message budget');
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp', [], { SAIHM_SEQ_STATE_PATH: seqPath });
+  try {
+    await handshake(d);
+    const r = await callText(d, 3, 'saihm_remember', { content: 'x' });
+    assert.equal(r.isError, true, 'an unwritable seq state must surface, not be swallowed');
+    const m = /mkdir '(.+)'/.exec(r.text);
+    assert.ok(m, `Node names the directory it could not make. got: ${r.text}`);
+    assert.equal(m![1], dir, 'and the fence is wide enough to keep it whole');
+  } finally {
+    d.proc.kill();
+    rmSync(root, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));
   }
 });

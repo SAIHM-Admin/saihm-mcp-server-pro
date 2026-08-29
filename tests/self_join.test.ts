@@ -7,17 +7,29 @@
 // Runner: npx tsx --test tests/self_join.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { mkdtempSync, existsSync, statSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  statSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   SaihmProClient,
   selfJoinEnabled,
   defaultIdentityPath,
   ensureSelfJoinIdentityEnv,
+  identityKeyFile,
   DEFAULT_ENDPOINT,
+  SaihmConfigError,
 } from '../src/client.js';
+import { failText, MAX_ERROR_MESSAGE_CHARS } from '../src/render_fence.js';
+import ts from 'typescript';
 
 const KEYS = [
   'SAIHM_SELF_JOIN',
@@ -95,13 +107,58 @@ test('ensureSelfJoinIdentityEnv self-generates a 32-byte key mode 600, sets env,
   }
 });
 
+test('a CONFIGURED but empty secret file is an error, not a silent fall-through to another identity', () => {
+  // REPRODUCED before it was fixed. `bootFromEnv` guarded the self-join fallback with `!secretHex`,
+  // which conflates "no secret was configured" with "the configured secret is empty". A ZERO-BYTE
+  // SAIHM_MASTER_SECRET_FILE therefore fell through to the default identity: the process booted a
+  // DIFFERENT key while `identityKeyFile()` - and every backup line built on it - named the file the
+  // operator had configured. The operator backs up an empty file and the only key to their memory is
+  // never named, which is this release's defect class with the stakes at their highest.
+  //
+  // The endpoint check twenty lines above already draws the distinction this one missed: "explicitly
+  // empty is still a configuration error, not an opt-in to the default".
+  const home = mkdtempSync(join(tmpdir(), 'saihm-empty-'));
+  try {
+    const configured = join(home, 'configured.key');
+    writeFileSync(configured, '');
+    withEnv(
+      {
+        SAIHM_HOME: home,
+        SAIHM_MASTER_SECRET_FILE: configured,
+        SAIHM_MASTER_SECRET_HEX: undefined,
+        SAIHM_SELF_JOIN: undefined,
+        SAIHM_ENDPOINT_URL: DEFAULT_ENDPOINT,
+      },
+      () => {
+        // A real self-join identity exists and is the thing that used to get booted silently.
+        writeFileSync(defaultIdentityPath(), randomBytes(32).toString('hex'));
+        assert.equal(identityKeyFile(), configured, 'the configured file is still the one named');
+        assert.throws(
+          () => SaihmProClient.bootFromEnv(),
+          (e: unknown) =>
+            e instanceof SaihmConfigError && (e as Error).message.includes(configured),
+          'an empty configured secret must be reported as a configuration error naming the FILE, ' +
+            'never resolved by booting a different identity the caller was never told about',
+        );
+      },
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('ensureSelfJoinIdentityEnv yields to a configured env secret (no file written)', () => {
   const home = mkdtempSync(join(tmpdir(), 'saihm-uj2-'));
   try {
     withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: 'ab'.repeat(32) }, () => {
       const r = ensureSelfJoinIdentityEnv();
       assert.equal(r.created, false);
-      assert.equal(r.keyPath, '(SAIHM_MASTER_SECRET_HEX)');
+      // NULL, not a path-shaped sentinel. The old value was the string `(SAIHM_MASTER_SECRET_HEX)`
+      // and every render site treated it as a file: `Back up (SAIHM_MASTER_SECRET_HEX)`, `key file:
+      // (SAIHM_MASTER_SECRET_HEX)`, and a doubled-parenthesis `key ((SAIHM_MASTER_SECRET_HEX))`. It
+      // also kept the inline-secret branch at each of those sites permanently dead, a sentinel being
+      // truthy. There is no file here, and that is what the caller must be told.
+      assert.equal(r.keyPath, null, 'an inline secret has NO key file, and must not name one');
       assert.ok(!existsSync(join(home, 'free-identity.key')), 'must not write a key file');
     });
   } finally {
@@ -192,6 +249,21 @@ test('bootFromEnv: a bad endpoint is reported even when no identity exists', () 
     });
     withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: 'http://evil.example/mcp' }, () => {
       assert.throws(() => SaihmProClient.bootFromEnv(), /must use https:\/\//);
+    });
+    // The endpoint the operator SET is carried as data, not spliced into the sentence. Interpolated,
+    // it shared MAX_ERROR_MESSAGE_CHARS with a 39-character prefix, so a URL over ~217 characters was
+    // reported back to them already cut -- naming a value they cannot match against what they typed.
+    // Pinned on the THROW here; the render of that value has its own coverage in the fence suite.
+    const longBad = 'not-a-url-' + 'q'.repeat(500);
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: longBad }, () => {
+      assert.throws(
+        () => SaihmProClient.bootFromEnv(),
+        (e: unknown) =>
+          e instanceof SaihmConfigError &&
+          e.valueKind === 'url' &&
+          e.message.includes(longBad),
+        'the endpoint must be typed as url-bearing so the render fence widens for it',
+      );
     });
     // Loopback http stays legal for local development.
     withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: 'http://127.0.0.1:3001/mcp' }, () => {
@@ -308,23 +380,143 @@ test('free-join composition: SAIHM_SELF_JOIN=0 mints no key and refuses to boot'
 // fence re-derives its call-site list. server.ts is read as text, not imported, because `main()`
 // sits at module scope and importing it would start a server.
 test('free-join composition: the shipped CLI actually performs it (re-derived from source)', () => {
-  const src = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf-8')
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
-
-  const start = src.indexOf('async function runFreeJoin(');
-  assert.notEqual(start, -1, 'runFreeJoin must exist; renaming it silently voids this sweep');
-  const end = src.indexOf('\n}', start);
-  assert.notEqual(end, -1, 'could not find the end of runFreeJoin');
-  const body = src.slice(start, end);
-
-  // Comments are stripped above ON PURPOSE: runFreeJoin's own doc block names both symbols, so an
-  // unstripped match would pass on prose alone while the code did nothing.
-  assert.match(body, /ensureSelfJoinIdentityEnv\(\)/, 'zero-config join requires the CLI to mint an identity');
-  assert.match(body, /selfJoinEnabled\(\)/, 'SAIHM_SELF_JOIN=0 must still suppress self-join in the CLI');
-  assert.match(body, /bootFromEnv\(\)/);
+  // FROM THE PARSER, not from stripped text. The previous cut blanked comments and then matched
+  // source, which closed the COMMENT spelling and left the STRING spelling open: replacing the call
+  // with `void 'ensureSelfJoinIdentityEnv() is now done lazily'` left the entire suite green while
+  // `free-join` on a bare machine threw the join hint instead of joining. Measured. Its own comment
+  // said an unstripped match "would pass on prose alone while the code did nothing" - which is
+  // exactly what it then did, one quote character over. A CALL is not a spelling.
+  const sf = ts.createSourceFile(
+    'server.ts',
+    readFileSync(new URL('../src/server.ts', import.meta.url), 'utf-8'),
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const nodes: ts.Node[] = [];
+  const walk = (n: ts.Node): void => {
+    nodes.push(n);
+    n.forEachChild((c) => {
+      walk(c);
+    });
+  };
+  const fn = (() => {
+    walk(sf);
+    return nodes.find(
+      (n): n is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(n) && n.name?.text === 'runFreeJoin',
+    );
+  })();
+  assert.ok(fn, 'runFreeJoin must exist; renaming it silently voids this sweep');
+  const calls: { name: string; pos: number }[] = [];
+  const collect = (n: ts.Node): void => {
+    if (ts.isCallExpression(n)) {
+      const e = n.expression;
+      const name = ts.isIdentifier(e)
+        ? e.text
+        : ts.isPropertyAccessExpression(e)
+          ? e.name.text
+          : '';
+      if (name) calls.push({ name, pos: n.getStart(sf) });
+    }
+    n.forEachChild((c) => {
+      collect(c);
+    });
+  };
+  collect(fn);
+  const called = (name: string): number =>
+    calls.filter((c) => c.name === name).length;
+  assert.ok(called('ensureSelfJoinIdentityEnv') > 0, 'zero-config join requires the CLI to mint an identity');
+  assert.ok(called('selfJoinEnabled') > 0, 'SAIHM_SELF_JOIN=0 must still suppress self-join in the CLI');
+  assert.ok(called('bootFromEnv') > 0, 'the CLI must boot a client');
+  const firstOf = (name: string): number =>
+    Math.min(...calls.filter((c) => c.name === name).map((c) => c.pos));
   assert.ok(
-    body.indexOf('ensureSelfJoinIdentityEnv()') < body.indexOf('bootFromEnv()'),
+    firstOf('ensureSelfJoinIdentityEnv') < firstOf('bootFromEnv'),
     'the identity must be ensured BEFORE boot, or boot throws on the bare machine this promises to serve',
   );
+});
+
+test('an unreadable SELF-JOIN IDENTITY names its path in full, not cut to fit the sentence', () => {
+  // The third conversion site, and the one my own mutation sweep never covered: reverting it left
+  // the entire suite green. Its sibling sites both go red, which is exactly why the gap was silent.
+  // Reachable because `existsSync` passes on a DIRECTORY and `readFileSync` then throws EISDIR.
+  const root = mkdtempSync(join(tmpdir(), 'saihm-sjid-'));
+  // One segment is deliberately NON-ASCII. This test pinned the BUDGET while every fixture in the
+  // suite stayed ASCII, so flipping this site's `valueKind` from 'path' to 'url' - which swaps
+  // safePathField for safeField - left the WHOLE suite green, restoring the release's headline
+  // defect in one token. safeField collapses non-ASCII to '?', so the FENCE is now pinned too.
+  const seg = 'h'.repeat(40);
+  const home = join(root, seg, seg, 'h\u00e9-\u65e5\u672c-' + 'h'.repeat(28), seg, seg, seg);
+  mkdirSync(home, { recursive: true });
+  const keyPath = join(home, 'free-identity.key');
+  mkdirSync(keyPath); // exists, but reading it throws
+  try {
+    assert.ok(
+      keyPath.length > MAX_ERROR_MESSAGE_CHARS,
+      'fixture must exceed the budget the path used to share with the sentence',
+    );
+    withEnv(
+      {
+        SAIHM_HOME: home,
+        SAIHM_MASTER_SECRET_FILE: undefined,
+        SAIHM_MASTER_SECRET_HEX: undefined,
+        SAIHM_ENDPOINT_URL: 'https://x.test/mcp',
+      },
+      () => {
+        let caught: unknown;
+        try {
+          SaihmProClient.bootFromEnv();
+        } catch (e) {
+          caught = e;
+        }
+        assert.ok(caught instanceof SaihmConfigError, 'must be typed as carrying a path');
+        // Anchored on the clause AFTER the path: cut to fit, the path takes the setup hint with it.
+        const m = /identity file could not be read: (.+?)\. To start free/.exec(
+          failText(caught),
+        );
+        assert.ok(m, `path and trailing clause must both survive. got: ${failText(caught)}`);
+        assert.equal(m![1], keyPath, 'and the path is whole');
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a FILESYSTEM failure carries the path NODE embedded through the fence whole', () => {
+  // The fourth instance of the class, and the one the sweep missed entirely: Node writes its own
+  // message and embeds the path in it. Those reach failText's catch-all arm, which is narrow by
+  // design, so the operator was told permission was denied on a directory they could not read.
+  // A regular FILE standing where a directory must be makes mkdir fail unprivileged and
+  // deterministically -- no chmod, no umask assumption.
+  const root = mkdtempSync(join(tmpdir(), 'saihm-f3-'));
+  const blocker = join(root, 'blocker');
+  writeFileSync(blocker, 'not a directory');
+  const home = join(blocker, ...Array<string>(6).fill('d'.repeat(40)));
+  try {
+    assert.ok(home.length > MAX_ERROR_MESSAGE_CHARS, 'fixture must exceed the narrow budget');
+    withEnv(
+      {
+        SAIHM_HOME: home,
+        SAIHM_MASTER_SECRET_FILE: undefined,
+        SAIHM_MASTER_SECRET_HEX: undefined,
+      },
+      () => {
+        let caught: unknown;
+        try {
+          ensureSelfJoinIdentityEnv();
+        } catch (e) {
+          caught = e;
+        }
+        assert.ok(caught instanceof Error, 'mkdir beneath a FILE must fail');
+        const rendered = failText(caught);
+        const m = /mkdir '(.+)'$/.exec(rendered);
+        assert.ok(m, `Node names the directory it could not make. got: ${rendered}`);
+        assert.equal(m![1], dirname(join(home, 'free-identity.key')), 'named in full');
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

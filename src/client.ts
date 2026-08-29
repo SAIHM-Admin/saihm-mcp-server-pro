@@ -84,6 +84,7 @@ import {
   ctEqual,
   SeqHighWaterMark,
 } from '@saihm/client-pro';
+import { safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
 import type {
   ClientIdentity,
   WireEnvelope,
@@ -241,7 +242,10 @@ function assertEndpointUrl(endpoint: string): void {
   try {
     url = new URL(endpoint);
   } catch {
-    throw new Error(`SAIHM_ENDPOINT_URL is not a valid URL: ${endpoint}`);
+    throw new SaihmConfigError(
+      `SAIHM_ENDPOINT_URL is not a valid URL: ${endpoint}`,
+      'url',
+    );
   }
   if (url.protocol === 'https:') return;
   if (
@@ -249,6 +253,19 @@ function assertEndpointUrl(endpoint: string): void {
     (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
   )
     return;
+  // A plain `Error`, and deliberately NOT a {@link SaihmConfigError}, though it sits beside one and
+  // interpolates a caller-supplied value. The embedded value is a URL SCHEME, which is not something
+  // the operator has to go and open, so there is no actionable value here to lose.
+  //
+  // Note what actually gets cut, because the first version of this note had it backwards: the scheme
+  // is at the FRONT, so it is not the scheme that truncation removes -- it is the trailing sentence,
+  // `Plain http:// is only allowed for 127.0.0.1 or localhost (dev).` MEASURED, because the earlier
+  // wording rounded and then reasoned from the rounding: the fixed prose is exactly 110 of the 256
+  // characters and the trailing sentence is 63, so a 146-character scheme cuts its FIRST character
+  // and only a 208-character one takes the whole sentence. Between those the advice degrades a
+  // character at a time rather than vanishing. Still not a finding: `new URL` accepts a scheme only
+  // as `[A-Za-z][A-Za-z0-9+.-]*`, so reaching 146 means typing 146 of them before `://`. Recorded
+  // so the next sweep neither re-derives it nor files it as a defect.
   throw new Error(
     `SAIHM_ENDPOINT_URL must use https:// (got ${url.protocol}//). ` +
       `Plain http:// is only allowed for 127.0.0.1 or localhost (dev).`,
@@ -362,6 +379,118 @@ export class SaihmEndpointError extends Error {
   ) {
     super(message);
     this.name = 'SaihmEndpointError';
+  }
+}
+
+/**
+ * A configuration error whose MESSAGE names a value the caller has to go and act on.
+ *
+ * Use this INSTEAD of `Error` when, and only when, the message embeds a path or URL the operator
+ * must open. A config error with nothing actionable in it (`SAIHM_TIER` unset, a hex secret that
+ * will not decode) has nothing that truncation can cost the reader and stays a plain `Error`.
+ *
+ * `valueKind` exists so the RENDERER can widen its fence to fit the embedded value: a path or URL
+ * spliced into a sentence is otherwise governed by the sentence's budget. That leaves 59 characters
+ * for the path on the branch a first-run operator actually takes -- `selfJoinEnabled()` is
+ * `SAIHM_SELF_JOIN !== '0'`, so an operator who never set the variable gets the LONG hint and the
+ * 59. The other branch leaves 23 and is reached by opting OUT with `SAIHM_SELF_JOIN=0`. An earlier
+ * wording had these two the wrong way round and also blamed the throw SITE for being unguarded:
+ * the site is indeed unguarded, but which hint it carries is chosen entirely inside `setupHint()`.
+ * That is the same polarity error already recorded as found and fixed twice in this tree. Both
+ * numbers are far below a real path. The budget itself is not
+ * passed from here — `render_fence.ts` imports this module, so handing it a number would close a
+ * cycle. It gets the value's CLASS and keeps the choice of bound where the other bounds live.
+ *
+ * The value stays IN the message. An earlier cut carried it out to a separate field and dropped it
+ * from the message, which regressed a documented library entry point: consumers of `bootFromEnv()`
+ * catch these and read `.message`, and `.message` was never the truncated thing — only the render
+ * was. `.message` is byte-identical to what these sites threw before.
+ *
+ * Not "nothing changes", which was the first wording and is refuted by measurement: `name` goes
+ * `Error` -> `SaihmConfigError`, so `String(e)`, the first line of `e.stack`, and `JSON.stringify(e)`
+ * all differ. That is the same shape `SaihmEndpointError` already presents on this path, the class is
+ * not public API, and nothing in `src/` serialises a caught error — recorded rather than fixed.
+ *
+ * Extends `Error`, so existing `catch (e) { if (e instanceof Error) … }` code is unaffected.
+ * Deliberately NOT re-exported from `index.ts`: it carries no information a consumer cannot already
+ * read off `.message`. The reason once given here -- that exporting it "would make this a `feat` and
+ * a minor bump" -- is void as of this release, which is a `feat` and a minor bump anyway, on the
+ * `e.name` change rather than on any type surface. The decision stands on its own merits: nothing
+ * needs the constructor to branch, and `.message` is the contract.
+ */
+export class SaihmConfigError extends Error {
+  constructor(
+    message: string,
+    /** Class of the actionable value embedded in `message`; selects the render budget. */
+    readonly valueKind: 'path' | 'url',
+  ) {
+    super(message);
+    this.name = 'SaihmConfigError';
+  }
+}
+
+/**
+ * Marker for an error whose message NODE wrote and whose text embeds a caller-chosen path.
+ *
+ * The sweep that produced {@link SaihmConfigError} converted OUR sentences and stopped there. Node
+ * writes its own: `EACCES: permission denied, mkdir '<path>'`, and a failed rename carries TWO
+ * paths in one message. Those reach the renderer's catch-all arm at the message budget and are cut
+ * mid-path — measured on the shipped CLI with a 315-character `SAIHM_HOME`, where the rendered text
+ * no longer contained the directory it was naming. The paths are caller-chosen env vars
+ * (`SAIHM_HOME`, `SAIHM_SEQ_STATE_PATH`, `SAIHM_RECALL_CACHE_PATH`) — the same ones the
+ * sentence-level sites honour.
+ *
+ * The ORIGINAL error is marked and rethrown rather than replaced by a `SaihmConfigError`. Replacing
+ * it would drop `code`, `errno`, `syscall` and `path` off a Node `SystemError`, which is the same
+ * shape of consumer regression that splitting the value out of `.message` caused — a caller
+ * branching on `e.code === 'EACCES'` would silently stop matching. Nothing observable changes here;
+ * only the renderer learns which bound to use.
+ *
+ * Non-enumerable so it never appears in `JSON.stringify`, a log dump, or a deep-equal in a test.
+ */
+const PATH_BEARING = Symbol('saihm.pathBearingMessage');
+
+/**
+ * Mark `e` and return it UNCHANGED in every other respect. See {@link PATH_BEARING}.
+ *
+ * `Symbol()` and not `Symbol.for()`: the global registry would let any same-realm code — a
+ * compromised dependency — mark an arbitrary error and widen its render. A module-local symbol makes
+ * "only errors this package marked" an invariant instead of a convention, at no cost.
+ *
+ * Never throws - the whole body is guarded, prototype and `in` traps included. `defineProperty`
+ * on a frozen, sealed or proxy-denying error would raise a TypeError
+ * from inside a `catch`, replacing the failure being reported with one about the reporting — and
+ * this function is generic, so a caller can hand it anything. A mark that cannot be applied means
+ * the render stays narrow, which is the safe direction.
+ */
+export function markPathBearing<E>(e: E): E {
+  // The WHOLE body is guarded, not only `defineProperty`. `e instanceof Error` runs a
+  // `getPrototypeOf` trap and `PATH_BEARING in e` runs a `has` trap, so on a proxy whose traps
+  // throw, the throw came from the TEST - outside the old guard - and the "never throws" property
+  // documented above was false as written. Nothing marked today is a proxy; these are Node fs
+  // errors. But this runs on the failure path, and a fence that can itself throw is not a fence.
+  try {
+    if (e instanceof Error && !(PATH_BEARING in e)) {
+      Object.defineProperty(e, PATH_BEARING, { value: true, enumerable: false });
+    }
+  } catch {
+    /* frozen, sealed, unwritable, or trap-throwing: rendered narrow, never replaced */
+  }
+  return e;
+}
+
+/** True when {@link markPathBearing} tagged this error. Used only to widen the render fence. */
+export function isPathBearing(e: unknown): boolean {
+  // Same trap exposure. The rationale this comment used to give -- that it matters MORE here,
+  // because `failText` exists so a throw cannot take down the server -- was backwards: at its only
+  // call site `failText` has already run three UNGUARDED `instanceof` checks against the same
+  // object, so a trap-throwing proxy raises there, before this is reached. The guard protects
+  // nothing today. It is kept because it is free and correct-direction, and because the reason it
+  // is currently redundant lives in another function that may stop being written that way.
+  try {
+    return e instanceof Error && PATH_BEARING in e;
+  } catch {
+    return false;
   }
 }
 
@@ -673,6 +802,31 @@ export function defaultIdentityPath(): string {
 }
 
 /**
+ * The key FILE this process would boot from, or `null` when the secret is INLINE and there is no
+ * file to name.
+ *
+ * ONE resolution, because there were two and they disagreed. Every line that tells an operator what
+ * to back up has to answer the same question, and `runJoin` answered it by not asking: it printed
+ * `Keep SAIHM_MASTER_SECRET_HEX safe` unconditionally, so a caller whose key is in a FILE - every
+ * `saihm_join` user with a generated `free-identity.key` who later subscribes - was sent to an env
+ * var that does not exist and never told the file that does. `runFreeJoin` had been fixed for
+ * exactly that 60 lines away in the same module; the fix landed in one of the two copies.
+ *
+ * The precedence MIRRORS `bootFromEnv`: an explicit FILE wins, an inline HEX means there is no file,
+ * and otherwise the self-join default is used if it is enabled and the file is already there. It
+ * does not CREATE anything - naming a key to back up must not mint one as a side effect.
+ */
+export function identityKeyFile(): string | null {
+  if (process.env.SAIHM_MASTER_SECRET_FILE) return process.env.SAIHM_MASTER_SECRET_FILE;
+  if (process.env.SAIHM_MASTER_SECRET_HEX) return null;
+  if (selfJoinEnabled()) {
+    const p = defaultIdentityPath();
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
  * Ensure an identity secret is available to {@link SaihmProClient.bootFromEnv} for a self-join,
  * WITHOUT ever returning or printing the secret. If an env secret (HEX or FILE) is already
  * configured it is left untouched. Otherwise the default key file is used — read if present, else
@@ -680,38 +834,51 @@ export function defaultIdentityPath(): string {
  * and (only if unset) `SAIHM_TIER=FREE` are set so the very next bootFromEnv self-onboards this
  * identity FREE. The master secret is the ONLY key to the memory and is never logged — only its path.
  */
-export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string } {
+export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string | null } {
   if (process.env.SAIHM_MASTER_SECRET_FILE) {
     return { created: false, keyPath: process.env.SAIHM_MASTER_SECRET_FILE };
   }
   if (process.env.SAIHM_MASTER_SECRET_HEX) {
-    return { created: false, keyPath: '(SAIHM_MASTER_SECRET_HEX)' };
+    // NULL, not a sentinel. This returned the STRING `(SAIHM_MASTER_SECRET_HEX)` in a field named
+    // and typed as a path, and all three render sites duly rendered it as one: `Back up
+    // (SAIHM_MASTER_SECRET_HEX)`, `Using your existing memory key ((SAIHM_MASTER_SECRET_HEX))`, and
+    // `key file: (SAIHM_MASTER_SECRET_HEX)`. Reproduced, all three. That is this release's own defect
+    // class one level up - a value of one kind rendered in a slot built for another - and each of
+    // those sites already carried a correct branch for the inline-secret case which could never run,
+    // because a sentinel is truthy. There is no file on this path. The type now says so, and every
+    // caller has to answer for it rather than inherit a plausible-looking string.
+    return { created: false, keyPath: null };
   }
   const keyPath = defaultIdentityPath();
   let created = false;
   if (!existsSync(keyPath)) {
-    const secretHex = randomBytes(32).toString('hex');
-    mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
-    const tmp = `${keyPath}.tmp.${process.pid}.${Date.now()}`;
-    writeFileSync(tmp, secretHex, { mode: 0o600, flag: 'wx' });
     try {
-      renameSync(tmp, keyPath); // atomic; inherits the tmp file's 0600 mode
-    } catch (e) {
-      // The tmp already holds the full contents. Nothing in this package sweeps stale tmp files, and
-      // no later purge reaches one: `forget()` and a delta recall both rewrite `<path>`, which the tmp
-      // is not. So a failed rename used to leave THE MASTER SECRET sitting beside the file
-      // the operator was told to check, permanently. Unlinked here because `wx` above proves THIS
-      // process created it — an exact name, never a glob, so another process's in-flight tmp is never
-      // touched. A kill between the write and the rename still leaves one; that is inherent to
-      // tmp-then-rename and is not what this closes.
+      const secretHex = randomBytes(32).toString('hex');
+      mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
+      const tmp = `${keyPath}.tmp.${process.pid}.${Date.now()}`;
+      writeFileSync(tmp, secretHex, { mode: 0o600, flag: 'wx' });
       try {
-        unlinkSync(tmp);
-      } catch {
-        /* never created, or already gone */
+        renameSync(tmp, keyPath); // atomic; inherits the tmp file's 0600 mode
+      } catch (e) {
+        // The tmp already holds the full contents. Nothing in this package sweeps stale tmp files, and
+        // no later purge reaches one: `forget()` and a delta recall both rewrite `<path>`, which the tmp
+        // is not. So a failed rename used to leave THE MASTER SECRET sitting beside the file
+        // the operator was told to check, permanently. Unlinked here because `wx` above proves THIS
+        // process created it — an exact name, never a glob, so another process's in-flight tmp is never
+        // touched. A kill between the write and the rename still leaves one; that is inherent to
+        // tmp-then-rename and is not what this closes.
+        try {
+          unlinkSync(tmp);
+        } catch {
+          /* never created, or already gone */
+        }
+        throw e;
       }
-      throw e;
+      created = true;
+    } catch (e) {
+      // Node named `keyPath` (or the tmp beside it) in its own message; widen the fence for it.
+      throw markPathBearing(e);
     }
-    created = true;
   }
   process.env.SAIHM_MASTER_SECRET_FILE = keyPath;
   if (!process.env.SAIHM_TIER) process.env.SAIHM_TIER = 'FREE';
@@ -1107,14 +1274,38 @@ export class SaihmProClient {
     // SAIHM_MASTER_SECRET_FILE so the root seed is never inlined into a synced/shared MCP config.
     // FILE wins when both are set.
     const secretFile = process.env.SAIHM_MASTER_SECRET_FILE;
+    // CONFIGURED, not merely non-empty - the distinction `SAIHM_ENDPOINT_URL` above already makes
+    // ("explicitly empty is still a configuration error, not an opt-in to the default") and this
+    // did not. The self-join fallback was guarded by `!secretHex`, which conflates "no secret was
+    // configured" with "the configured secret is empty", so a ZERO-BYTE SAIHM_MASTER_SECRET_FILE
+    // fell through to the default identity: the process booted a DIFFERENT key while every backup
+    // line - and `identityKeyFile()` with it - named the file the operator had configured.
+    // Reproduced end to end: `identityKeyFile()` reported the empty file while `bootFromEnv()`
+    // returned the default file's identity, so the only key to that memory was never named.
+    //
+    // TRUTHINESS, not `!== undefined`. The first cut of this used `!== undefined` and so treated an
+    // EMPTY variable as "configured" while the read gate below tests truthiness and never opens it:
+    // `SAIHM_MASTER_SECRET_FILE=""` then hard-failed with "holds no secret: " and nothing after the
+    // colon, where 0.4.1 self-joined. `server.json` declares that variable optional with
+    // `format: filepath` and no default, so a blank field in a registry install UI emits exactly
+    // that - a real deployment shape, broken for no security gain. An empty variable is not
+    // POINTING at a secret; a variable naming an empty FILE is, and that is the case this guard
+    // exists for.
+    //
+    // Deliberately unlike `SAIHM_ENDPOINT_URL` above, where empty IS an error: that has no safe
+    // fallback to fall to, and this does.
+    const secretConfigured = Boolean(
+      process.env.SAIHM_MASTER_SECRET_FILE || process.env.SAIHM_MASTER_SECRET_HEX,
+    );
     let secretHex: string | undefined;
     if (secretFile) {
       try {
         secretHex = readFileSync(secretFile, 'utf-8');
       } catch {
-        throw new Error(
+        throw new SaihmConfigError(
           `SAIHM_MASTER_SECRET_FILE could not be read: ${secretFile}.` +
             setupHint(),
+          'path',
         );
       }
       try {
@@ -1123,8 +1314,18 @@ export class SaihmProClient {
           process.platform !== 'win32' &&
           (statSync(secretFile).mode & 0o077) !== 0
         ) {
+          // FENCED, not deleted. An earlier cut dropped the path entirely on the theory that this
+          // file cannot import the fence - `render_fence.ts` imports from here, and `safePathField`
+          // is an `export const`, so the reverse edge was called a TDZ fault. MEASURED FALSE: an ESM
+          // cycle only faults on a binding read during module EVALUATION, and every `client.ts`
+          // symbol `render_fence.ts` uses is read inside a function body, so the cycle resolves
+          // under both entry orders. Deleting the path also broke this advisory's own contract - its
+          // test is named "never leaking the secret", meaning it names the FILE and withholds the
+          // KEY - and cost a log consumer information it had. stderr is a human-read surface, the
+          // operator's terminal under the CLI paths, so the value is fenced like any other path.
           process.stderr.write(
-            `warning: SAIHM_MASTER_SECRET_FILE ${secretFile} is group/world-accessible; chmod 600 it.\n`,
+            `warning: SAIHM_MASTER_SECRET_FILE ${safePathField(secretFile, MAX_PATH_FIELD_CHARS)} ` +
+              'is group/world-accessible; chmod 600 it.\n',
           );
         }
       } catch {
@@ -1141,19 +1342,31 @@ export class SaihmProClient {
     // unset/''/'1'/'anything' => true, '0' => false). The identical sentence was already found
     // and corrected in server.ts:833-835 and never propagated to this second
     // copy — the same fix-one-of-N-sites defect the shardId resolve-twice mutation exposed.
-    if (!secretHex && selfJoinEnabled()) {
+    if (!secretConfigured && selfJoinEnabled()) {
       const p = defaultIdentityPath();
       if (existsSync(p)) {
         try {
           secretHex = readFileSync(p, 'utf-8');
         } catch {
-          throw new Error(
+          throw new SaihmConfigError(
             `self-join identity file could not be read: ${p}.` + setupHint(),
+            'path',
           );
         }
       }
     }
     if (!secretHex) {
+      // A CONFIGURED secret that is empty is a configuration error, and it is named as one. Sending
+      // this caller to `saihm_join` would be the wrong direction twice over: they did configure a
+      // secret, and joining would mint a SECOND identity while the empty file sat there looking
+      // like the key to the first.
+      if (secretConfigured)
+        throw new SaihmConfigError(
+          secretFile === undefined
+            ? 'SAIHM_MASTER_SECRET_HEX is set but empty.' + setupHint()
+            : `SAIHM_MASTER_SECRET_FILE is set but holds no secret: ${secretFile}.` + setupHint(),
+          'path',
+        );
       // Self-join enabled but no identity yet => guide the agent to the join tool rather than
       // surfacing a raw env-var error (a memory tool was called before `saihm_join`).
       if (selfJoinEnabled())
@@ -1165,19 +1378,30 @@ export class SaihmProClient {
           setupHint(),
       );
     }
+    // WHERE THE SECRET CAME FROM, because both checks below used to name
+    // `SAIHM_MASTER_SECRET_HEX` whatever the source was. Measured: with no env var set at all and a
+    // corrupt `free-identity.key`, boot said "SAIHM_MASTER_SECRET_HEX must be canonical lowercase
+    // hex" - naming a variable the operator never set, about a file it never named, on the one
+    // error whose whole job is to say what to go and fix. That is this release's defect class in a
+    // sentence: the value is actionable and it is the wrong one.
+    const secretSource: { label: string; kind: 'path' | 'env' } = secretFile
+      ? { label: `SAIHM_MASTER_SECRET_FILE ${secretFile}`, kind: 'path' }
+      : process.env.SAIHM_MASTER_SECRET_HEX
+        ? { label: 'SAIHM_MASTER_SECRET_HEX', kind: 'env' }
+        : { label: `the self-join identity file ${defaultIdentityPath()}`, kind: 'path' };
+    const badSecret = (why: string): Error =>
+      secretSource.kind === 'path'
+        ? new SaihmConfigError(`${secretSource.label} ${why}.` + setupHint(), 'path')
+        : new Error(`${secretSource.label} ${why}.` + setupHint());
     let master: Uint8Array;
     try {
       master = fromHex(secretHex.trim());
     } catch {
-      throw new Error(
-        'SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex.' + setupHint(),
-      );
+      throw badSecret('must hold canonical lowercase hex');
     }
     if (master.length < 32) {
       master.fill(0);
-      throw new Error(
-        'SAIHM_MASTER_SECRET_HEX must decode to >= 32 bytes.' + setupHint(),
-      );
+      throw badSecret('must decode to >= 32 bytes');
     }
     const optTier =
       process.env.SAIHM_TIER ?? (selfJoinEnabled() ? 'FREE' : undefined);
@@ -1998,7 +2222,11 @@ export class SaihmProClient {
     }
     // Both authenticated: seq is bound into the AEAD AAD, and the commitment is the envelope's own
     // public meta, verified before this line. Neither is the endpoint's echo.
-    this.seq.observe(env.cellId, env.seq, envCommitment);
+    try {
+      this.seq.observe(env.cellId, env.seq, envCommitment);
+    } catch (e) {
+      throw markPathBearing(e);
+    }
     return {
       cellId: env.cellId,
       plaintext,
@@ -2060,7 +2288,11 @@ export class SaihmProClient {
     // Advance only after the endpoint accepted the write, and pin the commitment of the envelope
     // THIS process just sealed -- so a later read of a DIFFERENT envelope at this same seq, which a
     // lost response makes possible, is detectable rather than silently accepted.
-    this.seq.observe(cellId, seq, toHex(env.publicMeta.commitmentHash));
+    try {
+      this.seq.observe(cellId, seq, toHex(env.publicMeta.commitmentHash));
+    } catch (e) {
+      throw markPathBearing(e);
+    }
     // Delta-cache coherence: a delta recall SKIPS cellIds we already hold, so an in-place UPDATE (or a
     // fresh create) would otherwise be invisible to this client's next recall. Cache the CANONICAL
     // opened cell by re-opening OUR OWN just-sealed envelope — byte-identical to a future recall, with
@@ -2232,7 +2464,11 @@ export class SaihmProClient {
         // known — but it drops a concurrent write exactly as the full branch does, which is why the
         // guard covers both and not just the one that reaches plaintext.
         if (!cacheIsStale)
-          this.recallCache.merge(added, resp.liveCellIds.filter((id): id is string => typeof id === 'string'));
+          try {
+            this.recallCache.merge(added, resp.liveCellIds.filter((id): id is string => typeof id === 'string'));
+          } catch (e) {
+            throw markPathBearing(e);
+          }
         return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated };
       }
       if (!Array.isArray(resp)) {
@@ -2243,7 +2479,12 @@ export class SaihmProClient {
         );
       }
       const { cells, announcements, announcementsTruncated } = this.openRecallRows(resp);
-      if (!cacheIsStale) this.recallCache.replaceAll(cells);
+      if (!cacheIsStale)
+        try {
+          this.recallCache.replaceAll(cells);
+        } catch (e) {
+          throw markPathBearing(e);
+        }
       return { cells: filter(cells), announcements, announcementsTruncated };
     }
 

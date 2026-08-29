@@ -20,7 +20,12 @@
  * for what today's client admits. Guarding the entry point instead would have put the boot path of
  * every shipped server at risk to buy a test seam; a separate module costs nothing.
  */
-import { SaihmEndpointError, MAX_ERROR_CODE_CHARS } from './client.js';
+import {
+  SaihmConfigError,
+  SaihmEndpointError,
+  isPathBearing,
+  MAX_ERROR_CODE_CHARS,
+} from './client.js';
 
 /**
  * Render-sanitise ONE unauthenticated, endpoint-chosen field before it enters the text block.
@@ -73,6 +78,170 @@ export const safeField = (s: string, max: number): string => {
   const flat = (over ? s.slice(0, max) : s)
     .replace(/[^\x20-\x7E]/g, '?')
     .replace(/[[\]|]/g, '?');
+  return over ? `${flat}…` : flat;
+};
+
+/**
+ * Blank glyphs that belong to NO ignorable Unicode class, listed because there is no property to
+ * derive them from.
+ *
+ * EXPORTED so the guard can pin the list rather than a copy of it. It was a literal inside the
+ * regex below, and the test that checks this fence hand-kept its own two-entry copy: when the list
+ * grew from three to five, the copy did not, and three of the five could be deleted from the scrub
+ * with the whole suite green. Measured. A hand-kept duplicate of a security-relevant list is the
+ * same defect this module's sweeps exist to catch, one level up, so the list has exactly one home.
+ */
+export const BLANK_SYMBOLS = '\u2800\u2d7f\u{1D159}\u{13441}\u{13442}';
+
+/**
+ * Format characters, default-ignorables, every whitespace but the ASCII space, and the blanks above.
+ *
+ * Built once from {@link BLANK_SYMBOLS} rather than written twice. `u` is required: the property
+ * escapes need it, and U+1D159 and U+13441/2 are astral - written as a five-hex-digit escape in a
+ * class WITHOUT `u` it is a four-digit escape followed by a literal digit, which silently scrubbed
+ * every DIGIT 9 out of every path until a fixture caught it.
+ */
+const BLANK_AND_FORMAT = new RegExp(
+  `\\p{Cf}|\\p{Default_Ignorable_Code_Point}|[^\\S ]|[${BLANK_SYMBOLS}]`,
+  'gu',
+);
+
+/**
+ * Fence an OPERATOR-ACTIONABLE FILESYSTEM PATH.
+ *
+ * {@link safeField} is the wrong fence for a path, and this exists because shipping it on one was a
+ * real defect. Its `[^\x20-\x7E]` collapse maps every non-ASCII code unit to `?`, so an ordinary path
+ * under a non-ASCII home directory renders as a path THAT DOES NOT EXIST, and the caller is told to
+ * open or back up a file they cannot open or back up. That is this module's own defect class one
+ * level up: the BUDGET was fitted to the value class while the CHARACTER POLICY stayed sized for
+ * endpoint prose.
+ *
+ * So this keeps every printable character a filesystem can hold, and removes only what forges
+ * STRUCTURE in the rendered block:
+ *   - line terminators (LF, CR, U+2028, U+2029) - the forgery vector. A newline in `SAIHM_HOME` was
+ *     reproduced injecting a whole counterfeit authenticated-memory line into a join result.
+ *   - C0/C1 controls, ESC included - terminal escape sequences on a line a human reads.
+ *   - every Unicode FORMAT character (Cf) AND every DEFAULT-IGNORABLE one - see below. Neither
+ *     class contains the other, so the scrub is their union.
+ *   - every WHITESPACE character except the ASCII space, plus the blank SYMBOLS that belong to no
+ *     ignorable class: U+2800 BRAILLE PATTERN BLANK, U+2D7F TIFINAGH CONSONANT JOINER, U+1D159
+ *     MUSICAL SYMBOL NULL NOTEHEAD, and U+13441/U+13442 EGYPTIAN HIEROGLYPH FULL BLANK and HALF
+ *     BLANK. That list is hand-read, which is its disclosed limit - there is no Unicode property for
+ *     "renders as blank" - and the limit is not theoretical: the list said a fourth would have to be
+ *     found the way the first three were, and the next review found two. U+13443 LOST SIGN is the
+ *     control and is correctly KEPT; it is a hatched box, which is ink. NOTE the tension, kept
+ *     deliberately: U+2D7F is itself a nonspacing mark, so scrubbing it costs a legitimate
+ *     Tifinagh path exactly what the residual below says marks must never be made to pay. It
+ *     goes because it renders as nothing and joins nothing a reader can see - a judgement about
+ *     ONE character, not a rule about marks, written here rather than left to be found as an
+ *     inconsistency. See the fifth cut below.
+ *     They ride in the `u`-flagged regex with the format classes, NOT in the BMP-only bracket class
+ *     below, because U+1D159 is astral: written `\u1d159` in a class without `u` it is
+ *     `\u1d15` followed by a literal `9`, which silently scrubbed every DIGIT 9 out of every path.
+ *     Caught by a fixture whose temp directory happened to contain one.
+ *   - `[`, `]`, `|` - the `label=value` grammar layered on the block, as in {@link safeField}.
+ *   - U+2026, so the truncation marker this function appends cannot be forged by the value.
+ *   - unpaired surrogates - invalid UTF-16, which must not leave this process in a JSON field.
+ *
+ * SLICE BEFORE SCRUB - and unlike {@link safeField}, that order is load-bearing for CORRECTNESS and
+ * not merely for cost. safeField's scrubs are positionwise independent, so its two orderings are
+ * byte-identical and slicing first is a pure optimisation. The surrogate scrub here is NEIGHBOUR-
+ * DEPENDENT: whether a high surrogate is unpaired depends on what follows it. The orderings
+ * therefore genuinely differ, and only slice-then-scrub is safe - scrubbing first leaves an intact
+ * pair for the cut to split, emitting a lone surrogate. Do not reorder this into scrub-then-slice:
+ * that IS pinned, by `safePathField slices BEFORE scrubbing, and that order is REQUIRED`.
+ *
+ * On the `u` flag: an earlier draft claimed it was pinned on all four regexes. It was not, and on
+ * the three BMP-only ones it cannot be - measured over 1.6M inputs, adding `u` there changes
+ * nothing, because `u` only alters how astral code POINTS are matched. The format/ignorable scrub
+ * is the exception, discussed above: it reaches past U+FFFF, so it needs `u` and its effect is
+ * real - both the TAG block and the variation-selector supplement live there.
+ *
+ * The class is DERIVED from Unicode, never enumerated, and it took FIVE cuts to get there. Each of
+ * the first four was a narrowing of 0.4.1, whose `[^\x20-\x7E]` collapsed every one of them:
+ *   - the first listed bidi from memory and missed U+061C;
+ *   - the second scrubbed the 12 Bidi_Control characters and left the other 158 Cf, 96 of which are
+ *     the TAG block, U+E0020-U+E007F. 95 of those 96 map onto printable ASCII (U+E007F offsets to
+ *     DEL), so they are not invisible formatting hints - they are an invisible encoding of arbitrary
+ *     text, on a surface whose whole purpose is relay to a human and to a model. Driven through the
+ *     real server, a 68-character instruction encoded that way survived inside a path and decoded
+ *     intact while the visible receipt said something else.
+ *   - the third scrubbed Cf ENTIRE and was still a narrowing, because the property being reached for
+ *     is not a property of Cf. The VARIATION SELECTORS (U+FE00-FE0F and U+E0100-E01EF, 256 code
+ *     points, category Mn) are a strictly larger channel than the TAG block and Cf does not touch
+ *     them. Measured through this fence at that cut: 2048 smuggled bytes survive at
+ *     MAX_PATH_FIELD_CHARS and 4224 at MAX_PATH_MESSAGE_CHARS.
+ *   - the fourth scrubbed the union of Cf and Default_Ignorable and was STILL a narrowing, for the
+ *     third time and for the same reason: those classes mean "invisible FORMATTING", which is not
+ *     the property being reached for. 16 non-ASCII WHITESPACE code points survived it, together
+ *     with U+2800 and U+2D7F, which are blank glyphs in no ignorable class at all. Measured: an
+ *     18-symbol alphabet is 4 bits per unit, so 2048 smuggled bytes at MAX_PATH_FIELD_CHARS - the
+ *     same capacity as the variation-selector channel the union had just been widened to close, and
+ *     a capacity 0.4.1's collapse had given it none of.
+ * The union is necessary because Default_Ignorable_Code_Point is the property that MEANS "renders as
+ * nothing": 4174 code points, overlapping Cf in 138, and neither class is a subset of the other -
+ * U+0600..U+0605, U+06DD and U+070F are Cf and not ignorable, while the variation selectors, U+034F
+ * and the Hangul fillers are ignorable and not Cf. Scrubbing either alone leaves a channel open. It
+ * is not sufficient, which is what the fifth cut adds: whitespace renders as blank rather than as
+ * nothing, so no ignorable property was ever going to reach it. Measured after: exactly ONE
+ * whitespace code point survives, U+0020.
+ *
+ * THE PROPERTY, and it is a REDUCTION rather than an elimination. Five cuts were each written as
+ * though the next one would close the class; the sixth review measured why none of them could.
+ *
+ * What this fence removes is every invisible or blank character that no script NEEDS: the format and
+ * default-ignorable classes, all whitespace but the ordinary space, and the blank symbols listed
+ * above. What it cannot remove is the rest, and the reason is structural rather than incidental:
+ *
+ *   - COMBINING MARKS. 1795 nonspacing marks survive, and must - `cafe` in NFD, a Devanagari
+ *     conjunct and a Thai stack are all mark sequences, and a path that loses them is the defect
+ *     this function exists to fix. The capacity is per UTF-16 UNIT, because that is what `max`
+ *     slices: 1069 of those marks are BMP and 726 are astral at two units each, so the optimum is
+ *     the dominant root of `1069/c + 726/c^2 = 1`, or 10.06 bits per unit - 5152 bytes at
+ *     MAX_PATH_FIELD_CHARS. Counting 1795 symbols at 10.81 bits gives 5534, which is what an
+ *     earlier cut of this paragraph claimed and no input can reach. That is larger than any TWO of
+ *     the TAG, variation-selector and blank-glyph channels at 2048 each, and smaller than all three
+ *     together - which the same earlier cut also got wrong. It is the residual, it is disclosed,
+ *     and it is not closeable here.
+ *   - HOMOGLYPHS, for the same reason one level up: preserving the characters is what makes a path
+ *     openable, and preserving them admits look-alikes.
+ *   - U+0020. Paths legitimately contain spaces, so runs of them stay a low-rate channel.
+ *
+ * So the honest statement is: NO INVISIBLE CHANNEL THAT COSTS A LEGITIMATE PATH NOTHING TO CLOSE.
+ * Anything stronger - "no encoding channel survives", "nothing invisible gets out" - is false, was
+ * claimed here four times, and is what let each cut read as closure. `safePathField` narrows the
+ * channel and makes tampering VISIBLE as `?`; it does not eliminate the channel, and a caller who
+ * needs that guarantee needs a different value, not a better fence.
+ *
+ * NOT defended: HOMOGLYPHS. A path is openable only if its characters were preserved, and preserving
+ * them admits look-alikes. That is the deliberate trade.
+ *
+ * DEFENDED AT A COST, which the earlier wording denied by claiming the trade was homoglyphs "and
+ * only those": every character in the scrub is removed even when it is genuinely IN the path, so a
+ * path that legitimately contains one no longer round-trips. The common case is an emoji folder
+ * name, and BOTH U+200D ZERO WIDTH JOINER and U+FE0F VARIATION SELECTOR-16 cost. A cut of this
+ * sentence named ZWJ, a later one "corrected" it to FE0F, and the correction was the error: ZWJ is
+ * orthographically REQUIRED in Persian and in Indic half-forms and joins every multi-person emoji
+ * sequence, so it is the strictly larger cost of the two. FE0F is real as well - a text-default
+ * symbol such as U+26A0, U+2764 or U+2714 is rendered as an emoji only by appending it - and a
+ * directory named with either renders here as a file that does not exist. That is this function's own defect class, paid
+ * deliberately. A non-breaking space in a path now costs the same way. The substitution is a visible
+ * `?` rather than a silent swap, so the reader sees mangling instead of being misled, and that is
+ * the whole of the mitigation.
+ *
+ * This regex carries `u`, alone among the four, and must - the property escapes require it. The
+ * consequence is that this one scrub is NOT length-preserving: an astral code point is two units in and
+ * one `?` out. That only ever SHRINKS, so the bound still holds and the cut is still taken first. Do
+ * not carry `u` to the other three - there it is a no-op today (all three are BMP-only) and a silent
+ * trap the day one of them reaches past U+FFFF.
+ */
+export const safePathField = (s: string, max: number): string => {
+  const over = s.length > max;
+  const flat = (over ? s.slice(0, max) : s)
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, '?')
+    .replace(BLANK_AND_FORMAT, '?')
+    .replace(/[[\]|\u2026]/g, '?')
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '?');
   return over ? `${flat}…` : flat;
 };
 
@@ -256,7 +425,17 @@ const coerce = (v: unknown): string => {
 export const MAX_JOIN_FIELD_CHARS = 256;
 
 /**
- * Budget for a HOSTED-CHECKOUT URL — the subscribe/upgrade link.
+ * Budget for a URL THE CALLER HAS TO OPEN — today, the hosted-checkout link.
+ *
+ * `SAIHM_ENDPOINT_URL` belongs to the class but is never fenced at this constant directly: it is
+ * embedded in a sentence, so it rides on {@link MAX_URL_MESSAGE_CHARS}, of which this is a summand.
+ *
+ * Named for the VALUE CLASS, not for the checkout. It was `MAX_CHECKOUT_URL_CHARS` until
+ * `SAIHM_ENDPOINT_URL` needed the same bound, and a constant whose name is narrower than its class
+ * is precisely how a value ends up wearing a budget sized for a different one — the defect this file
+ * has now recorded three times over ({@link MAX_JOIN_FIELD_CHARS}, {@link MAX_PATH_FIELD_CHARS}, and
+ * the rename that produced this sentence). Renaming rather than documenting around it, because the
+ * name is what the next author reads at the call site; the docblock is not.
  *
  * Separate from {@link MAX_JOIN_FIELD_CHARS} because that constant is sized and documented for
  * the device-flow verification URI ("well under 100 characters") and two of its call sites were
@@ -266,15 +445,19 @@ export const MAX_JOIN_FIELD_CHARS = 256;
  * the precise outcome both constants exist to prevent. `checkoutUrlForTier` validates the scheme
  * and never the length, so this is the only bound on it.
  *
- * 2048 is the practical ceiling browsers and CDNs agree on. Still fenced, because the URL is
- * ENDPOINT-CHOSEN: the cap is against flooding the text block, not against a long legitimate link.
+ * 2048 is the practical ceiling browsers and CDNs agree on, and covers the other member of the class:
+ * an endpoint URL is caller-chosen and realistically short, but it is bounded by the same ceiling and
+ * needs no budget of its own — two constants of equal value over one class is proliferation, not rigour.
+ *
+ * Still fenced, because a URL in this class may be ENDPOINT-CHOSEN (the checkout link is): the cap is
+ * against flooding the text block, not against a long legitimate link.
  */
-export const MAX_CHECKOUT_URL_CHARS = 2048;
+export const MAX_URL_FIELD_CHARS = 2048;
 
 /**
  * Budget for a FILESYSTEM PATH the caller has to act on — where the URL was saved, which key to back up.
  *
- * Split from {@link MAX_JOIN_FIELD_CHARS} for the same reason {@link MAX_CHECKOUT_URL_CHARS} was, and
+ * Split from {@link MAX_JOIN_FIELD_CHARS} for the same reason {@link MAX_URL_FIELD_CHARS} was, and
  * as the other half of that split: the constant above is sized and documented for a device-flow
  * verification URI, and the sweep that found URLs wearing it stopped at URLs. Paths were wearing it
  * too, on the two lines whose whole job is to hand a human a path — "Also written to" and "Back up".
@@ -289,7 +472,10 @@ export const MAX_CHECKOUT_URL_CHARS = 2048;
  * Still fenced, and the fence is the part that carries the security property: `safeField` scrubs the
  * control range and the label metacharacters at ANY budget, so widening the cap costs nothing there.
  * What the cap defends is the block's shape — the value still cannot become a paragraph — and at
- * PATH_MAX no path a filesystem can hold is ever cut.
+ * PATH_MAX no path a POSIX filesystem can hold is ever cut. Not "no path any OS admits": Windows
+ * extended-length paths reach ~32767, which this deliberately does not cover. The values it fences
+ * are this process's own state and key paths, so the ceiling is sized for the paths actually
+ * rendered rather than for the widest one a filesystem anywhere will accept.
  */
 export const MAX_PATH_FIELD_CHARS = 4096;
 
@@ -523,6 +709,81 @@ export const epochOrMarker = (s: string | null): string =>
 export const MAX_ERROR_MESSAGE_CHARS = 256;
 
 /**
+ * Budget for a message that CARRIES A PATH INSIDE IT — the sentence and the path it names, together.
+ *
+ * Named for the VALUE CLASS and not for the one call site that first needed it: this began as
+ * `MAX_RESIDUAL_MESSAGE_CHARS`, and a config error carrying an unreadable path needed exactly the
+ * same bound. A constant named after its first caller is the same trap {@link MAX_URL_FIELD_CHARS}
+ * was renamed to escape.
+ *
+ * Derived, not chosen, because the value IS that composite: a message-class budget plus TWO
+ * path-class ones. Two, because a failed `rename` carries a SOURCE and a DESTINATION in one message
+ * Node wrote - at one path's width the destination first began losing characters at 2152 and was
+ * gone entirely by 4303. An earlier cut of this paragraph said "plus a path-class one", which
+ * derives 4352 and not the 8448 shipped one line below; the code was right and the sentence was
+ * short by a path. `saihm_forget`'s local-cache residual is a fixed 166-character sentence built in `client.ts`
+ * with the operator's cache path interpolated, so under {@link MAX_ERROR_MESSAGE_CHARS} alone only 90
+ * characters were left for the path — on the one line whose job is to tell an operator which file
+ * still holds the plaintext they asked to have destroyed.
+ *
+ * Widening {@link MAX_ERROR_MESSAGE_CHARS} itself was the wrong shape and was rejected: four other
+ * sites fence an ENDPOINT-supplied `e.message` or `e.code` with it, so raising it there would hand a
+ * hostile endpoint a paragraph. This constant applies only where the composite is OURS.
+ *
+ * THREE call sites now, not one, and they are safe for two different reasons - which is why the
+ * reason has to be attached to the site rather than to the constant. For the residual, `client.ts`
+ * DELETES any endpoint-supplied field of that name before setting its own, so the endpoint cannot
+ * reach the value. For the two `failText` arms the value is a marked or config error whose message
+ * this package wrote, never an endpoint echo, and the marking is what carries that guarantee. An
+ * earlier cut said "safe at that ONE call site ... before it is reused anywhere else" while the
+ * same commit reused it twice: a precondition that names a call count goes stale the moment it is
+ * true, which is the stale-enumeration failure this module's header already records three times.
+ *
+ * Expressed as a sum rather than written as 8448, so the relationship survives an edit to either
+ * half — the same failure `shortScalar` above records as "the two constants had no expressed
+ * relationship". Declared HERE and not beside {@link MAX_PATH_FIELD_CHARS}, where it reads as
+ * belonging: {@link MAX_ERROR_MESSAGE_CHARS} is declared further down this file, so a sum placed
+ * there is a module-init ReferenceError rather than a wrong number.
+ */
+export const MAX_PATH_MESSAGE_CHARS =
+  MAX_ERROR_MESSAGE_CHARS + 2 * MAX_PATH_FIELD_CHARS;
+
+/**
+ * The same composite, for a message carrying a URL rather than a path.
+ *
+ * Split by value class for the reason {@link MAX_URL_FIELD_CHARS} was renamed: one budget serving
+ * two classes is how a value ends up wearing a bound sized for something else. A URL message is
+ * the narrower of the two because a URL is the narrower value.
+ */
+export const MAX_URL_MESSAGE_CHARS =
+  MAX_ERROR_MESSAGE_CHARS + MAX_URL_FIELD_CHARS;
+
+/**
+ * Render a config error, widening the fence to fit the actionable value ITS MESSAGE CARRIES.
+ *
+ * A path or URL spliced into a sentence is governed by the SENTENCE's budget. The two lines that
+ * fenced a path DIRECTLY could be corrected by swapping the constant ({@link MAX_PATH_FIELD_CHARS});
+ * the ones that EMBED it could not — `SAIHM_MASTER_SECRET_FILE could not be read: <path>` left 59
+ * characters for the path once the sentence and the setup hint were counted.
+ *
+ * The value stays IN the message rather than being carried out to a line of its own. An earlier cut
+ * split them, which rendered well and quietly regressed a documented library entry point: consumers
+ * of `SaihmProClient.bootFromEnv()` catch these and read `.message`, which had never been truncated
+ * — only the RENDER was. Splitting fixed the render by breaking the message. Widening the fence
+ * fixes the render and leaves `.message` exactly as consumers already had it.
+ *
+ * The budget comes from `valueKind` here rather than being passed in from `client.ts`, which cannot
+ * import budgets from this module without closing an import cycle. Safe to widen because these
+ * messages are OURS or the RUNTIME's, never an endpoint's — see the arm below for why that
+ * distinction cannot be extended to plain errors.
+ */
+function configErrorText(e: SaihmConfigError): string {
+  return e.valueKind === 'path'
+    ? safePathField(e.message, MAX_PATH_MESSAGE_CHARS)
+    : safeField(e.message, MAX_URL_MESSAGE_CHARS);
+}
+
+/**
  * Build the text of a typed MCP tool error (the caller wraps it so the server never crashes).
  *
  * EVERY endpoint-derived string here is fenced, for the same reason the announcement renderer fences
@@ -558,10 +819,34 @@ export function failText(e: unknown): string {
     // `[unknown]`. `code` is a string, so no legitimate falsy value is swallowed by the change.
     ? `SAIHM error [${safeField(e.code || 'unknown', MAX_ERROR_CODE_CHARS)}] ` +
       `(status ${e.status}): ${safeField(e.message, MAX_ERROR_MESSAGE_CHARS)}`
-    : e instanceof Error
-      ? safeField(e.message, MAX_ERROR_MESSAGE_CHARS)
-      // `coerce`, not `String(e)`: `fail()` is the LAST resort — a throw from inside it takes down
-      // the very path that exists to keep the server from crashing. A thrown value of any shape
-      // reaches here, including one `String` cannot survive.
-      : safeField(coerce(e), MAX_ERROR_MESSAGE_CHARS);
+    // BEFORE the plain-`Error` arm, which this extends — reversing the two makes the wider branch
+    // unreachable and the defect silently returns.
+    : e instanceof SaihmConfigError
+      ? configErrorText(e)
+      : e instanceof Error
+        // NOT widened for our own thrown messages generally, which was the tempting one-line fix.
+        //
+        // The reason first written here was that a hostile endpoint reaches this arm as the
+        // `SyntaxError` from `JSON.parse`. That is FALSE, and measured false: every `JSON.parse` of a
+        // response body in `client.ts` is wrapped — the 4xx sites swallow the SyntaxError to leave
+        // `code` undefined, and the 2xx sites rethrow `SaihmEndpointError('malformed_json', <fixed
+        // message>)`. No endpoint-derived text reaches here today. Recorded rather than deleted
+        // because the claim reads plausibly and a later author would otherwise re-derive it.
+        //
+        // The real reason is that this arm is the CATCH-ALL for every throw that is not one of our
+        // typed classes, including ones not yet written. Widening it does not widen a known channel;
+        // it widens an unknown one.
+        //
+        // So the widening is OPT-IN per error, not per arm. `isPathBearing` is true only for errors
+        // this package explicitly marked — the filesystem failures where NODE wrote the message and
+        // embedded a caller-chosen path in it. An unmarked throw, from anywhere, still gets the
+        // narrow bound. This is the same distinction the arm above draws, applied to errors we
+        // cannot re-type without discarding their `code`/`errno`.
+        ? isPathBearing(e)
+          ? safePathField(e.message, MAX_PATH_MESSAGE_CHARS)
+          : safeField(e.message, MAX_ERROR_MESSAGE_CHARS)
+        // `coerce`, not `String(e)`: `fail()` is the LAST resort — a throw from inside it takes down
+        // the very path that exists to keep the server from crashing. A thrown value of any shape
+        // reaches here, including one `String` cannot survive.
+        : safeField(coerce(e), MAX_ERROR_MESSAGE_CHARS);
 }

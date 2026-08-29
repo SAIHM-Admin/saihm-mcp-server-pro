@@ -35,12 +35,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   MALFORMED,
-  MAX_CHECKOUT_URL_CHARS,
-  MAX_ERROR_MESSAGE_CHARS,
   MAX_JOIN_FIELD_CHARS,
   MAX_PATH_FIELD_CHARS,
+  MAX_PATH_MESSAGE_CHARS,
+  MAX_URL_FIELD_CHARS,
   boundedOrMarker,
   safeField,
+  safePathField,
   safeScalar,
   shortScalar,
   labelSafe,
@@ -55,6 +56,7 @@ import {
   SaihmProClient,
   selfJoinEnabled,
   ensureSelfJoinIdentityEnv,
+  identityKeyFile,
   MAX_ANNOUNCEMENT_FIELD_CHARS,
   type FreeDevicePrompt,
   type FreeEntitlementResult,
@@ -594,9 +596,17 @@ server.registerTool(
           // operator never sees is the same as no residual at all — and this is the one tool where
           // the thing left behind is the plaintext they asked to destroy. The sentence is ours, but
           // it interpolates the cache path, which comes from operator env and is not statically
-          // known here, so it goes through the same fence every other rendered value does.
+          // known here, so it goes through a fence like every other rendered value.
+          //
+          // MAX_PATH_MESSAGE_CHARS and not MAX_ERROR_MESSAGE_CHARS: the sentence is 166 fixed
+          // characters, so the message budget alone left 90 for the path and cut any longer one --
+          // naming a file the operator cannot then go and find, on the line that exists to send
+          // them to it. Safe to widen HERE specifically because `client.ts` deletes any
+          // endpoint-supplied field of this name before setting its own, so nothing hostile reaches
+          // this value; the budget is not widened for the endpoint-facing sites that share the
+          // narrower constant.
           (r.localCacheResidual
-            ? `\n  ! ${safeField(r.localCacheResidual, MAX_ERROR_MESSAGE_CHARS)}`
+            ? `\n  ! ${safePathField(r.localCacheResidual, MAX_PATH_MESSAGE_CHARS)}`
             : ''),
       );
     } catch (e) {
@@ -899,7 +909,8 @@ interface JoinState {
   prompt?: FreeDevicePrompt;
   result?: FreeEntitlementResult;
   error?: unknown;
-  keyPath: string;
+  /** The key FILE, or `null` when the secret is inline in `SAIHM_MASTER_SECRET_HEX` and no file exists. */
+  keyPath: string | null;
   createdKey: boolean;
 }
 let joinState: JoinState | null = null;
@@ -916,9 +927,22 @@ async function waitForJoinSignal(ms: number): Promise<void> {
 function joinPendingText(s: JoinState): string {
   const p = s.prompt as FreeDevicePrompt;
   const mins = expiryMins(p.expiresIn);
-  const keyNote = s.createdKey
-    ? `A new memory key was created and saved to ${s.keyPath} — keep this file safe; it is the only key to your memory and cannot be recovered.`
-    : `Using your existing memory key (${s.keyPath}).`;
+  // Fenced, though `keyPath` is env-derived rather than endpoint-derived. Two hostile reviews found
+  // this independently and one reproduced it: a `SAIHM_HOME` containing a newline renders a forged
+  // `RECALL` banner and a line in authenticated-memory shape INSIDE this result, in the tool's own
+  // voice. It was twice dismissed on the reasoning that whoever sets your env owns the process. That
+  // is weaker than it sounds — `SAIHM_HOME` is set in an MCP client config, which is reviewed for
+  // PATHS and not for embedded newlines — and the line below already fences an endpoint value with a
+  // twelve-line note on why lines must not be forgeable. At PATH_MAX the fence costs nothing.
+  // `null` means the secret is INLINE in SAIHM_MASTER_SECRET_HEX and there is no file to name. It
+  // used to arrive as the string `(SAIHM_MASTER_SECRET_HEX)` and render as a path, twice over.
+  const keyPath = s.keyPath === null ? null : safePathField(s.keyPath, MAX_PATH_FIELD_CHARS);
+  const keyNote =
+    keyPath === null
+      ? 'Your memory key is the SAIHM_MASTER_SECRET_HEX value you supplied — keep it safe; it is the only key to your memory and cannot be recovered.'
+      : s.createdKey
+        ? `A new memory key was created and saved to ${keyPath} — keep this file safe; it is the only key to your memory and cannot be recovered.`
+        : `Using your existing memory key (${keyPath}).`;
   // Both values come from the onboarding bridge, which is the SAME ORIGIN as the memory endpoint —
   // one hostile operator controls both — and the client type-checks them only as non-empty strings.
   // Rendered raw they were the softest target in the server: this block exists to be RELAYED TO A
@@ -942,7 +966,9 @@ function joinSuccessText(s: JoinState): string {
   return [
     "You're in — your free SAIHM memory is active.",
     `  identity: ${(s.result as FreeEntitlementResult).agentIdHash}`,
-    `  key file: ${s.keyPath} (the only key to your memory; keep it safe — it cannot be recovered)`,
+    s.keyPath === null
+      ? '  key: the SAIHM_MASTER_SECRET_HEX value you supplied (the only key to your memory; keep it safe — it cannot be recovered)'
+      : `  key file: ${safePathField(s.keyPath, MAX_PATH_FIELD_CHARS)} (the only key to your memory; keep it safe — it cannot be recovered)`,
     'Your SAIHM memory tools are ready to use now.',
   ].join('\n');
 }
@@ -1110,14 +1136,14 @@ function checkoutUrlBlock(fenced: string, savedTo: string): string[] {
     '  ' + fenced,
     '  --- END CHECKOUT URL ---',
     '',
-    ...(savedTo ? ['  Also written to: ' + safeField(savedTo, MAX_PATH_FIELD_CHARS), ''] : []),
+    ...(savedTo ? ['  Also written to: ' + safePathField(savedTo, MAX_PATH_FIELD_CHARS), ''] : []),
   ];
 }
 
 async function runJoin(): Promise<void> {
   const c = SaihmProClient.bootFromEnv();
   const url = await c.requestCheckoutUrl();
-  const fenced = safeField(url, MAX_CHECKOUT_URL_CHARS);
+  const fenced = safeField(url, MAX_URL_FIELD_CHARS);
   process.stdout.write(
     [
       '',
@@ -1129,7 +1155,14 @@ async function runJoin(): Promise<void> {
       '  Open the link above in a browser and pay. Copy it whole — everything after the "#" is part',
       '  of the link, and a copy that loses it is refused as incomplete.',
       '',
-      '  Keep SAIHM_MASTER_SECRET_HEX safe — it is',
+      // The SAME resolution `free-join` uses, from `identityKeyFile()`. This line was
+      // unconditionally "Keep SAIHM_MASTER_SECRET_HEX safe", which is the exact defect `free-join`
+      // fixed 60 lines below and which nobody propagated here: a caller who reached `join` after
+      // `saihm_join` has a generated key FILE and no such variable, and this told them to protect
+      // the wrong thing while never naming the file they must actually back up.
+      identityKeyFile()
+        ? `  Back up ${safePathField(identityKeyFile() as string, MAX_PATH_FIELD_CHARS)} — it is`
+        : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is',
       '  the only key to your memory and cannot be recovered. After payment, start the server',
       '  normally (drop the "join" argument) and it connects automatically.',
       '',
@@ -1151,7 +1184,10 @@ async function runJoin(): Promise<void> {
  * generated and bootFromEnv raises its own guided error, which is the point of that switch.
  */
 async function runFreeJoin(): Promise<void> {
-  const identity = selfJoinEnabled() ? ensureSelfJoinIdentityEnv() : undefined;
+  // Called for its SIDE EFFECT - it mints the key file and points SAIHM_MASTER_SECRET_FILE at it
+  // - and no longer for its return value. What to TELL the operator is resolved once, by
+  // `identityKeyFile()`, so this verb and `join` cannot drift apart again.
+  if (selfJoinEnabled()) ensureSelfJoinIdentityEnv();
   const c = SaihmProClient.bootFromEnv();
   const r = await c.acquireFreeEntitlement({
     onPrompt: (p) =>
@@ -1188,8 +1224,8 @@ async function runFreeJoin(): Promise<void> {
       // Not `identity?.keyPath` alone: under SAIHM_SELF_JOIN=0 nothing is ensured, yet a caller
       // who supplied SAIHM_MASTER_SECRET_FILE still has a FILE to back up. Reading env directly
       // covers that case too, so the only caller told to keep the HEX var is one who set it.
-      (identity?.keyPath ?? process.env.SAIHM_MASTER_SECRET_FILE)
-        ? `  Back up ${safeField(identity?.keyPath ?? process.env.SAIHM_MASTER_SECRET_FILE!, MAX_PATH_FIELD_CHARS)} — it is the only key to your`
+      identityKeyFile()
+        ? `  Back up ${safePathField(identityKeyFile() as string, MAX_PATH_FIELD_CHARS)} — it is the only key to your`
         : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your',
       '  memory and cannot be recovered. Start the server normally (drop the "free-join" argument)',
       '  and it connects automatically. Upgrading to a paid plan later attaches to THIS same key —',
@@ -1228,7 +1264,7 @@ async function runUpgrade(): Promise<void> {
   const target =
     (process.argv[3] ?? process.env.SAIHM_UPGRADE_TIER ?? 'PRO').trim() || 'PRO';
   const url = await c.requestUpgradeUrl(target);
-  const fenced = safeField(url, MAX_CHECKOUT_URL_CHARS);
+  const fenced = safeField(url, MAX_URL_FIELD_CHARS);
   process.stdout.write(
     [
       '',
