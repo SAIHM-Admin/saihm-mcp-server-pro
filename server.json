@@ -38,6 +38,13 @@
           "isSecret": true
         },
         {
+          "name": "SAIHM_MASTER_SECRET_HEX",
+          "description": "The 64+ hex-char master secret itself, inline, as an alternative to SAIHM_MASTER_SECRET_FILE. A file is preferred: an environment variable is visible to anything that can read this process's environment. Never transmitted.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
           "name": "SAIHM_HOME",
           "description": "Base dir for the self-join identity file ($SAIHM_HOME/free-identity.key, mode 600). Defaults to ~/.saihm.",
           "isRequired": false,

@@ -5,6 +5,14 @@
  *
  *   Runner: npx tsx --test tests/client_bridge_e2e.test.ts   (run from mcp-server-pro/)
  *
+ * DELIBERATELY OUT of the `npm test` gate, and tracked anyway. It imports the bridge handler from
+ * `../../edge`, which is outside this package and is not published with it, so a consumer running
+ * the gate from a packed tarball would get a resolution failure rather than a test result. It is
+ * kept in the repository because it is the only suite that drives the real client against the real
+ * bridge, and it is run BY HAND before a release alongside the operator suite. A reader finding a
+ * tracked test that the gate never runs is entitled to know which of those two things it is; that
+ * is what this paragraph is for.
+ *
  * Unlike tests/client_free_onboard.test.ts (real client vs a HAND-ROLLED mock bridge) and
  * edge/mcp-bridge/free_onboard.test.ts (bridge state machine, no client, no HTTP), this suite closes
  * the last untested seam: the REAL client's REAL ML-DSA proof-of-possession verified by the REAL

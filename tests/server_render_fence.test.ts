@@ -1192,6 +1192,12 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     // different scopes both land in `live[name]`, where the last one wins and the other is reported
     // as pinned while nothing checks it. Equal values are harmless shadowing; DIFFERENT values mean
     // this sweep cannot say which number it pinned, and that must be loud rather than arbitrary.
+    //
+    // ITS REACH, stated: this sees only what was EMITTED, so a name that `budgetsIn` skipped -
+    // a bare alias, or a declaration whose initializer could hold no budget - cannot collide here
+    // however many times it is declared. That is not a hole this guard can close from where it
+    // stands: a skipped declaration has no value to compare. The two shapes that used to hide a
+    // real budget behind a skip are closed upstream instead, at the point of the skip.
     const seen = new Map<string, number | number[]>();
     for (const b of out) {
       if (seen.has(b.name))

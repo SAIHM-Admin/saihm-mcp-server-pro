@@ -97,13 +97,29 @@ export const BLANK_SYMBOLS = '\u2800\u2d7f\u{16FE4}\u{1D159}\u{13441}\u{13442}';
 /**
  * Format characters, default-ignorables, every whitespace but the ASCII space, and the blanks above.
  *
- * Built once from {@link BLANK_SYMBOLS} rather than written twice. `u` is required: the property
- * escapes need it, and U+1D159 and U+13441/2 are astral - written as a five-hex-digit escape in a
- * class WITHOUT `u` it is a four-digit escape followed by a literal digit, which silently scrubbed
- * every DIGIT 9 out of every path until a fixture caught it.
+ * Built once from {@link BLANK_SYMBOLS} rather than written twice.
+ *
+ * `u` is REQUIRED, and the reason this said so was the wrong one. Measured on the flagless mutant:
+ * digit 9 is KEPT. The digit-9 story is real but it is about a five-hex-digit escape written into a
+ * BMP-only class, which is how U+1D159 was once spelled and what a fixture caught - the entries are
+ * generated from a string now, so that spelling no longer exists to regress to. What dropping `u`
+ * does TODAY is worse and quieter: `\p{Cf}` and `\p{Default_Ignorable_Code_Point}` stop being property
+ * escapes, so ZWJ and VS17 SURVIVE - which reopens the 2390-byte variation-selector channel this
+ * same file calls closed - and 7156 astral code points mangle to `??` where the class matches a
+ * surrogate half. All four measured on the mutant, not reasoned from the flag's documentation.
+ *
+ * ESCAPED, not spliced. Each entry goes in as `\u{...}` because a raw splice into a character class
+ * is safe only while every member happens to be inert there: `]` and `\` would throw at module load,
+ * loudly, but `-` and `^` would COMPILE and silently widen - a `-` between two entries makes a RANGE,
+ * and between U+2800 and U+2D7F that is 1408 code points scrubbed instead of 3. No entry is one of
+ * those four today; the list has grown by hand from three to six, so the shape is removed rather
+ * than watched.
  */
+const BLANK_CLASS = [...BLANK_SYMBOLS]
+  .map((c) => `\\u{${(c.codePointAt(0) as number).toString(16)}}`)
+  .join('');
 const BLANK_AND_FORMAT = new RegExp(
-  `\\p{Cf}|\\p{Default_Ignorable_Code_Point}|[^\\S ]|[${BLANK_SYMBOLS}]`,
+  `\\p{Cf}|\\p{Default_Ignorable_Code_Point}|[^\\S ]|[${BLANK_CLASS}]`,
   'gu',
 );
 
@@ -753,7 +769,10 @@ export const MAX_ERROR_MESSAGE_CHARS = 256;
  * Derived, not chosen, because the value IS that composite: a message-class budget plus TWO
  * path-class ones. Two, because a failed `rename` carries a SOURCE and a DESTINATION in one message
  * Node wrote - at one path's width the destination first began losing characters at 2152 and was
- * gone entirely by 4303. An earlier cut of this paragraph said "plus a path-class one", which
+ * gone entirely by 4303. That second figure is arithmetically exact and UNREACHABLE: Linux
+ * PATH_MAX is 4096, so a 4303-character destination is ENAMETOOLONG before any message names it.
+ * The reachable half of the same measurement is the one to hold on to - at L=2151 nothing is cut,
+ * at L=2152 the destination loses its first character. An earlier cut of this paragraph said "plus a path-class one", which
  * derives 4352 and not the 8448 shipped one line below; the code was right and the sentence was
  * short by a path. `saihm_forget`'s local-cache residual is a fixed 166-character sentence built in `client.ts`
  * with the operator's cache path interpolated, so under {@link MAX_ERROR_MESSAGE_CHARS} alone only 90
