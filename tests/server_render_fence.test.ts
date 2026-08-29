@@ -3544,7 +3544,61 @@ test('the blank list is ESCAPED into its character class, not spliced raw', () =
   assert.equal(matched(members.map(esc).join('')), 2, 'the escaped class must match its members and nothing else');
   assert.equal(matched(members.join('-')), 1408, 'a raw `-` between two entries silently makes a RANGE');
   assert.equal(matched(`^${members.join('')}`), 65534, 'a raw `^` in first position NEGATES the class');
-  assert.equal(matched(members.join('^')), 3, 'a raw `^` between entries is inert, which is what makes it quiet');
+  assert.equal(matched(members.join('^')), 3, 'a raw `^` between entries joins the class as a literal member - one more than the two it should match, which is what makes it quiet');
+  // ...and the SHIPPED six-member list, pinned against the PARAGRAPH that describes it. The prose
+  // above this class carried three counts belonging to the two-member probe just above - a six-member
+  // list described by a two-member measurement - and drifted for rounds because this is the one block
+  // of Unicode prose no pin parsed, while the residual paragraph further down has every figure
+  // checked. Same mechanism, applied here, so the next rewrite of that paragraph has to re-measure.
+  const shippedEsc = [...BLANK_SYMBOLS].map(
+    (c) => `\\u{${(c.codePointAt(0) as number).toString(16)}}`,
+  );
+  const countAll = (body: string): { total: number; bmp: number } => {
+    const re = new RegExp(`[${body}]`, 'u');
+    let total = 0;
+    let bmp = 0;
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      // Lone surrogates by code UNIT: a negated class matches them, and counting the BMP without
+      // them is the blind spot the paragraph itself says a prior cut was withdrawn for.
+      const ch = cp >= 0xd800 && cp <= 0xdfff ? String.fromCharCode(cp) : String.fromCodePoint(cp);
+      if (re.test(ch)) {
+        total++;
+        if (cp <= 0xffff) bmp++;
+      }
+    }
+    return { total, bmp };
+  };
+  const base = countAll(shippedEsc.join(''));
+  const dash = countAll(`${shippedEsc[0]}-${shippedEsc.slice(1).join('')}`);
+  const negated = countAll(`^${shippedEsc.join('')}`);
+  const caretMid = countAll(`${shippedEsc[0]}^${shippedEsc.slice(1).join('')}`);
+  const prose = readFileSync(new URL('render_fence.ts', SRC_ROOT), 'utf-8')
+    .replace(/\n\s*\*\s?/g, ' ')
+    .replace(/\s+/g, ' ');
+  const fig = (re: RegExp, what: string): RegExpExecArray => {
+    const m = re.exec(prose);
+    assert.ok(m, `the raw-splice paragraph no longer states ${what}; it was rewritten and this pin found nothing`);
+    return m as RegExpExecArray;
+  };
+  const rangeFig = fig(
+    /the (\d+)-code-point span U\+2800\.\.U\+2D7F is swept in, so the class matches (\d+) code points instead of (\d+)/,
+    'what a raw `-` widens the class to',
+  );
+  assert.equal(Number(rangeFig[1]), 0x2d7f - 0x2800 + 1, 'the disclosed span size is not the measured one');
+  assert.equal(Number(rangeFig[2]), dash.total, 'the disclosed `-` count is not the measured one');
+  assert.equal(Number(rangeFig[3]), base.total, 'the disclosed baseline count is not the measured one');
+  const negFig = fig(/NEGATES: (\d+) BMP code points match rather than (\d+)/, 'what a leading `^` negates to');
+  assert.equal(Number(negFig[1]), negated.bmp, 'the disclosed negated BMP count is not the measured one');
+  assert.equal(Number(negFig[2]), base.bmp, 'the disclosed baseline BMP count is not the measured one');
+  const midFig = fig(
+    /it joins the class as a literal member, so (\d+) code points match rather than (\d+), (\d+) BMP rather than (\d+)/,
+    'what a `^` between entries does',
+  );
+  assert.equal(Number(midFig[1]), caretMid.total, 'the disclosed `^`-between count is not the measured one');
+  assert.equal(Number(midFig[2]), base.total, 'the disclosed baseline is not the measured one');
+  assert.equal(Number(midFig[3]), caretMid.bmp, 'the disclosed `^`-between BMP count is not the measured one');
+  assert.equal(Number(midFig[4]), base.bmp, 'the disclosed baseline BMP count is not the measured one');
+
   // The two spellings that would fail LOUDLY are worth stating too: they throw at module load
   // rather than widening, which is the one shape of this bug that could not ship silently.
   for (const bad of [']', '\\'])
