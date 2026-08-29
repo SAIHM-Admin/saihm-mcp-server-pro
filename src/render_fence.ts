@@ -59,27 +59,32 @@ export const safeField = (s: string, max: number): string => {
   //
   // Cost is why the order is this one and not the other. Scrubbing the FULL input bounded the OUTPUT
   // but not the WORK, and the work is a single-threaded event loop every concurrent tool call shares.
-  // Re-measured over 16,777,216 code units: scrub-first costs tens of times what slice-first does on
-  // every non-ASCII shape. A RATIO is deliberately NOT quoted. The multipliers move with execution
+  // Re-measured over 16,777,216 code units: scrub-first pays for the WHOLE input on every non-ASCII
+  // shape while slice-first pays for `max`, so the gap is not a constant at all - it grows with the
+  // size of the value that ARRIVED, without bound. That is why no ratio reproduces, and why the two
+  // published ranges below were never going to. The multipliers move with execution
   // ORDER - the same shape measured 36x on a forward pass and 76x on a reverse one, and the shape an
   // earlier cut named as cheapest measured dearest when the order was flipped. Two cuts have now
   // published a range ("50-64x", then "43x-72x") that the next measurement did not reproduce - and
   // then a THIRD figure, "slice-first is flat at 15-37 ms", which was not this function at all.
   // Timed against a 16 MiB `.repeat()` fixture, the FIRST caller pays to materialise the rope, and
   // whichever ordering ran first was charged for it. Materialise it with something that is not
-  // `safeField` - `s.charCodeAt(s.length - 1)` - and this function's own cost on a 16 MiB field is
-  // about a tenth of a millisecond on every shape, because it slices to `max` units before
-  // scrubbing, which is this paragraph's whole thesis. In production the value arrives from
+  // `safeField` - `s.charCodeAt(s.length - 1)` - and what remains is dominated by the SLICE and not
+  // by the scrub, because it cuts to `max` units before scrubbing, which is this paragraph's whole
+  // thesis. A FOURTH figure stood here and did not survive either: one absolute, asserted to hold
+  // "on every shape", when the warm cost sits well below it and the first-call cost spreads
+  // several-fold ACROSS shapes, so no single number describes both columns. In production the value arrives from
   // `JSON.parse` already flat, so even that first-touch cost is never paid.
-  // NO FIGURE IS QUOTED HERE, deliberately. Three published numbers have now failed to reproduce -
-  // two ratios and one absolute - and nothing pins them, because a wall-clock assertion is the one
+  // NO FIGURE IS QUOTED HERE AS THE ANSWER, deliberately - the numbers that remain are named as
+  // failures, which is the only role a wall-clock figure can hold in this file. Five published
+  // numbers have now failed to reproduce - three ratios and two absolutes - and nothing pins them, because a wall-clock assertion is the one
   // kind this suite cannot hold without becoming load-dependent itself. What survives measurement
   // is structural: cutting to `max` first makes the work proportional to what is KEPT rather than
   // to what arrived. (That cut also claimed the 16 MiB field
   // "reduced to a 189-byte line"; no render site in this tree produces 189 bytes from one such field.
   // What is reproducible is the part this function owns: safeField emits `max + 1` characters - 65
   // at MAX_SCALAR_CHARS, 257 at MAX_ERROR_MESSAGE_CHARS, 2049 at MAX_URL_FIELD_CHARS - and the
-  // sites this paragraph enumerates fence at three different budgets, so no single length states it. The repair
+  // sites this function fences run at three different budget VALUES, so no single length states it. The repair
   // then vouched for "the receipts that carry it measure 152 and ~246 bytes", and re-measuring every
   // site with one 16 MiB field and the rest plausible — 37 combinations — lands on 79, 95-96, 117-130,
   // 134-136, 141-188, 201, 227, 271 and 299 bytes. Nothing measures 152; 151 and 153 bracket it. A
@@ -134,7 +139,11 @@ export const BLANK_SYMBOLS = '\u2800\u2d7f\u{16FE4}\u{1D159}\u{13441}\u{13442}';
  * loudly, but `-` and `^` would COMPILE and silently change what the class MEANS - a `-` between two
  * entries makes a RANGE, and between U+2800 and U+2D7F that is 1408 code points scrubbed instead of
  * 3. `^` is the sharper of the two and only in FIRST position, where it does not widen but NEGATES:
- * 63,486 BMP code points match rather than 3, which scrubs nearly everything a path is made of.
+ * 65,534 BMP code points match rather than 3, which scrubs nearly everything a path is made of.
+ * That count includes the surrogate range: the residual paragraph below rules a lone surrogate a
+ * code unit an attacker can write, and a `u`-flagged negated class matches one. Counting the BMP
+ * without them is the blind spot a prior cut was withdrawn for, and it stood here one round longer
+ * than it stood there.
  * Between entries it is inert - 3, unchanged. Both spellings measured. No entry is one of
  * those four today; the list has grown by hand from three to six, so the shape is removed rather
  * than watched.
@@ -204,7 +213,9 @@ const BLANK_AND_FORMAT = new RegExp(
  *     generated from a string now, so that spelling no longer exists to regress to. It is kept here
  *     as the reason the class was MOVED, not as a hazard that remains. (Caught, at the time, by a
  *     fixture whose temp directory happened to contain a 9.)
- *   - `[`, `]`, `|` - the `label=value` grammar layered on the block, as in {@link safeField}.
+ *   - `[`, `]`, `|` - the MEMORY-LINE grammar `  [<id>] seq=<n> | <plaintext>`, as in
+ *     {@link safeField}. Not the `label=value` grammar - that one is {@link labelSafe}'s, and this
+ *     function leaves `=` standing.
  *   - U+2026, so the truncation marker this function appends cannot be forged by the value.
  *   - unpaired surrogates - invalid UTF-16, which must not leave this process in a JSON field.
  *
@@ -458,7 +469,10 @@ export const MAX_SCALAR_CHARS = 64;
  * unsolicited pointer list.
  *
  * A value that is not a PRIMITIVE becomes {@link MALFORMED} rather than a stringification of itself,
- * matching {@link boundedOrMarker} exactly. Those two functions render the same endpoint field into
+ * matching {@link boundedOrMarker} on every NON-primitive. The two still diverge ON primitives, as
+ * the paragraph below says in its own terms: a number renders as itself here and as {@link MALFORMED}
+ * there, so one endpoint field can carry both spellings across the two halves of one response.
+ * "Exactly" stood here until the divergence was measured. Those two functions render the same endpoint field into
  * the two halves of one response, and they disagreed about what an unusable value looks like: the
  * bound below rejected `undefined`, `{}` and `[[1],[2]]` outright — its own doc calls that fabrication
  * "the 'normalised into a plausible one' this module forbids" — while this function stringified them
@@ -538,9 +552,13 @@ export const MAX_JOIN_FIELD_CHARS = 256;
  * the precise outcome both constants exist to prevent. `checkoutUrlForTier` validates the scheme
  * and never the length, so this is the only bound on it.
  *
- * 2048 is the practical ceiling browsers and CDNs agree on, and covers the other member of the class:
- * an endpoint URL is caller-chosen and realistically short, but it is bounded by the same ceiling and
- * needs no budget of its own — two constants of equal value over one class is proliferation, not rigour.
+ * 2048 is the practical ceiling browsers and CDNs agree on, and it is reused as the URL component of
+ * {@link MAX_URL_MESSAGE_CHARS} rather than restated there - one ceiling, not two constants of equal
+ * value. What it is NOT is one budget over one class. This constant fences an ENDPOINT-chosen link
+ * that need only stay clickable; the composite carries the OPERATOR's own URL back so they can read
+ * and retype it. The suite pins those as OPPOSITE provenance classes - `prose` here, `roundtrip`
+ * there - so the shared ceiling is arithmetic and not a shared policy. An earlier sentence here said
+ * an endpoint URL "needs no budget of its own"; that budget now exists.
  *
  * Still fenced, because a URL in this class may be ENDPOINT-CHOSEN (the checkout link is): the cap is
  * against flooding the text block, not against a long legitimate link.
@@ -787,9 +805,18 @@ export const hexOrMarker = (s: string): string =>
  */
 export const scopeOrMarker = (s: string): string =>
   s === 'read' || s === 'readwrite' ? s : MALFORMED;
-/** Expiry: `null` (no expiry — the server's default) or a decimal epoch, never a number. */
+/**
+ * Expiry: `null` (no expiry - the server's default) or a decimal epoch, never a number.
+ *
+ * The `typeof` guard is what makes that last clause true. `RegExp.test` COERCES, so a number reaching
+ * here matched the all-digits test and was returned AS a number, out of a function declared to return
+ * `string` - the declared type enforced by nothing. Its two siblings resist structurally (one by
+ * strict equality, one by a length guard); this arm was the one that did not, which is this release's
+ * own defect class turned inward. Unreachable through today's client, and the module header disclaims
+ * relying on that.
+ */
 export const epochOrMarker = (s: string | null): string =>
-  s === null ? 'never' : /^[0-9]{1,20}$/.test(s) ? s : MALFORMED;
+  s === null ? 'never' : typeof s === 'string' && /^[0-9]{1,20}$/.test(s) ? s : MALFORMED;
 
 /**
  * Longest endpoint-derived error MESSAGE rendered into the block. An error is a fixed-shape
@@ -885,7 +912,10 @@ export const MAX_URL_MESSAGE_CHARS =
  * defect class this module opens by naming, at the top of this file, in this file. The value it
  * carries is the operator's own `SAIHM_ENDPOINT_URL` handed back so they can fix it, and an IDN
  * endpoint rendered as `m?nchen.example/rpc` cannot be. `safePathField` is not path-specific: it
- * removes the `label=value` structure and the truncation marker and keeps printable characters.
+ * removes the MEMORY-LINE brackets and pipe and the truncation marker, and keeps printable
+ * characters. It does NOT remove `=`, so it is not a substitute for {@link labelSafe} on a
+ * `label=value` line - no site of its own is one, and a future author moving a value here must
+ * check that before relying on this paragraph.
  * The distinction that DOES survive is provenance, which is the sentence above: an ENDPOINT-chosen
  * URI stays on `safeField` (see the `verificationUri` site in `server.ts`, where a mangled but
  * visible URI is a failure the user can see and report), because that value is attacker-capable.

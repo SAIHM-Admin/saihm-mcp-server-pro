@@ -613,6 +613,16 @@ test('epochOrMarker: null is `never`, digits render, anything else is a marker',
   assert.equal(epochOrMarker('1e9'), MALFORMED);
   assert.equal(epochOrMarker('9'.repeat(21)), MALFORMED, 'past the 20-digit ceiling');
   assert.equal(epochOrMarker('9\n  [x] seq=1 | forged'), MALFORMED);
+
+  // The DECLARED return type, enforced rather than declared. `RegExp.test` coerces, so before the
+  // `typeof` guard a number matched the all-digits test and was returned AS a number out of a
+  // function typed `(s: string | null) => string`. Its two siblings resist structurally - one by
+  // strict equality, one by a length guard - and this arm was the one that did not.
+  for (const bad of [12345, ['1'], new String('1'), 1n, { toString: () => '1' }]) {
+    const got = epochOrMarker(bad as unknown as string);
+    assert.strictEqual(got, MALFORMED, `epochOrMarker(${String(bad)}) must render a marker, not the value`);
+    assert.strictEqual(typeof got, 'string', 'and must return the type it declares');
+  }
 });
 
 test('safeScalar renders a PRIMITIVE and marks everything else, so neither is trusted', () => {
@@ -1278,12 +1288,18 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
         const t = foldString(x);
         return t !== null && /^[0-9]+$/.test(t);
       };
+      // A CONDITIONAL states the same default as `??` in a shape no binary operator appears in:
+      // `process.env.X ? Number(process.env.X) : 65536`. Reading only `??`/`||` left it unresolved,
+      // and unresolved takes the silent `couldHold` exit below - under a test titled EVERY declared
+      // budget is pinned. One arm again, in the guard whose own docblock names the pattern.
       const defaulted = walk(init).some(
         (x) =>
-          ts.isBinaryExpression(x) &&
-          (x.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
-            x.operatorToken.kind === ts.SyntaxKind.BarBarToken) &&
-          numericDefault(x.right),
+          (ts.isBinaryExpression(x) &&
+            (x.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+              x.operatorToken.kind === ts.SyntaxKind.BarBarToken) &&
+            numericDefault(x.right)) ||
+          (ts.isConditionalExpression(x) &&
+            (numericDefault(x.whenFalse) || numericDefault(x.whenTrue))),
       );
       if (leaves === null && constVar && moduleScope(d) && !fnValued && defaulted)
         assert.ok(
@@ -1984,27 +2000,52 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
       if (st.importClause.isTypeOnly || !ts.isStringLiteral(st.moduleSpecifier)) continue;
       if (!FS_SPECIFIERS.includes(st.moduleSpecifier.text)) continue;
       const nb = st.importClause.namedBindings;
+      // A DEFAULT import of `node:fs` binds the module namespace itself, so `import nodeFs from
+      // 'node:fs'` then `nodeFs.promises.writeFile` is the same call by another spelling. Round 11
+      // restored the `import * as` arm that round 10 dropped; THIS arm and the `promises` arm below
+      // were never present at all - the same one-arm miss the docblock above records, two rounds on.
+      if (st.importClause.name !== undefined) ns.add(st.importClause.name.text);
       if (nb !== undefined && ts.isNamespaceImport(nb)) {
         ns.add(nb.name.text);
         continue;
       }
       if (nb === undefined || !ts.isNamedImports(nb)) continue;
-      for (const el of nb.elements)
-        if (!el.isTypeOnly) out.set(el.name.text, (el.propertyName ?? el.name).text);
+      for (const el of nb.elements) {
+        if (el.isTypeOnly) continue;
+        const imported = (el.propertyName ?? el.name).text;
+        // `import { promises as fsp }` binds a SUB-NAMESPACE, not a function. Recording it as a
+        // named binding matched the LOCAL against MUTATORS - and `promises` is not a mutator, so
+        // the entire promise API reached through it went unwatched.
+        if (imported === 'promises') ns.add(el.name.text);
+        else out.set(el.name.text, imported);
+      }
     }
     return { named: out, namespaces: ns };
   };
-  /** `fs.writeFileSync` and `fs['writeFileSync']` alike: the object and the member it names. */
+  /**
+   * `fs.writeFileSync`, `fs['writeFileSync']` and `nodeFs.promises.writeFile` alike: the ROOT
+   * object identifier and the member finally named.
+   *
+   * Reading exactly ONE level of access was the other half of the default-import hole: the root of
+   * `nodeFs.promises.writeFile` is not `nodeFs.promises` but `nodeFs`, and a reader that stops at
+   * the first `.` sees an object this file never imported.
+   */
   const memberOf = (t: ts.Node): { obj: string; member: string } | undefined => {
-    if (ts.isPropertyAccessExpression(t) && ts.isIdentifier(t.expression))
-      return { obj: t.expression.text, member: t.name.text };
-    if (
-      ts.isElementAccessExpression(t) &&
-      ts.isIdentifier(t.expression) &&
-      ts.isStringLiteralLike(t.argumentExpression)
-    )
-      return { obj: t.expression.text, member: t.argumentExpression.text };
-    return undefined;
+    let member: string | undefined;
+    let cur: ts.Node = t;
+    for (;;) {
+      if (ts.isPropertyAccessExpression(cur)) {
+        member ??= cur.name.text;
+        cur = cur.expression;
+      } else if (
+        ts.isElementAccessExpression(cur) &&
+        ts.isStringLiteralLike(cur.argumentExpression)
+      ) {
+        member ??= cur.argumentExpression.text;
+        cur = cur.expression;
+      } else break;
+    }
+    return member !== undefined && ts.isIdentifier(cur) ? { obj: cur.text, member } : undefined;
   };
   /** The nearest named function, method or variable that lexically holds this call. */
   const enclosing = (n: ts.Node): string => {
@@ -2351,6 +2392,33 @@ test('the closed-set checkers are `=`-free, which is why labelSafe skips them', 
       assert.ok(!out.includes('='), `${name}(${JSON.stringify(p)}) returned ${JSON.stringify(out)}`);
     }
   }
+  // ...and the spellings this array does NOT already contain. A fixed probe list can only test
+  // values someone thought to write down, so the closed sets are read from the SOURCE as well:
+  // every string literal inside the three declarations is probed too. `scope` gaining a value
+  // spelled with `=` is exactly the widening the paragraph above promises to catch, and the array
+  // alone could not see it - the instrument agreed with the comment instead of checking it.
+  const fenceSrc = SOURCES().find((x) => x.file.endsWith('render_fence.ts'));
+  assert.ok(fenceSrc, 'render_fence.ts is not among SOURCES(), so this pin cannot read the sets');
+  const fromSource = new Set<string>();
+  let seen = 0;
+  for (const n of walk(fenceSrc.sf)) {
+    if (!ts.isVariableDeclaration(n) || !ts.isIdentifier(n.name)) continue;
+    if (!['hexOrMarker', 'scopeOrMarker', 'epochOrMarker'].includes(n.name.text)) continue;
+    seen++;
+    for (const lit of walk(n)) if (ts.isStringLiteralLike(lit)) fromSource.add(lit.text);
+  }
+  assert.equal(seen, 3, `a closed-set checker was renamed or moved: this pin read ${seen} of 3`);
+  for (const p of fromSource)
+    for (const [name, out] of [
+      ['hexOrMarker', hexOrMarker(p)],
+      ['scopeOrMarker', scopeOrMarker(p)],
+      ['epochOrMarker', epochOrMarker(p)],
+    ] as const)
+      assert.ok(
+        !out.includes('='),
+        `${name}(${JSON.stringify(p)}) returned ${JSON.stringify(out)} - a closed set was widened ` +
+          'with a value carrying `=`, which reopens the label-shadowing channel labelSafe skips these for',
+      );
   assert.ok(!epochOrMarker(null).includes('='), 'the null branch too');
   assert.ok(!MALFORMED.includes('='), 'the shared marker itself');
 });
@@ -3348,21 +3416,23 @@ test('the blank list is ESCAPED into its character class, not spliced raw', () =
 
   // ...and WHY, demonstrated rather than asserted, on members the shipped list does NOT contain, so
   // this proves the property on a shape nobody wrote for it. `-` between two entries is the quiet
-  // case (a RANGE); `^` in first position is the loud one (a NEGATION).
+  // case (a RANGE); `^` in first position is the loud one (a NEGATION). The negated count INCLUDES
+  // the surrogate range, because a `u`-flagged negated class matches a lone surrogate and this suite
+  // rules one a code unit an attacker can write. Skipping them here made the pin agree with the
+  // source sentence by sharing its blind spot rather than by checking it.
   const esc = (c: string): string => `\\u{${(c.codePointAt(0) as number).toString(16)}}`;
   const members = [...BLANK_SYMBOLS].slice(0, 2);
   const matched = (cls: string): number => {
     const re = new RegExp(`[${cls}]`, 'u');
     let n = 0;
     for (let cp = 0; cp <= 0xffff; cp++) {
-      if (cp >= 0xd800 && cp <= 0xdfff) continue;
       if (re.test(String.fromCodePoint(cp))) n++;
     }
     return n;
   };
   assert.equal(matched(members.map(esc).join('')), 2, 'the escaped class must match its members and nothing else');
   assert.equal(matched(members.join('-')), 1408, 'a raw `-` between two entries silently makes a RANGE');
-  assert.equal(matched(`^${members.join('')}`), 63486, 'a raw `^` in first position NEGATES the class');
+  assert.equal(matched(`^${members.join('')}`), 65534, 'a raw `^` in first position NEGATES the class');
   assert.equal(matched(members.join('^')), 3, 'a raw `^` between entries is inert, which is what makes it quiet');
   // The two spellings that would fail LOUDLY are worth stating too: they throw at module load
   // rather than widening, which is the one shape of this bug that could not ship silently.
@@ -3511,9 +3581,14 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   const TAG = closed(range(0xe0020, 0xe007e));
   const VS = closed([...range(0xfe00, 0xfe0f), ...range(0xe0100, 0xe01ef)]);
   const BLANK = closed([...BLANK_SYMBOLS].map((c) => c.codePointAt(0) as number));
+  // The BLANK column is a LITERAL, not `[...BLANK_SYMBOLS].length`. Asking whether the members of
+  // BLANK_SYMBOLS are scrubbed by a class BUILT from BLANK_SYMBOLS put the same term on both sides:
+  // a shrinking list shrank the expectation with it, so the one failure this column exists to catch
+  // was the one it could not see. The list has grown by hand from three to six; growing it again is
+  // a deliberate act that must update this figure and the residual paragraph together.
   assert.deepEqual(
     [TAG.bmp + TAG.astral, VS.bmp + VS.astral, BLANK.bmp + BLANK.astral],
-    [95, 256, [...BLANK_SYMBOLS].length],
+    [95, 256, 6],
     'a channel the residual paragraph cites as CLOSED is no longer fully scrubbed by this fence',
   );
   const tagBytes = capBytes(TAG.bmp, TAG.astral);
@@ -3648,6 +3723,20 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   for (const { file, sf } of SOURCES()) {
     const nodes = walk(sf);
     assertWalked(file, nodes);
+    /** One sequence of rendered parts - a `+` chain or a `.join('')` array - checked for wrapping. */
+    const scanParts = (parts: ts.Expression[]): void => {
+      const staticText = (xs: ts.Expression[]): string =>
+        xs.map((x) => (ts.isStringLiteralLike(x) ? x.text : '')).join('');
+      parts.forEach((part, i) => {
+        if (!walk(part).some((d) => fenceOf(d) !== null || seedOf(d) !== null)) return;
+        const open = wrappedBy(staticText(parts.slice(0, i)), staticText(parts.slice(i + 1)));
+        if (open !== undefined)
+          found.push(
+            `${file}:${sf.getLineAndCharacterOfPosition(part.getStart(sf)).line + 1} ` +
+              `${open}...${PAIRS[open]} around ${part.getText(sf)}`,
+          );
+      });
+    };
     for (const n of nodes) {
       // CONCATENATION as well as interpolation. This read only template expressions, so
       // `'Using your existing memory key (' + keyPath + ').'` - same wrapping, same value, one
@@ -3668,19 +3757,24 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
           } else parts.push(e);
         };
         flatten(n);
-        parts.forEach((part, i) => {
-          if (!walk(part).some((d) => fenceOf(d) !== null || seedOf(d) !== null)) return;
-          const prev = i > 0 ? parts[i - 1] : undefined;
-          const next = parts[i + 1];
-          const beforeText = prev !== undefined && ts.isStringLiteralLike(prev) ? prev.text : '';
-          const afterText = next !== undefined && ts.isStringLiteralLike(next) ? next.text : '';
-          const open = wrappedBy(beforeText, afterText);
-          if (open !== undefined)
-            found.push(
-              `${file}:${sf.getLineAndCharacterOfPosition(part.getStart(sf)).line + 1} ` +
-                `${open}...${PAIRS[open]} around ${part.getText(sf)}`,
-            );
-        });
+        scanParts(parts);
+        continue;
+      }
+      // ...and the THIRD shape. Two syntaxes were swept and `['a', fence(x), 'b'].join('')` - the
+      // dominant render idiom in `server.ts` - was neither. A sweep gated on the syntaxes someone
+      // happened to write is not a sweep; the wrapping is the property, not the operator.
+      if (ts.isArrayLiteralExpression(n)) {
+        const par = n.parent;
+        if (
+          ts.isPropertyAccessExpression(par) &&
+          par.name.text === 'join' &&
+          ts.isCallExpression(par.parent) &&
+          par.parent.expression === par &&
+          par.parent.arguments.length === 1 &&
+          ts.isStringLiteralLike(par.parent.arguments[0]) &&
+          (par.parent.arguments[0] as ts.StringLiteralLike).text === ''
+        )
+          scanParts([...n.elements]);
         continue;
       }
       if (!ts.isTemplateExpression(n)) continue;
@@ -3690,8 +3784,12 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
         // above, as well as the fence call written inline.
         const carries = walk(sp.expression).some((d) => fenceOf(d) !== null || seedOf(d) !== null);
         if (!carries) return;
-        const before = i === 0 ? n.head.text : n.templateSpans[i - 1].literal.text;
-        const open = wrappedBy(before, sp.literal.text);
+        // The value's rendered LINE, not the chunk up to the next span. `sp.literal.text` stops at
+        // the following interpolation, so `(${fence(x)}${flag ? ', y' : ''})` rendered a
+        // parenthetical this sweep could not see. Interpolations contribute no static text - what
+        // they render cannot be read here - but they must not END the line either.
+        const chunks = [n.head.text, ...n.templateSpans.map((sp2) => sp2.literal.text)];
+        const open = wrappedBy(chunks.slice(0, i + 1).join(''), chunks.slice(i + 1).join(''));
         if (open !== undefined)
           found.push(
             `${file}:${sf.getLineAndCharacterOfPosition(sp.getStart(sf)).line + 1} ` +
@@ -3709,14 +3807,29 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   );
   // Proved able to FIND, on both spellings and on a shape it must NOT claim - a delimiter around
   // something that carries no fenced value is ordinary prose.
+  // The probe calls `wrappedBy` itself. It used to REIMPLEMENT the one-character test beside it, so
+  // it agreed with a copy of the instrument rather than exercising it - every change to the real
+  // finder left the probe green by construction.
   const probe = (src: string): number => {
     let hits = 0;
     for (const n of walk(parse(src))) {
+      if (ts.isArrayLiteralExpression(n) && ts.isPropertyAccessExpression(n.parent)) {
+        const parts = [...n.elements];
+        const staticText = (xs: ts.Expression[]): string =>
+          xs.map((x) => (ts.isStringLiteralLike(x) ? x.text : '')).join('');
+        parts.forEach((part, i) => {
+          if (!walk(part).some((d) => seedOf(d) !== null)) return;
+          if (wrappedBy(staticText(parts.slice(0, i)), staticText(parts.slice(i + 1))) !== undefined)
+            hits++;
+        });
+        continue;
+      }
       if (!ts.isTemplateExpression(n)) continue;
+      const chunks = [n.head.text, ...n.templateSpans.map((sp2) => sp2.literal.text)];
       n.templateSpans.forEach((sp, i) => {
         if (!walk(sp.expression).some((d) => seedOf(d) !== null)) return;
-        const before = i === 0 ? n.head.text : n.templateSpans[i - 1].literal.text;
-        if (PAIRS[before.slice(-1)] === sp.literal.text.slice(0, 1)) hits++;
+        if (wrappedBy(chunks.slice(0, i + 1).join(''), chunks.slice(i + 1).join('')) !== undefined)
+          hits++;
       });
     }
     return hits;
@@ -3725,6 +3838,116 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   assert.equal(probe('const m = `key "${keyPath}".`;'), 1, 'the delimiter finder is blind to quotes');
   assert.equal(probe('const m = `key: ${keyPath}`;'), 0, 'the delimiter finder claims an unwrapped value');
   assert.equal(probe('const m = `(${count}) files`;'), 0, 'the delimiter finder claims ordinary prose');
+  // The two shapes that were green while the wrapping was real. Both are measured evasions.
+  assert.equal(
+    probe('const m = `key (${keyPath}${f ? ", y" : ""}) safe`;'),
+    1,
+    'the closer sits past a SECOND interpolation and the finder stops at the next span',
+  );
+  assert.equal(
+    probe(`const m = ['key (', keyPath, ') safe'].join('');`),
+    1,
+    "the finder is gated on syntax and cannot see a `.join('')` render",
+  );
+});
+
+test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => {
+  // `render_fence.ts` says labelSafe is "Applied to EVERY fenced field on a labelled line ...
+  // checkable by grep instead of by argument". Nothing here greps it. safeField, safePathField and
+  // safeScalar each have a call-site sweep in this file; the third fence had only BEHAVIOURAL
+  // coverage, in three other suites - which is the argument this file rejects everywhere else, and
+  // it leaves a newly labelled render line with no mechanised guard at all.
+  //
+  // The property, stated structurally: when the static text immediately before a rendered value
+  // ends in `<label>=`, that value sits in the value half of a `label=value` pair and can spell a
+  // second pair unless its `=` is taken away.
+  const LABEL = /[A-Za-z][A-Za-z0-9_]*=$/;
+  // What counts as a fenced value HERE is wider than `fenceOf`. The labelled lines render through
+  // `safeScalar` and `shortScalar`, not `safeField` directly - and the first cut of this sweep
+  // reused `fenceOf` alone, so dropping labelSafe from `shard=${safeScalar(shardId)}` left it
+  // green. The guard written to close a one-arm defect shipped with one. Measured, not reasoned:
+  // the mutation survived a full run before this line existed.
+  const SCALAR_FENCES = ['safeField', 'safePathField', 'safeScalar', 'shortScalar'];
+  const rendersFenced = (n: ts.Node): boolean =>
+    walk(n).some((d) => {
+      if (fenceOf(d) !== null || seedOf(d) !== null) return true;
+      const dd = calleeDecl(d);
+      return dd !== undefined && SCALAR_FENCES.some((f) => dd === declOf('render_fence.ts', f));
+    });
+  const labelSafed = (n: ts.Node): boolean =>
+    walk(n).some(
+      (d) => ts.isCallExpression(d) && ts.isIdentifier(d.expression) && d.expression.text === 'labelSafe',
+    );
+  const scan = (sf: ts.SourceFile, file: string, out: string[]): void => {
+    const staticText = (xs: ts.Expression[]): string =>
+      xs.map((x) => (ts.isStringLiteralLike(x) ? x.text : '')).join('');
+    const check = (part: ts.Expression, before: string): void => {
+      if (!LABEL.test(before)) return;
+      if (!rendersFenced(part)) return;
+      if (labelSafed(part)) return;
+      const line = sf.getLineAndCharacterOfPosition(part.getStart(sf)).line + 1;
+      out.push(`${file}:${line} ...${before.slice(-20)}${part.getText(sf)}`);
+    };
+    for (const n of walk(sf)) {
+      if (ts.isTemplateExpression(n)) {
+        const chunks = [n.head.text, ...n.templateSpans.map((sp2) => sp2.literal.text)];
+        n.templateSpans.forEach((sp, i) => check(sp.expression, chunks.slice(0, i + 1).join('')));
+        continue;
+      }
+      let parts: ts.Expression[] | null = null;
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        if (ts.isBinaryExpression(n.parent) && n.parent.operatorToken.kind === ts.SyntaxKind.PlusToken)
+          continue;
+        const acc: ts.Expression[] = [];
+        const flatten = (e: ts.Expression): void => {
+          if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+            flatten(e.left);
+            flatten(e.right);
+          } else acc.push(e);
+        };
+        flatten(n);
+        parts = acc;
+      } else if (ts.isArrayLiteralExpression(n)) {
+        const par = n.parent;
+        if (
+          ts.isPropertyAccessExpression(par) &&
+          par.name.text === 'join' &&
+          ts.isCallExpression(par.parent) &&
+          par.parent.arguments.length === 1 &&
+          ts.isStringLiteralLike(par.parent.arguments[0]) &&
+          (par.parent.arguments[0] as ts.StringLiteralLike).text === ''
+        )
+          parts = [...n.elements];
+      }
+      if (parts === null) continue;
+      parts.forEach((part, i) => check(part, staticText(parts.slice(0, i))));
+    }
+  };
+  const found: string[] = [];
+  for (const { file, sf } of SOURCES()) {
+    assertWalked(file, walk(sf));
+    scan(sf, file, found);
+  }
+  assert.deepEqual(
+    found,
+    [],
+    'a fenced value is rendered in the VALUE half of a `label=value` pair without labelSafe, so it ' +
+      'can spell a second pair a reader takes as authenticated:\n' + found.join('\n'),
+  );
+  // Proved able to FIND, and not to claim an unlabelled render. The probes name a SEED rather than
+  // calling a fence: `fenceOf` resolves the callee through the type checker against the real
+  // program, so it is null on a source parsed here - which is why the first cut of these probes
+  // reported 0 and this control existed to say so.
+  const probe = (src: string): number => {
+    const out: string[] = [];
+    scan(parse(src), 'probe.ts', out);
+    return out.length;
+  };
+  assert.equal(probe('const m = `cell=${keyPath}`;'), 1, 'the label sweep is blind to a bare fenced value');
+  assert.equal(probe('const m = `cell=${labelSafe(keyPath)}`;'), 0, 'the label sweep claims a wrapped value');
+  assert.equal(probe('const m = `cell: ${keyPath}`;'), 0, 'the label sweep claims an UNlabelled value');
+  assert.equal(probe(`const m = ['cell=', keyPath].join('');`), 1, "the label sweep cannot see a `.join('')` render");
+  assert.equal(probe(`const m = ['cell=', labelSafe(keyPath)].join('');`), 0, 'the label sweep claims a wrapped join render');
 });
 
 test('the truncation marker cannot be FORGED through a path', () => {
