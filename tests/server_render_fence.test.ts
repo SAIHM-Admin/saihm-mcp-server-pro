@@ -2703,12 +2703,34 @@ test('an INVISIBLE ENCODING inside a path is destroyed, and the class is closed 
   // written down rather than left to be discovered, because a limit nobody measured is a blank
   // cheque - and this is the fourth time in this function's history that the class turned out to be
   // wider than the property someone reached for.
-  // FROM THE FENCE, not a copy of it. This was a hand-kept `[0x2800, 0x2d7f]` while the fence
-  // listed five, so U+1D159 and U+13441/U+13442 could be deleted from the scrub with the whole
-  // suite green - measured. The list has one home now and this reads it, so a sixth blank is
-  // covered the moment it is added rather than the round after someone notices.
-  const EXTRA_BLANKS = [...BLANK_SYMBOLS].map((c) => c.codePointAt(0) as number);
-  assert.ok(EXTRA_BLANKS.length >= 5, 'the blank-symbol list shrank; it has only ever grown');
+  // STATED HERE, not read off the fence - which is the correction, and it is mine to make. Reading
+  // the candidate set out of `BLANK_SYMBOLS` turned this guard into a tautology: the scrub and the
+  // set that checks the scrub came from ONE source, so deleting U+2800 removed it from both
+  // together and eight of eight U+2800 survived a rendered path with the suite green. A `>= 5`
+  // floor was the only brake, and it sat one below the real count. The previous cut was a
+  // hand-kept `[0x2800, 0x2d7f]` that went stale against a growing fence, so the answer is not to
+  // go back to it: it is to keep BOTH statements and require them to agree. A closure guard cannot
+  // be derived from the code it closes.
+  //
+  // "Renders as nothing" is not a property that can be queried, so each entry carries the reason it
+  // is here, and the equality below fails in BOTH directions - a blank added to the fence and not
+  // written down here is invisible to this guard, and one deleted from the fence is the regression
+  // the guard exists to catch.
+  const EXTRA_BLANKS = [
+    0x2800, // BRAILLE PATTERN BLANK - a braille cell with no dots raised
+    0x2d7f, // TIFINAGH CONSONANT JOINER - UCD: the shape shown is arbitrary, not visibly rendered
+    0x13441, // EGYPTIAN HIEROGLYPH FULL BLANK - a blank quadrat
+    0x13442, // EGYPTIAN HIEROGLYPH HALF BLANK - a blank half-quadrat
+    0x16fe4, // KHITAN SMALL SCRIPT FILLER - a cluster filler that draws nothing
+    0x1d159, // MUSICAL SYMBOL NULL NOTEHEAD - a notehead with no head drawn
+  ];
+  assert.deepEqual(
+    [...BLANK_SYMBOLS].map((c) => c.codePointAt(0) as number).sort((a, b) => a - b),
+    [...EXTRA_BLANKS].sort((a, b) => a - b),
+    'the fence scrubs a different set of blank glyphs than this test enumerates. They are two ' +
+      'statements of one class and they must agree: write the new one down here with its reason, ' +
+      'or put back the one that was removed',
+  );
   const candidates = [...EXTRA_BLANKS];
   for (let cp = 0; cp <= 0x10ffff; cp++) {
     if (cp >= 0xd800 && cp <= 0xdfff) continue;
