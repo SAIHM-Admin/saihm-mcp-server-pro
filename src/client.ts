@@ -1428,8 +1428,11 @@ export class SaihmProClient {
       // above, so an empty `SAIHM_MASTER_SECRET_HEX` is not configured, and a non-empty one makes
       // `!secretHex` false. Proved dead by mutation - nineteen boot cases, zero hits. It also
       // typed itself `valueKind: 'path'` while carrying no path, which would have widened the
-      // render to a path budget for a message naming only a variable; the convention everywhere
-      // else here is that a message without a path throws a plain `Error`. A dead branch is not
+      // render to a path budget for a message naming only a variable. (That mistyping is the
+      // whole objection - NOT that a path-less message may never be a `SaihmConfigError`. The
+      // live whitespace-only-`SAIHM_MASTER_SECRET_FILE` throw ~70 lines above names no path and
+      // is deliberately `'path'`-typed, because its remedy does not fit in 256 characters. The
+      // reason to delete this branch is that it is DEAD, not that its type is forbidden.) A dead branch is not
       // free: it made the compatibility note about a "configured but EMPTY secret" read as though
       // it covered an empty VARIABLE, which it never did - only a zero-byte FILE.
       if (secretConfigured && secretFile !== undefined)

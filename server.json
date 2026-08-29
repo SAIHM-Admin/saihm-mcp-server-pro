@@ -39,7 +39,7 @@
         },
         {
           "name": "SAIHM_HOME",
-          "description": "Base dir for the self-join identity file ($SAIHM_HOME/free-identity.key, mode 600). Defaults to ~/.saihm.",
+          "description": "Base dir for the self-join identity file ($SAIHM_HOME/free-identity.key, mode 600). Defaults to ~/.saihm. Also the fallback state directory when SAIHM_STATE_DIR is unset.",
           "isRequired": false,
           "format": "filepath"
         }

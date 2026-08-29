@@ -281,7 +281,7 @@ Tracked separately.
 
 ### Compatibility
 
-The tool LIST does not change, and neither does the public API of `index.js`. FOURTEEN
+The tool LIST does not change, and neither does the public API of `index.js`. FIFTEEN
 narrower things do change, and one of them is that some error MESSAGES change — an
 earlier draft of this section opened by claiming none did, which was wrong on three
 boot messages and is corrected in its own bullet below. ONE is a regression for some inputs and is
@@ -393,10 +393,21 @@ marked as such below; two more are breaking without being regressions (the
   `MAX_PATH_MESSAGE_CHARS`: a non-ASCII cache path renders correctly instead of as
   `?`, and the bound widens 33×. `forget` is a tool, not a CLI verb, so this is not
   covered by the CLI bullet.
+- **`SAIHM_HOME` now also redirects the saved checkout URL.** `persistCheckoutUrl`
+  resolves `SAIHM_STATE_DIR`, else `SAIHM_HOME`, else `~/.saihm`; 0.4.1 resolved
+  `SAIHM_STATE_DIR`, else `~/.saihm`. `SAIHM_HOME` is the only directory variable
+  `server.json` declares, so before this an operator who relocated it still had
+  `checkout-url.txt` written under `~/.saihm` with no declared way to redirect it.
+  If you set `SAIHM_HOME` and read that file from automation, its path moves from
+  `~/.saihm/checkout-url.txt` to `$SAIHM_HOME/checkout-url.txt` — set
+  `SAIHM_STATE_DIR` to the old location to keep it where it was. The identity file
+  is NOT affected: `defaultIdentityPath` reads `SAIHM_HOME` alone, unchanged.
 - **Tool failure text changes for marked filesystem errors.** The render change is
   uniform because `failText` is shared, but only a tool that reaches a MARKED site can
-  produce one — `recall` and `remember` through the sequence state and recall cache,
-  `join` through the self-join identity. An earlier draft said "every tool's", which
+  produce one — `recall` through the sequence state and the recall cache, `remember`
+  through the sequence state ALONE (both of its recall-cache calls sit inside catches
+  that swallow, so no cache failure reaches its failure text), `join` through the
+  self-join identity. An earlier draft said "every tool's", which
   overstates reachability. A failure
   naming `SAIHM_HOME`, `SAIHM_SEQ_STATE_PATH` or `SAIHM_RECALL_CACHE_PATH` is
   rendered through the widened path bound rather than cut at 256, so these messages
@@ -707,6 +718,7 @@ Initial public release.
 [0.3.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.3.0
 [0.2.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.2.1
 [0.2.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.2.0
+[0.1.11]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.11
 [0.1.10]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.10
 [0.1.9]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.9
 [0.1.8]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.8
@@ -715,3 +727,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.4.1...HEAD

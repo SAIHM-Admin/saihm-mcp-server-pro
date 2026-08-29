@@ -1084,11 +1084,18 @@ if (selfJoinEnabled()) {
  */
 function persistCheckoutUrl(fenced: string): string {
   try {
-    // `SAIHM_HOME` is honoured as a fallback. These are two names for ONE directory and both
-    // defaulted to `~/.saihm`, so an operator who relocated `SAIHM_HOME` - the containerised or
-    // read-only-$HOME install this function is written for - still had this file written under
-    // `~/.saihm`, with no declared variable to redirect it and nothing saying so. `SAIHM_STATE_DIR`
-    // still wins where both are set.
+    // `SAIHM_HOME` is honoured as a FALLBACK, and it is the only directory knob `server.json`
+    // declares - `SAIHM_STATE_DIR` is undeclared, so a registry-installed operator who relocated
+    // `SAIHM_HOME` (the containerised or read-only-$HOME install this function is written for) had
+    // this file written under `~/.saihm` with nothing declared to redirect it and nothing saying so.
+    // `SAIHM_STATE_DIR` still wins where both are set.
+    //
+    // These are NOT two names for one directory, and an earlier revision of this comment said they
+    // were. `defaultIdentityPath` reads `SAIHM_HOME` ALONE and deliberately does not consult
+    // `SAIHM_STATE_DIR`: honouring it there would relocate an EXISTING identity file, and a join
+    // that cannot find its identity mints a new one, which starts an EMPTY memory. So an operator
+    // who sets only `SAIHM_STATE_DIR` keeps their identity under `~/.saihm` while this file moves.
+    // That asymmetry is two variables with two jobs, not a split left half-closed.
     const dir =
       process.env.SAIHM_STATE_DIR || process.env.SAIHM_HOME || pathJoin(homedir(), '.saihm');
     // BOTH `mode` options here apply ONLY ON CREATION — an existing directory or file keeps whatever
@@ -1134,7 +1141,8 @@ function persistCheckoutUrl(fenced: string): string {
  *
  * `savedTo` is fenced for the same reason the URL is: this block is addressed to a human and is a
  * rendering surface, so anything interpolated into it must be unable to start a line. The path is
- * derived from `SAIHM_STATE_DIR`, which is caller-chosen rather than endpoint-chosen — a weaker
+ * derived from `SAIHM_STATE_DIR`, else `SAIHM_HOME`, else `~/.saihm` - all caller-chosen rather
+ * than endpoint-chosen — a weaker
  * threat, but the fence costs nothing and the distinction is not worth encoding in a place where
  * getting it wrong forges an instruction in the tool's own voice.
  *

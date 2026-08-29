@@ -17,3 +17,6 @@ dist-mcpb/
 
 # Agent worktrees created by tooling; never part of the package.
 .claude/worktrees/
+
+# Internal hostile-review ledgers - never publish (this repo is PUBLIC).
+.round*-findings.md
