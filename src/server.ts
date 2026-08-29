@@ -942,7 +942,13 @@ function joinPendingText(s: JoinState): string {
       ? 'Your memory key is the SAIHM_MASTER_SECRET_HEX value you supplied — keep it safe; it is the only key to your memory and cannot be recovered.'
       : s.createdKey
         ? `A new memory key was created and saved to ${keyPath} — keep this file safe; it is the only key to your memory and cannot be recovered.`
-        : `Using your existing memory key (${keyPath}).`;
+        : // UNDELIMITED, and last on the line. This read `... memory key (${keyPath}).` and the
+          // fence has no reason to scrub `)` - `Program Files (x86)` is a legal path, and scrubbing
+          // the character would corrupt one to protect a sentence. So the sentence gives up the
+          // delimiter instead: a value wrapped in anything can close the wrapper early, and the
+          // only wrapper that cannot be closed is the one that is not there. The fence already
+          // guarantees no LINE break gets out, so ending the line with the value is enough.
+          `Using your existing memory key: ${keyPath}`;
   // Both values come from the onboarding bridge, which is the SAME ORIGIN as the memory endpoint —
   // one hostile operator controls both — and the client type-checks them only as non-empty strings.
   // Rendered raw they were the softest target in the server: this block exists to be RELAYED TO A

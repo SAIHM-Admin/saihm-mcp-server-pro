@@ -3113,6 +3113,70 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   );
 });
 
+test('a fenced value is never rendered INSIDE a delimiter it could close', () => {
+  // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
+  // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
+  // shipped, and a path holding `)` closes the parenthetical early, inside a tool result a human
+  // and a model both read. The value escaped its own delimiter without escaping the fence.
+  //
+  // The fix is NOT to scrub the delimiter. `Program Files (x86)` is a legal path, so scrubbing `)`
+  // would corrupt a real one to protect a sentence - the fence's standing trade runs the other way.
+  // The fix is the SITE: a value wrapped in anything can close the wrapper, and the only wrapper
+  // that cannot be closed is the one that is not there. So this sweeps for the wrapping instead.
+  //
+  // `[`, `]` and `|` are absent below on purpose: both fences already scrub those three for the
+  // `label=value` grammar, so a value cannot close them. These are the pairs nothing scrubs.
+  const PAIRS: Record<string, string> = { '(': ')', '{': '}', '<': '>', '"': '"', "'": "'" };
+  const found: string[] = [];
+  for (const { file, sf } of SOURCES()) {
+    const nodes = walk(sf);
+    assertWalked(file, nodes);
+    for (const n of nodes) {
+      if (!ts.isTemplateExpression(n)) continue;
+      n.templateSpans.forEach((sp, i) => {
+        // A span CARRIES a fenced value when it calls a fence, or names one of the caller-chosen
+        // values this file is about - which covers `${keyPath}`, a local bound from a fence call
+        // above, as well as the fence call written inline.
+        const carries = walk(sp.expression).some((d) => fenceOf(d) !== null || seedOf(d) !== null);
+        if (!carries) return;
+        const before = i === 0 ? n.head.text : n.templateSpans[i - 1].literal.text;
+        const open = before.slice(-1);
+        const close = sp.literal.text.slice(0, 1);
+        if (open !== '' && PAIRS[open] === close)
+          found.push(
+            `${file}:${sf.getLineAndCharacterOfPosition(sp.getStart(sf)).line + 1} ` +
+              `${open}...${close} around ${sp.expression.getText(sf)}`,
+          );
+      });
+    }
+  }
+  assert.deepEqual(
+    found,
+    [],
+    'a fenced value is rendered between a delimiter pair it can close from inside. Do not scrub ' +
+      'the delimiter - a legal path may contain one. Rewrite the line so the value is not wrapped:\n' +
+      found.join('\n'),
+  );
+  // Proved able to FIND, on both spellings and on a shape it must NOT claim - a delimiter around
+  // something that carries no fenced value is ordinary prose.
+  const probe = (src: string): number => {
+    let hits = 0;
+    for (const n of walk(parse(src))) {
+      if (!ts.isTemplateExpression(n)) continue;
+      n.templateSpans.forEach((sp, i) => {
+        if (!walk(sp.expression).some((d) => seedOf(d) !== null)) return;
+        const before = i === 0 ? n.head.text : n.templateSpans[i - 1].literal.text;
+        if (PAIRS[before.slice(-1)] === sp.literal.text.slice(0, 1)) hits++;
+      });
+    }
+    return hits;
+  };
+  assert.equal(probe('const m = `key (${keyPath}).`;'), 1, 'the delimiter finder is blind to parentheses');
+  assert.equal(probe('const m = `key "${keyPath}".`;'), 1, 'the delimiter finder is blind to quotes');
+  assert.equal(probe('const m = `key: ${keyPath}`;'), 0, 'the delimiter finder claims an unwrapped value');
+  assert.equal(probe('const m = `(${count}) files`;'), 0, 'the delimiter finder claims ordinary prose');
+});
+
 test('the truncation marker cannot be FORGED through a path', () => {
   // safeField earns this property from its ASCII collapse: U+2026 is non-ASCII, so a value cannot
   // contain one. safePathField preserves printable non-ASCII, so it does NOT inherit the property -
