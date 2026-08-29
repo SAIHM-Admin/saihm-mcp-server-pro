@@ -261,7 +261,7 @@ Tracked separately.
 
 ### Compatibility
 
-The tool LIST does not change, and neither does the public API of `index.js`. Ten
+The tool LIST does not change, and neither does the public API of `index.js`. Eleven
 narrower things do change, and one of them is that some error MESSAGES change — an
 earlier draft of this section opened by claiming none did, which was wrong on three
 boot messages and is corrected in its own bullet below. ONE is a regression for some inputs and is
@@ -312,7 +312,20 @@ marked as such below; two more are breaking without being regressions (the
   with it, named the file the operator had configured. Reproduced end to end — the
   operator backs up an empty file and the only key to their memory is never named. It
   now raises `SaihmConfigError` naming the file. Anyone relying on an empty secret file
-  as an opt-in to self-join must unset the variable instead.
+  as an opt-in to self-join must unset the variable instead. Two limits worth stating
+  precisely: this covers a zero-byte FILE, never an empty VARIABLE — an empty
+  `SAIHM_MASTER_SECRET_HEX` or `SAIHM_MASTER_SECRET_FILE` is treated as unset, on
+  purpose, because a registry install UI emits exactly that from a blank optional
+  field. A whitespace-only `SAIHM_MASTER_SECRET_FILE` is now named as such rather than
+  read, where it previously failed with the value invisible in its own message.
+- **A zero-byte self-join identity file is an error instead of an unrecoverable loop.**
+  `ensureSelfJoinIdentityEnv()` treated any existing file as provisioned, set
+  `SAIHM_MASTER_SECRET_FILE` to it itself, and left boot to fail naming a variable the
+  operator had never set — with every retry repeating, because the verb that would fix
+  it is the one looping. It now names the self-join identity file and says what clears
+  it. It does NOT regenerate: this package writes that file atomically, so an empty one
+  came from elsewhere, and minting a fresh identity over it is the silent switch to a
+  different identity this section's empty-secret bullet exists to prevent.
 - **`join` names the KEY FILE instead of an env var the caller may never have set.**
   The line was unconditionally `Keep SAIHM_MASTER_SECRET_HEX safe`, so the caller who
   reaches `join` to subscribe after `saihm_join` — key in a generated

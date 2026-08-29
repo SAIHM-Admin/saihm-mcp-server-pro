@@ -887,6 +887,32 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
       // Node named `keyPath` (or the tmp beside it) in its own message; widen the fence for it.
       throw markPathBearing(e);
     }
+  } else {
+    // EXISTS BUT HOLDS NOTHING, which `existsSync` alone reads as "already provisioned". The file
+    // was then handed to boot as `SAIHM_MASTER_SECRET_FILE` - set on the line below, by this
+    // function, not by the caller - and boot failed with `SAIHM_MASTER_SECRET_FILE is set but
+    // holds no secret`, naming a variable the operator had never set. Every retry repeated it:
+    // `existsSync` stays true, so nothing regenerates, and the one verb that could fix it is the
+    // one looping. 0.4.1 looped too, but its text was honest about what it had read.
+    //
+    // Not regenerated, deliberately. This package writes this file with `wx` and an atomic
+    // rename, so it is never left empty by a failed write here - an empty one came from somewhere
+    // else, a restore or a `touch`, and minting a fresh identity over it would be the silent
+    // switch to a different identity that the configured-but-empty error exists to prevent. So it
+    // is an error, named against the file it actually read, and it says what clears it.
+    let holdsSecret = false;
+    try {
+      holdsSecret = readFileSync(keyPath, 'utf-8').trim().length > 0;
+    } catch (e) {
+      throw markPathBearing(e);
+    }
+    if (!holdsSecret)
+      throw new SaihmConfigError(
+        `the self-join identity file holds no secret: ${keyPath}. Restore your backup of it, or ` +
+          'delete it and run the join again to mint a new identity - which starts an EMPTY memory, ' +
+          'so restore first if you have a backup.',
+        'path',
+      );
   }
   process.env.SAIHM_MASTER_SECRET_FILE = keyPath;
   if (!process.env.SAIHM_TIER) process.env.SAIHM_TIER = 'FREE';
@@ -1307,6 +1333,18 @@ export class SaihmProClient {
     );
     let secretHex: string | undefined;
     if (secretFile) {
+      // A WHITESPACE-ONLY value is named as one rather than printed. `SAIHM_MASTER_SECRET_FILE=" "`
+      // is truthy, so it reached the read and failed with `could not be read:  .` - a diagnostic
+      // whose whole subject is invisible in it, and one an operator cannot tell from a bug. It is
+      // not quoted to make it visible: this value is rendered downstream inside a fenced
+      // `label=value` line, and wrapping it in delimiters hands it an escape. The CONDITION is
+      // stated instead, which needs no value at all.
+      if (secretFile.trim().length === 0)
+        throw new SaihmConfigError(
+          'SAIHM_MASTER_SECRET_FILE is set to a whitespace-only value, which is not a path. Unset ' +
+            'it to start free, or point it at your key file.' + setupHint(),
+          'path',
+        );
       try {
         secretHex = readFileSync(secretFile, 'utf-8');
       } catch {
@@ -1368,11 +1406,19 @@ export class SaihmProClient {
       // this caller to `saihm_join` would be the wrong direction twice over: they did configure a
       // secret, and joining would mint a SECOND identity while the empty file sat there looking
       // like the key to the first.
-      if (secretConfigured)
+      //
+      // ONE BRANCH, not two. This carried an `SAIHM_MASTER_SECRET_HEX is set but empty.` arm that
+      // cannot run: `secretConfigured` is deliberately TRUTHINESS-based for the reason given
+      // above, so an empty `SAIHM_MASTER_SECRET_HEX` is not configured, and a non-empty one makes
+      // `!secretHex` false. Proved dead by mutation - nineteen boot cases, zero hits. It also
+      // typed itself `valueKind: 'path'` while carrying no path, which would have widened the
+      // render to a path budget for a message naming only a variable; the convention everywhere
+      // else here is that a message without a path throws a plain `Error`. A dead branch is not
+      // free: it made the compatibility note about a "configured but EMPTY secret" read as though
+      // it covered an empty VARIABLE, which it never did - only a zero-byte FILE.
+      if (secretConfigured && secretFile !== undefined)
         throw new SaihmConfigError(
-          secretFile === undefined
-            ? 'SAIHM_MASTER_SECRET_HEX is set but empty.' + setupHint()
-            : `SAIHM_MASTER_SECRET_FILE is set but holds no secret: ${secretFile}.` + setupHint(),
+          `SAIHM_MASTER_SECRET_FILE is set but holds no secret: ${secretFile}.` + setupHint(),
           'path',
         );
       // Self-join enabled but no identity yet => guide the agent to the join tool rather than

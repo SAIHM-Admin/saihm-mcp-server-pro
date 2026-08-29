@@ -2642,7 +2642,12 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // PropertySignature, two PropertyAssignments, a VariableDeclaration, three CallExpression
       // arguments, a TemplateSpan (the tmp filename), a BinaryExpression (the env write) and a
       // ShorthandPropertyAssignment.
-      keyPath: 10,
+      //
+      // TWO MORE, both in the empty-identity-file branch: the `readFileSync` argument, and the
+      // value carried INSIDE a `SaihmConfigError` message. The second is the deliberate shape
+      // documented on that class - the value stays in the message and the RENDERER widens the
+      // fence to a path budget - which is why it is an allowance here and not a fence call.
+      keyPath: 12,
       // SEVEN OCCURRENCES, not seven lines: the delete/rewrite carries three on one line (the
       // condition, the property write and the value read). A count of occurrences described as a
       // list of lines reads as an off-by-two to anyone who checks it.
@@ -2650,7 +2655,9 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // NINE. Seven came with the configured-but-empty secret becoming a named configuration error;
       // two more when the hex-validation failures stopped naming SAIHM_MASTER_SECRET_HEX whatever
       // the secret's actual source was, and started naming the file they were really about.
-      secretFile: 9,
+      // TEN: one more than the note below, for the whitespace-only guard that names the CONDITION
+      // rather than printing the value - the `secretFile.trim()` test itself. It renders nothing.
+      secretFile: 10,
     },
     'index.ts': {},
     'render_fence.ts': {},
