@@ -87,12 +87,14 @@ What that changes, precisely:
   non-ASCII path correctly, but a `SAIHM_HOME` carrying a newline rendered a forged
   memory-recall banner inside a tool result, in the tool's own voice. Now fenced,
   and still correct for non-ASCII.
-- **Two sites did not exist before this release** — the config-error path arm and
-  the marked-filesystem arm, both in `render_fence.ts`. An earlier draft counted the
-  group/world-readable advisory on `SAIHM_MASTER_SECRET_FILE` as a third; it existed
-  and rendered the path to stderr RAW. A raw render does not mangle non-ASCII, so it
-  belongs with the previously-unfenced lines above, not here — making the accounting
-  3 shipped-wrong + 3 raw + 2 that did not exist + 1 added by the `join` fix = 9.
+- **Three sites did not exist before this release** — the config-error PATH arm, the
+  config-error URL arm and the marked-filesystem arm, all three in `render_fence.ts`
+  and all three inside functions (`configErrorText`, `failText`) that 0.4.1 did not
+  have at all. An earlier draft counted the group/world-readable advisory on
+  `SAIHM_MASTER_SECRET_FILE` among them; it existed and rendered the path to stderr
+  RAW. A raw render does not mangle non-ASCII, so it belongs with the
+  previously-unfenced lines above, not here — making the accounting
+  3 shipped-wrong + 3 raw + 3 that did not exist + 1 added by the `join` fix = 10.
 - **One site is new in the fix for `join`** described under Compatibility: that verb
   now names the key file instead of an env var the caller may never have set.
 
@@ -118,13 +120,16 @@ the reason is worth stating: `Bidi_Control` is 12 code points, `Cf` is 170, and 
 158 left behind included the 96 code points of the TAG block, U+E0020–U+E007F, 95
 of which map onto printable ASCII (U+E007F offsets to DEL). Driven through a real
 path, an instruction encoded that way survived and decoded intact, addressed to the
-reading agent, while the visible text said something else. The capacity is the
-figure that matters and is reproducible: 2048 smuggled bytes at
-`MAX_PATH_FIELD_CHARS`. Narrowing to `Bidi_Control` would therefore have been a REGRESSION against
+reading agent, while the visible text said something else. What one astral-only encoder ACHIEVED
+through it is reproducible: 2048 bytes at `MAX_PATH_FIELD_CHARS`. That is an encoder
+measurement, not the channel's capacity, which depends on which TAG alphabet is
+counted — 95 printable, 96 with CANCEL TAG, or the 128 code points this fence removes
+— giving 1681, 1685 or 1792 bytes. Narrowing to `Bidi_Control` would therefore have been a REGRESSION against
 0.4.1, whose ASCII collapse caught the whole block. `Cf` alone was still a
 regression: the VARIATION SELECTORS (U+FE00–FE0F and U+E0100–E01EF, 256 code
 points, category `Mn`) are a strictly larger channel and `Cf` does not reach them —
-measured at that cut, 2048 smuggled bytes survived at `MAX_PATH_FIELD_CHARS`. The
+measured at that cut, the same astral-only encoder got 2048 bytes through at
+`MAX_PATH_FIELD_CHARS`, against a channel optimum of 2390. The
 scrub is now the union of `Cf` and `Default_Ignorable_Code_Point`, which is the
 property meaning "renders as nothing": 170 and 4174 code points, overlapping in
 138, neither a subset of the other, so scrubbing either alone leaves a channel
@@ -134,10 +139,12 @@ That union was still not the whole class, and the reason is the same one a third
 time: both properties mean "invisible FORMATTING", while what this fence defends is
 narrower and more literal. Sixteen non-ASCII WHITESPACE code points sat outside
 both, together with U+2800 BRAILLE PATTERN BLANK and U+2D7F TIFINAGH CONSONANT
-JOINER, which belong to no ignorable class at all — an 18-symbol alphabet at 4 bits
-per unit, 2048 smuggled bytes at `MAX_PATH_FIELD_CHARS`. That is the same capacity
-as the variation-selector channel the union had just been widened to close, and
-0.4.1's ASCII collapse had given it none. All eighteen are scrubbed. Measured after:
+JOINER, which belong to no ignorable class at all — an 18-symbol alphabet at 4.17 bits
+per unit, so 2135 bytes at `MAX_PATH_FIELD_CHARS` — a capacity of the same ORDER as
+the variation-selector channel's 2390, not the same figure. (An earlier draft said
+"4 bits per unit, 2048 bytes … the same capacity": a floor and an encoder measurement
+presented as a channel optimum, which is the two-bases error this entry withdraws
+further down and was still making here.) 0.4.1's ASCII collapse had given it none. All eighteen are scrubbed. Measured after:
 exactly ONE whitespace code point survives, `U+0020`, kept because a path may
 legitimately contain a space — disclosed on the function rather than defended, since
 runs of spaces remain a low-rate channel.
@@ -281,8 +288,9 @@ boot messages and is corrected in its own bullet below. ONE is a regression for 
 marked as such below; two more are breaking without being regressions (the
 `SaihmConfigError` class change and the generated types); the rest are fixes:
 
-- **CLI and server output changes where it was wrong.** `join` ("Also written to") and
-  `free-join` ("Back up") - both on STDOUT, so a consumer capturing only `2>` sees neither -
+- **CLI and server output changes where it was wrong.** `join` AND `upgrade` ("Also
+  written to" — both reach it through the same `checkoutUrlBlock`) and `free-join`
+  ("Back up") - all on STDOUT, so a consumer capturing only `2>` sees none of them -
   now render a non-ASCII path correctly instead of
   replacing each non-ASCII character with `?`. The group/world-readable warning
   on `SAIHM_MASTER_SECRET_FILE`, which wrote the path to stderr with no fence at all,
@@ -294,8 +302,9 @@ marked as such below; two more are breaking without being regressions (the
   character shows `?` in its place.
 - **Three lines that were rendered RAW at 0.4.1 are now fenced, and for some paths
   that is a regression.** Two are `saihm_join` TOOL-RESULT text — the pending-join
-  note and "key file:" in the success text — and the third is the CLI stderr
-  advisory on a group/world-readable `SAIHM_MASTER_SECRET_FILE`. All three now
+  note and "key file:" in the success text — and the third is the stderr
+  advisory on a group/world-readable `SAIHM_MASTER_SECRET_FILE`, which fires in the
+  MCP server process too and not only under a CLI verb, as the bullet above says. All three now
   carry this package's standing scrubs for the first time: `[`, `]` and `|` become
   `?` although all three are legal POSIX filename characters; whitespace other than
   the ordinary space, and every format or default-ignorable character, become `?`;
@@ -343,7 +352,9 @@ marked as such below; two more are breaking without being regressions (the
   which named no variable at all and pointed at the very verb that was looping, so
   every retry repeated. That string is also the one an agent keys on to trigger
   `saihm_join`, so this replaces a message some callers match on. It now names the self-join identity file and says what clears
-  it. It does NOT regenerate: this package writes that file atomically, so an empty one
+  it, on the `saihm_join` and `free-join` paths — a plain memory-tool call under a
+  zero-byte identity file still returns the unchanged guided string, which is correct:
+  the subject here is the retry LOOP, and that is what is broken. It does NOT regenerate: this package writes that file atomically, so an empty one
   came from elsewhere, and minting a fresh identity over it is the silent switch to a
   different identity this section's empty-secret bullet exists to prevent.
 - **`join` names the KEY FILE instead of an env var the caller may never have set.**
@@ -368,7 +379,11 @@ marked as such below; two more are breaking without being regressions (the
   `MAX_PATH_MESSAGE_CHARS`: a non-ASCII cache path renders correctly instead of as
   `?`, and the bound widens 33×. `forget` is a tool, not a CLI verb, so this is not
   covered by the CLI bullet.
-- **Every tool's failure text changes for marked filesystem errors.** A failure
+- **Tool failure text changes for marked filesystem errors.** The render change is
+  uniform because `failText` is shared, but only a tool that reaches a MARKED site can
+  produce one — `recall` and `remember` through the sequence state and recall cache,
+  `join` through the self-join identity. An earlier draft said "every tool's", which
+  overstates reachability. A failure
   naming `SAIHM_HOME`, `SAIHM_SEQ_STATE_PATH` or `SAIHM_RECALL_CACHE_PATH` is
   rendered through the widened path bound rather than cut at 256, so these messages
   get longer and stop mangling non-ASCII. Measured with a 400-character home, one
@@ -409,8 +424,9 @@ marked as such below; two more are breaking without being regressions (the
   `SAIHM_ENDPOINT_URL` message rendered through `safeField`, which maps every
   non-ASCII code unit to `?`, so an IDN endpoint came back as `SAIHM_ENDPOINT_URL is
   not a valid URL: m?nchen.example/rpc` — the operator's own configuration handed back
-  unreadable, on the line that exists so they can fix it. Its BUDGET had already been
-  widened to `MAX_URL_MESSAGE_CHARS`; only the CHARACTER policy was still the prose
+  unreadable, on the line that exists so they can fix it. Its BUDGET is widened to `MAX_URL_MESSAGE_CHARS` by this
+  same release — disclosed under Budget above, so this is within-release ordering and
+  not a claim about 0.4.1, which had neither the constant nor the function; only the CHARACTER policy was still the prose
   one, which is this release's defect class surviving inside the module that names it.
   It now renders through `safePathField` at the same budget. The line that decides is
   PROVENANCE, not the value's shape: a URL an ENDPOINT chose is attacker-capable and
@@ -429,8 +445,11 @@ marked as such below; two more are breaking without being regressions (the
   the secret came from a file. Third, `SAIHM_MASTER_SECRET_HEX (or
   SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars).` is gone from the
   configured-but-empty path, replaced by the two messages in the empty-secret bullet
-  above. Match on `e.name === 'SaihmConfigError'`, or on the variable name, rather
-  than on these strings.
+  above. Match on the VARIABLE NAME. That is the only remedy that
+  works for all of them, and an earlier draft named `e.name` first without saying so:
+  `e.name === 'SaihmConfigError'` holds only when the secret came from a FILE, because
+  the `SAIHM_MASTER_SECRET_HEX` arm throws a plain `Error` — so the one source this
+  bullet stresses is exactly the one that remedy misses.
 - **Generated types for deep paths change:** `dist/render_fence.d.ts` loses
   `MAX_CHECKOUT_URL_CHARS` and gains `safePathField` plus four constants;
   `dist/client.d.ts` gains `SaihmConfigError`, `markPathBearing`, `isPathBearing` and
