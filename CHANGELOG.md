@@ -96,15 +96,22 @@ What that changes, precisely:
   now names the key file instead of an env var the caller may never have set.
 
 The scrubbed classes are derived from Unicode rather than listed by hand — with one
-disclosed exception, the blank symbols, because Unicode has no property for "renders
-as blank" and they were found by reading. Hand-listing is what missed U+061C ARABIC
-LETTER MARK in the first place — and the limit is not theoretical: the list shipped as
-three with a note that a fourth would have to be found the same way, the next
-review found two more, and the round after that found a sixth — `U+16FE4 KHITAN SMALL
-SCRIPT FILLER`, which has the measured profile of `U+2D7F` exactly (nonspacing mark,
-not `Cf`, not default-ignorable, not whitespace), so keeping one while scrubbing the
-other was an inconsistency in the list rather than a distinction between the
-characters. `U+13443 LOST SIGN` is the control and is correctly KEPT, being
+disclosed exception, the blank symbols, which were found by reading. Hand-listing is
+what missed U+061C ARABIC LETTER MARK in the first place — and the limit is not
+theoretical: the list shipped as three with a note that a fourth would have to be
+found the same way, the next review found two more, and the round after that found a
+sixth, `U+16FE4 KHITAN SMALL SCRIPT FILLER`. That list is not a closed class, and this
+release stops implying it is. Two arguments were offered for it and neither survives:
+that `U+2D7F` joins nothing a reader can see — its own UCD annotation says it marks a
+bi-consonant cluster, and `U+17D2 KHMER SIGN COENG` and `U+10A3F KHAROSHTHI VIRAMA`
+carry the same "shape shown is arbitrary and is not visibly rendered" annotation and
+SURVIVE this fence — and that `U+16FE4` has the measured profile of `U+2D7F` exactly,
+which is equally the profile of all 1794 combining marks that must never be scrubbed.
+The six stay scrubbed because each draws nothing in a plain-text line; the cost to a
+path written in those scripts is real and is now stated on the function rather than
+argued away. `Indic_Syllabic_Category` and the NamesList annotations are both
+greppable, so "there is no property to derive them from" was stronger than what was
+measured. `U+13443 LOST SIGN` is the control and is correctly KEPT, being
 a hatched box rather than a blank. The scope then widened again, and
 the reason is worth stating: `Bidi_Control` is 12 code points, `Cf` is 170, and the
 158 left behind included the 96 code points of the TAG block, U+E0020–U+E007F, 95

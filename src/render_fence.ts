@@ -128,21 +128,31 @@ const BLANK_AND_FORMAT = new RegExp(
  *     ignorable class: U+2800 BRAILLE PATTERN BLANK, U+2D7F TIFINAGH CONSONANT JOINER, U+16FE4
  *     KHITAN SMALL SCRIPT FILLER, U+1D159 MUSICAL SYMBOL NULL NOTEHEAD, and U+13441/U+13442
  *     EGYPTIAN HIEROGLYPH FULL BLANK and HALF BLANK.
- *     That list is hand-read, which is its disclosed limit - there is no Unicode property for
- *     "renders as blank" - and the limit is not theoretical: the list said a fourth would have to be
- *     found the way the first three were, the next review found two, and the review after that
- *     found a sixth. U+13443 LOST SIGN is the control and is correctly KEPT; it is a hatched box,
- *     which is ink. NOTE the tension, kept deliberately: U+2D7F is itself a nonspacing mark, so
- *     scrubbing it costs a legitimate Tifinagh path exactly what the residual below says marks must
- *     never be made to pay. It goes because it renders as nothing and joins nothing a reader can
- *     see - a judgement about ONE character, not a rule about marks, written here rather than left
- *     to be found as an inconsistency. See the fifth cut below.
- *     U+16FE4 is that judgement APPLIED, and it is how the sixth was found: measured, it has the
- *     IDENTICAL profile to U+2D7F - nonspacing mark, not Cf, not default-ignorable, not whitespace -
- *     so scrubbing one while keeping the other was an inconsistency in this list rather than a
- *     distinction between the characters. Both are marks of scripts a path will effectively never
- *     be written in, and both render as nothing. The rule for MARKS AT LARGE is unchanged, and the
- *     residual below still says so.
+ *     That list is HAND-READ, and the criterion offered for it does not survive contact with the
+ *     standard. Written here rather than left to be found, because two cuts of this paragraph have
+ *     now argued for the list and neither argument holds.
+ *     The first said U+2D7F "joins nothing a reader can see". It fails on its own subject: U+2D7F's
+ *     UCD annotation says it marks a bi-consonant cluster. U+17D2 KHMER SIGN COENG and U+10A3F
+ *     KHAROSHTHI VIRAMA carry the same "shape shown is arbitrary and is not visibly rendered"
+ *     annotation, join exactly what it joins, and both SURVIVE this fence - measured - as does every
+ *     code point whose Indic_Syllabic_Category is Invisible_Stacker.
+ *     The second said U+16FE4 has the IDENTICAL profile to U+2D7F - nonspacing mark, not Cf, not
+ *     default-ignorable, not whitespace. That is not a distinction; it is the profile of all 1794
+ *     marks the residual below says must NEVER be scrubbed, U+0301 COMBINING ACUTE among them. An
+ *     argument that would scrub the entire residual is not an argument for scrubbing six characters.
+ *     So: six invisible characters found by reading, not a class, and not closed. They stay scrubbed
+ *     because in a plain-text line each one draws nothing and this function exists to make a line
+ *     show what it says. The COST is real and is not argued away - a Tifinagh, Khitan or Egyptian
+ *     path loses something here, which is what the residual below says marks must never be made to
+ *     pay, and the only honest defence is that those scripts will effectively never name a file on
+ *     a machine reading this line. The list does NOT grow to the stackers: those reshape the
+ *     characters around them, so a path that loses one is corrupted rather than flattened.
+ *     Whoever widens it next has a property to start from rather than a reading list -
+ *     Indic_Syllabic_Category and the NamesList annotations are both greppable, so "there is no
+ *     property to derive them from" was stronger than what was measured. And the honest size of the
+ *     whole argument is in the residual below: everything this fence removes, all 4299 code points,
+ *     is a SMALLER channel than the marks it must keep.
+ *     U+13443 LOST SIGN is the control and is correctly KEPT; it is a hatched box, which is ink.
  *     They ride in the `u`-flagged regex with the format classes, NOT in the BMP-only bracket class
  *     below, because U+1D159 is astral: written `\u1d159` in a class without `u` it is
  *     `\u1d15` followed by a literal `9`, which silently scrubbed every DIGIT 9 out of every path.
@@ -207,18 +217,24 @@ const BLANK_AND_FORMAT = new RegExp(
  *     conjunct and a Thai stack are all mark sequences, and a path that loses them is the defect
  *     this function exists to fix. The capacity is per UTF-16 UNIT, because that is what `max`
  *     slices: 1069 of those marks are BMP and 725 are astral at two units each, so the optimum is
- *     the dominant root of `1069/c + 725/c^2 = 1`, or 10.06 bits per unit - 5152 bytes at
- *     MAX_PATH_FIELD_CHARS. Counting all 1794 symbols at 10.81 bits gives 5534, which is what an
- *     earlier cut of this paragraph claimed and no input can reach.
- *     Restated on the SAME basis - channel optimum, bits per UTF-16 unit, at MAX_PATH_FIELD_CHARS -
- *     the three channels this fence CLOSED are 1681 bytes (TAG block: 95 printable, all astral),
- *     2390 (variation selectors: 16 BMP and 240 astral) and 867 (the six blank symbols: 2 BMP and
- *     4 astral). 4938 together, against a residual of 5152, so the residual is larger than ALL
- *     THREE PUT TOGETHER. Two earlier cuts of this sentence ranked it against `2048 each` and
- *     disagreed with each other; both were wrong the same way, because 2048 is a figure a naive
- *     encoder ACHIEVED and 5152 is a capacity, and two numbers on different bases do not compare.
- *     The fix is to restate the closed channels on the residual's basis, not to re-rank them on the
- *     encoder's. 5152 is itself a LOWER bound on what leaves here: marks, homoglyphs and runs of
+ *     the log2 of the dominant root of `1069/x + 725/x^2 = 1`: the root is 1069.678 and its log2
+ *     is 10.06 bits per unit, which is 5152 bytes at MAX_PATH_FIELD_CHARS. Counting all 1794
+ *     symbols at 10.81 bits gives 5534, which is what an earlier cut of this paragraph claimed and
+ *     no input can reach.
+ *     Restated on the SAME basis - ONE alphabet, ONE budget, bits per UTF-16 unit - EVERYTHING this
+ *     fence removes is 4299 code points, 169 BMP and 4130 astral, which is 7.57 bits per unit and
+ *     3878 bytes. The residual is larger than the entire scrub, not merely larger than the largest
+ *     channel in it.
+ *     Three earlier cuts of this sentence each compared on a different basis and each was wrong. The
+ *     first ranked 5152 against `2048 each`, a figure a naive encoder ACHIEVED rather than a
+ *     capacity. The second fixed that and then ADDED three channel capacities - 1681 + 2390 + 867 =
+ *     4938 - which is not a quantity any input can carry: three alphabets used together are one
+ *     alphabet at one budget, and that sum is larger even than the 3878 the whole scrub is worth.
+ *     A per-channel figure has no settled alphabet to be computed on either - the TAG channel is 95
+ *     printable, or 96 with CANCEL TAG, or the 128 code points this fence actually removes from the
+ *     block, which is 1681, 1685 or 1792 bytes, and the sentence ranking them never said which.
+ *     What survives all three cuts is the comparison above: what leaves against what is removed,
+ *     each as one alphabet at one budget. 5152 is itself a LOWER bound on what leaves here: marks, homoglyphs and runs of
  *     U+0020 are independent channels and an encoder may use them together.
  *     It is the residual, it is disclosed, and it is not closeable here.
  *   - HOMOGLYPHS, for the same reason one level up: preserving the characters is what makes a path

@@ -2877,9 +2877,14 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   const split = figure(/(\d+) of those marks are BMP and (\d+) are astral/, 'its BMP/astral split');
   assert.equal(Number(split[1]), bmpMarks, 'the disclosed BMP mark count is not the measured one');
   assert.equal(Number(split[2]), astralMarks, 'the disclosed astral mark count is not the measured one');
-  assert.equal(Number(figure(/or ([\d.]+) bits per unit/, 'its per-unit rate')[1]),
+  assert.equal(Number(figure(/log2 is ([\d.]+) bits per unit/, 'its per-unit rate')[1]),
     Number(perUnit(bmpMarks, astralMarks).toFixed(2)),
     'the disclosed per-unit rate on `safePathField` is not the measured one');
+  // The ROOT as well as its log2. The paragraph named an equation and then gave its log2 as though
+  // that were the root, which is a reader-facing slip in the one sentence that shows the working.
+  assert.equal(Number(figure(/the root is ([\d.]+) and/, 'the root of its capacity equation')[1]),
+    Number(((bmpMarks + Math.sqrt(bmpMarks * bmpMarks + 4 * astralMarks)) / 2).toFixed(3)),
+    'the disclosed root is not the measured one');
   assert.equal(Number(figure(/(\d+) bytes at MAX_PATH_FIELD_CHARS/, 'its residual capacity')[1]), bytes,
     'the disclosed residual capacity on `safePathField` is not the measured one');
 
@@ -2912,21 +2917,50 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   const tagBytes = capBytes(TAG.bmp, TAG.astral);
   const vsBytes = capBytes(VS.bmp, VS.astral);
   const blankBytes = capBytes(BLANK.bmp, BLANK.astral);
-  const three = figure(
-    /CLOSED are (\d+) bytes \(TAG block: (\d+) printable, all astral\), (\d+) \(variation selectors: (\d+) BMP and (\d+) astral\) and (\d+) \(the six blank symbols: (\d+) BMP and (\d+) astral\)\. (\d+) together, against a residual of (\d+)/,
-    'the capacities of the channels it closed',
+  // ...but the paragraph no longer ADDS them, and this no longer checks a sum. Three capacities
+  // each computed at the FULL budget and then added is not a quantity any input can carry: used
+  // together they are ONE alphabet at ONE budget. The previous cut of this pin derived all three
+  // figures honestly and then asserted their sum against the paragraph, which mechanised the error
+  // instead of catching it - a derived check is only as sound as the arithmetic it agrees to.
+  // 4938 is cited in the paragraph now only as the wrong answer, so it is pinned as the SUM it was.
+  assert.equal(tagBytes + vsBytes + blankBytes, 4938, 'the retracted sum is misquoted');
+  // The TAG channel has no settled alphabet, which is the second half of why per-channel figures
+  // were the wrong instrument: 95 printable, 96 with CANCEL TAG, or the whole block this fence
+  // actually removes. The paragraph names all three rather than picking one silently.
+  assert.equal(closed(range(0xe0000, 0xe007f)).astral, 128, 'the TAG block is no longer fully closed');
+  const alts = figure(/which is (\d+), (\d+) or (\d+) bytes/, 'the TAG channel on its three alphabets');
+  assert.deepEqual(
+    alts.slice(1).map(Number),
+    [capBytes(0, 95), capBytes(0, 96), capBytes(0, 128)],
+    'the disclosed TAG capacities are not the measured ones',
+  );
+  // THE COMPARISON THAT SURVIVED: everything removed, as one alphabet at one budget, against the
+  // residual. Swept from the fence rather than assembled out of channels someone remembered.
+  let cb = 0;
+  let ca = 0;
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const ch = String.fromCodePoint(cp);
+    if (safePathField(ch, MAX_PATH_FIELD_CHARS) === ch) continue;
+    if (cp > 0xffff) ca++;
+    else cb++;
+  }
+  const all = figure(
+    /removes is (\d+) code points, (\d+) BMP and (\d+) astral, which is ([\d.]+) bits per unit and (\d+) bytes/,
+    'the capacity of everything it removes',
   );
   assert.deepEqual(
-    three.slice(1).map(Number),
-    [tagBytes, TAG.astral, vsBytes, VS.bmp, VS.astral, blankBytes, BLANK.bmp, BLANK.astral, tagBytes + vsBytes + blankBytes, bytes],
-    'the disclosed closed-channel capacities are not the measured ones',
+    all.slice(1).map(Number),
+    [cb + ca, cb, ca, Number(perUnit(cb, ca).toFixed(2)), capBytes(cb, ca)],
+    'the disclosed capacity of the whole scrub is not the measured one',
   );
   // ...and the RANKING the sentence draws from them. This is the claim a reader acts on, so it is
   // asserted as an inequality rather than left implied by the numbers above.
   assert.ok(
-    tagBytes + vsBytes + blankBytes < bytes,
-    'the residual is no longer larger than all three closed channels together - the sentence saying ' +
-      'it is must be rewritten to match, and rewritten from THESE numbers rather than from an encoder measurement',
+    capBytes(cb, ca) < bytes,
+    'the residual is no longer larger than EVERYTHING this fence removes - the sentence saying it ' +
+      'is must be rewritten to match, and rewritten from THESE numbers rather than from an encoder ' +
+      'measurement or from three capacities added together',
   );
 });
 
