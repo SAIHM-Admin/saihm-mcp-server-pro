@@ -375,6 +375,35 @@ const parse = (text: string): ts.SourceFile =>
 // `=` and is applied ON TOP of a fence rather than instead of one; `failText` composes a message out
 // of the others. A name appearing here that is not in one of those groups is the question this pin
 // exists to ask.
+const RENDER_SITES_PIN = 24;
+// Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. Three, and the
+// bar for a fourth is a sentence explaining why a delimiter, a label or a newline cannot reach it.
+// Provenance is the whole test: "the endpoint sends it" disqualifies an entry no matter how
+// well-formed the value usually is.
+const RENDER_ALLOWED_TABLE: Record<string, string> = {
+  'server.ts:c.agentIdHash':
+    'the LOCAL identity, derived by the client from its own key material - the deliberate opposite ' +
+    'of the endpoint copy that `saihm_status` refuses and `joinSuccessText` now runs through ' +
+    '`hexOrMarker`. Not endpoint-reachable, so there is no party to forge with it',
+  'server.ts:PACKAGE_VERSION':
+    "read from this package's own package.json at a path derived from import.meta.url - our file, " +
+    'not a value any caller or endpoint supplies',
+  'server.ts:\' \' + fenced':
+    'the parameter of `checkoutUrlBlock`, and this analysis cannot bind a composer\'s parameter to the arguments its callers pass. VERIFIED BY READING both call sites (the `join` and `upgrade` verbs): each passes the local `fenced`, which is `safeField(url, MAX_URL_FIELD_CHARS)`. Re-check this entry if a third caller appears',
+  'server.ts:`SAIHM Session\\n agent=${labelSafe(shortScalar(agentIdHash))':
+    'the status line. Every span VERIFIED fenced by reading: agent/tier/custody are labelSafe(shortScalar|safeScalar), shards/sharing are numbers-or-marker, bfsi is a number or the marker, and R/M/epoch are labelSafe(safeScalar). Reported only because the predicate does not reduce `??` and numeric unions inside a template span',
+  'server.ts:`SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=$':
+    'the shared-recall receipt. cellId and seq are labelSafe(safeScalar); the trailing `${sharedBody}` is the PAYLOAD - and note how it is bounded: `cell.plaintext` is split on EVERY line terminator and every line re-prefixed with `  > `, so an embedded newline yields another QUOTED line rather than a forged record at column zero',
+  'server.ts:c.plaintext':
+    'the PAYLOAD, raw by design and documented as such at the site: it is the memory the agent asked ' +
+    'for, not a label, and fencing it would corrupt the thing being recalled. The residual this ' +
+    'creates is disclosed on the sharedLines block in the same handler. Note what bounds it: every ' +
+    'OTHER field on that line is fenced and labelSafe-d, so plaintext cannot forge a neighbouring ' +
+    'pair - it can only be itself',
+  'server.ts:CLI_USAGE':
+    'a static usage block: string literals plus PACKAGE_VERSION, which has its own entry above. No ' +
+    'interpolation reaches it from outside the module',
+};
 const SAFESCALAR_SITES_PIN = 23;
 const RENDER_HELPER_EXPORTS: string[] = [
   'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
@@ -511,8 +540,18 @@ const hopExpr = (n: ts.Expression): ts.Expression => {
     ? unwrapExpr(d.initializer)
     : e;
 };
+const isFenceNode = (d: ts.Node): boolean =>
+  fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d);
+// One hop for the whole expression AND one hop for every identifier inside it, so `' ' + fenced`
+// and `[a, fenced].join(' ')` are recognised as carrying the fence their binding holds. Hopping only
+// the outermost expression left every composed form looking unfenced.
 const carriesFence = (n: ts.Expression): boolean =>
-  walk(hopExpr(n)).some((d) => fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d));
+  walk(hopExpr(n)).some((d) => {
+    if (isFenceNode(d)) return true;
+    if (!ts.isIdentifier(d)) return false;
+    const h = hopExpr(d);
+    return h !== d && walk(h).some(isFenceNode);
+  });
 
 /** Is this node inside a `+` chain, i.e. already covered when the chain's TOP is flattened? */
 const insidePlusChain = (n: ts.Node): boolean => {
@@ -1807,7 +1846,7 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
   const SITES: Record<string, Record<string, number>> = {
     'server.ts': {
       'safeField:MAX_ANNOUNCEMENT_FIELD_CHARS': 1, // an announcement cellId
-      'safeField:MAX_JOIN_FIELD_CHARS': 2, // the device-flow verificationUri, twice
+      'safeField:MAX_JOIN_FIELD_CHARS': 3, // the device-flow verificationUri, twice
       'safeField:MAX_URL_FIELD_CHARS': 2, // the hosted checkout URL, twice
       // "Also written to", "Back up <keyPath>", and the two join-result keyPaths
       // FIVE since `join` stopped telling a file-key caller to keep an env var: it now names the
@@ -3999,6 +4038,236 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   );
 });
 
+test('EVERY value interpolated into rendered text is FENCED, or written down here', () => {
+  // THE GAP EVERY OTHER SWEEP LEAVES. All four are closed under "values that ARE fenced" and open
+  // under "not fenced at all": they ask whether a fenced value sits in a delimiter, or after a
+  // label, or takes the right budget. A value rendered with NO fence is invisible to every one of
+  // them, so `tier=${String(r.cellId)}` on a receipt passed the whole suite green. Every "green"
+  // this branch has taken from that suite is therefore scoped to already-fenced values; this is the
+  // sweep that closes the scope.
+  //
+  // Enumerated, not gated on syntax: anything unfenced is reported unless it is written down below
+  // with the reason it cannot carry a delimiter, a label or a newline.
+  const RENDER_ALLOWED: Record<string, string> = RENDER_ALLOWED_TABLE;
+  // STRUCTURAL, not containment. `carriesFence` asks whether a fence appears anywhere BENEATH an
+  // expression - the right question for "is this fenced value inside a delimiter", and the wrong one
+  // here. `String(cellId)` walks to an identifier whose declaration mentions a fence, so the loose
+  // test called it fenced while the value actually rendered is the raw string. This asks instead
+  // whether the VALUE ITSELF is the result of a fence: through bindings, through BOTH sides of a
+  // concatenation, through BOTH arms of a conditional, and through every span of a template.
+  const isChecker = (e: ts.Expression): boolean =>
+    ts.isCallExpression(e) &&
+    ['hexOrMarker', 'scopeOrMarker', 'epochOrMarker'].some(
+      (f) => calleeDecl(e) === declOf('render_fence.ts', f),
+    );
+  const fencedValue = (n: ts.Expression, depth = 0): boolean => {
+    if (depth > 8) return false;
+    const e = unwrapExpr(n);
+    if (ts.isStringLiteralLike(e) || ts.isNumericLiteral(e)) return true;
+    if (isFenceNode(e) || isChecker(e)) return true;
+    // `labelSafe` WRAPS a fence rather than being one - it scrubs `=` and nothing else - so it is
+    // not in SCALAR_FENCES and the value it protects is its argument.
+    if (
+      ts.isCallExpression(e) &&
+      calleeDecl(e) === declOf('render_fence.ts', 'labelSafe') &&
+      e.arguments.length > 0
+    )
+      return fencedValue(e.arguments[0] as ts.Expression, depth + 1);
+    if (ts.isTemplateExpression(e))
+      return e.templateSpans.every((sp) => fencedValue(sp.expression, depth + 1));
+    if (ts.isIdentifier(e)) {
+      const h = hopExpr(e);
+      return h !== e && fencedValue(h, depth + 1);
+    }
+    // A NUMBER or BOOLEAN by type carries no delimiter, label or newline whatever its provenance.
+    const tf = CHECKER().getTypeAtLocation(e).getFlags();
+    if (tf & (ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike)) return true;
+    if (
+      ts.isBinaryExpression(e) &&
+      (e.operatorToken.kind === ts.SyntaxKind.PlusToken ||
+        e.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+        e.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+    )
+      return fencedValue(e.left, depth + 1) && fencedValue(e.right, depth + 1);
+    if (ts.isConditionalExpression(e))
+      return fencedValue(e.whenTrue, depth + 1) && fencedValue(e.whenFalse, depth + 1);
+    return false;
+  };
+  const found: string[] = [];
+  let renderSites = 0;
+  for (const { file, sf } of SOURCES()) {
+    for (const n of walk(sf)) {
+      if (!ts.isCallExpression(n)) continue;
+      const callee = n.expression;
+      const isOk = ts.isIdentifier(callee) && callee.text === 'ok';
+      const isWrite =
+        ts.isPropertyAccessExpression(callee) &&
+        callee.name.text === 'write' &&
+        callee.expression.getText(sf).endsWith('stdout');
+      if (!isOk && !isWrite) continue;
+      const arg = n.arguments[0];
+      if (arg === undefined) continue;
+      renderSites++;
+      // `[...].join(sep)` is the shape most of these take; the array's elements are the parts.
+      let parts: ts.Expression[] = [arg];
+      const a = unwrapExpr(arg);
+      if (
+        ts.isCallExpression(a) &&
+        ts.isPropertyAccessExpression(a.expression) &&
+        a.expression.name.text === 'join' &&
+        ts.isArrayLiteralExpression(unwrapExpr(a.expression.expression))
+      )
+        parts = [...(unwrapExpr(a.expression.expression) as ts.ArrayLiteralExpression).elements];
+      // TRANSITIVE, deliberately. Most of these arguments are calls to LOCAL composers -
+      // `joinSuccessText(...)`, `checkoutUrlBlock(...)`, a spread of `lines` - and writing those
+      // down as allowances would exempt everything inside them, which is the containment-not-
+      // application mistake this suite has now made three times. A call to a function declared in
+      // the same file is not an answer; it is another render site, so its returned expressions go
+      // on the worklist and the sweep follows them.
+      const queue: ts.Expression[][] = [parts];
+      const seen = new Set<ts.Node>();
+      while (queue.length > 0) {
+      const batch = queue.shift() as ts.Expression[];
+      for (const pc of flattenPieces(batch)) {
+        if (!('expr' in pc)) continue;
+        const e = hopExpr(pc.expr);
+        // `[...].join(sep)` at ANY depth, not only as the outermost argument: the usage block is one
+        // of these nested inside `stdout.write`, and treating it as a single opaque value made a
+        // 20-line static array look like one unfenced interpolation.
+        const inner0 = unwrapExpr(pc.expr);
+        if (
+          ts.isCallExpression(inner0) &&
+          ts.isPropertyAccessExpression(inner0.expression) &&
+          inner0.expression.name.text === 'join' &&
+          ts.isArrayLiteralExpression(unwrapExpr(inner0.expression.expression))
+        ) {
+          queue.push([...(unwrapExpr(inner0.expression.expression) as ts.ArrayLiteralExpression).elements]);
+          continue;
+        }
+        if (ts.isArrayLiteralExpression(inner0)) {
+          queue.push([...inner0.elements]);
+          continue;
+        }
+        // A SPREAD is a CONTAINER, not a value. Accepting `...lines` because something inside it
+        // carries a fence is the containment-not-application error, and it is the one this sweep
+        // shipped with: an unfenced value added to that array was invisible while every other line
+        // in it stayed fenced. Resolve and descend - and if it cannot be resolved, report it rather
+        // than assume, because an unreadable container is exactly where an unfenced value hides.
+        if (ts.isSpreadElement(inner0)) {
+          const target = hopExpr(inner0.expression);
+          if (ts.isArrayLiteralExpression(target)) {
+            queue.push([...target.elements]);
+            continue;
+          }
+          // BOTH ARMS of a conditional, never one: `const lines = cond ? [...] : [...]` is how these
+          // arrays are actually written, and resolving a spread to a conditional and then giving up
+          // is what let the containment check accept the whole block.
+          if (ts.isConditionalExpression(target)) {
+            queue.push([target.whenTrue]);
+            queue.push([target.whenFalse]);
+            continue;
+          }
+        }
+        if (ts.isConditionalExpression(inner0)) {
+          queue.push([inner0.whenTrue]);
+          queue.push([inner0.whenFalse]);
+          continue;
+        }
+        // `xs.map(cb)` contributes whatever `cb` RETURNS, once per element.
+        const mapped = ts.isSpreadElement(inner0) ? hopExpr(inner0.expression) : inner0;
+        if (
+          ts.isCallExpression(mapped) &&
+          ts.isPropertyAccessExpression(mapped.expression) &&
+          mapped.expression.name.text === 'map' &&
+          mapped.arguments.length > 0
+        ) {
+          const cb = unwrapExpr(mapped.arguments[0] as ts.Expression);
+          if (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) {
+            if (!ts.isBlock(cb.body)) queue.push([cb.body]);
+            else
+              for (const st of walk(cb.body))
+                if (ts.isReturnStatement(st) && st.expression) queue.push([st.expression]);
+            continue;
+          }
+        }
+        if (fencedValue(e)) continue;
+        // The closed-set CHECKERS count here too, and they are stronger than a fence: they answer a
+        // marker for anything outside their set, so there is nothing left to carry a delimiter, a
+        // label or a newline. They are deliberately NOT in `SCALAR_FENCES`, because that list
+        // carries a labelled-line obligation these do not need.
+        if (
+          ts.isCallExpression(e) &&
+          ['hexOrMarker', 'scopeOrMarker', 'epochOrMarker'].some(
+            (f) => calleeDecl(e) === declOf('render_fence.ts', f),
+          )
+        )
+          continue;
+        // Follow a local composer rather than trusting it.
+        const inner = ts.isSpreadElement(e) ? unwrapExpr(e.expression) : e;
+        const callee = ts.isCallExpression(inner) ? calleeDecl(inner) : undefined;
+        if (callee !== undefined && !seen.has(callee) && callee.getSourceFile() === sf) {
+          seen.add(callee);
+          const returns: ts.Expression[] = [];
+          const body =
+            (ts.isFunctionDeclaration(callee) || ts.isFunctionExpression(callee) || ts.isArrowFunction(callee))
+              ? callee.body
+              : ts.isVariableDeclaration(callee) && callee.initializer && ts.isArrowFunction(callee.initializer)
+                ? callee.initializer.body
+                : undefined;
+          if (body !== undefined) {
+            if (!ts.isBlock(body)) returns.push(body);
+            else
+              for (const st of walk(body))
+                if (ts.isReturnStatement(st) && st.expression) returns.push(st.expression);
+          }
+          if (returns.length > 0) {
+            for (const r of returns) {
+              const rr = unwrapExpr(r);
+              if (
+                ts.isCallExpression(rr) &&
+                ts.isPropertyAccessExpression(rr.expression) &&
+                rr.expression.name.text === 'join' &&
+                ts.isArrayLiteralExpression(unwrapExpr(rr.expression.expression))
+              )
+                queue.push([...(unwrapExpr(rr.expression.expression) as ts.ArrayLiteralExpression).elements]);
+              else if (ts.isArrayLiteralExpression(rr)) queue.push([...rr.elements]);
+              else queue.push([rr]);
+            }
+            continue;
+          }
+        }
+        // Values that cannot carry the grammar: literals, and numbers/booleans by TYPE.
+        if (ts.isNumericLiteral(e) || e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword) continue;
+        if (ts.isStringLiteralLike(e)) continue;
+        const t = CHECKER().getTypeAtLocation(e);
+        const flags = t.getFlags();
+        if (flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike)) continue;
+        const line = sf.getLineAndCharacterOfPosition(pc.expr.getStart(sf)).line + 1;
+        // Keyed on what is WRITTEN at the site, not on what it resolves to: `PACKAGE_VERSION` is a
+        // readable allowance, the JSON.parse chain it hops to is not, and an allowance nobody can
+        // read is an allowance nobody re-checks.
+        const key = `${file}:${pc.expr.getText(sf).replace(/\s+/g, ' ').slice(0, 60)}`;
+        if (RENDER_ALLOWED[key] !== undefined) continue;
+        found.push(`${key}   (line ${line})`);
+      }
+      }
+    }
+  }
+  assert.equal(
+    renderSites,
+    RENDER_SITES_PIN,
+    'the number of render entry points changed. This sweep finds them by NAME (`ok`, `stdout.write`), ' +
+      'so a rename empties it silently - which is why the count is pinned rather than trusted',
+  );
+  assert.deepEqual(
+    found,
+    [],
+    'a value is interpolated into rendered text without passing through any fence. Fence it, or add ' +
+      'it to RENDER_ALLOWED_TABLE with the reason it cannot carry a delimiter, a label or a ' +
+      'newline:\n' + found.join('\n'),
+  );
+});
+
 test('the render-helper export set is PINNED, so a sixth fence cannot join unnoticed', () => {
   // `SCALAR_FENCES` is a hand-kept list of five names, and every sweep that asks "is this value
   // fenced" trusts it. Nothing asserted the list was COMPLETE: adding a sixth exported helper and
@@ -4066,7 +4335,7 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // predicate that loses sight of a slot reports the same `n-1` as a deleted site, and following the
   // instruction ships the hazard with the suite green. A fall means "prove no predicate narrowed"
   // BEFORE it means "a site went away".
-  const EXAMINED_SPANS_PIN = 67;
+  const EXAMINED_SPANS_PIN = 75;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

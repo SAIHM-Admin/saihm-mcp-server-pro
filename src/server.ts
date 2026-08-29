@@ -979,7 +979,14 @@ function joinPendingText(s: JoinState): string {
 function joinSuccessText(s: JoinState): string {
   return [
     "You're in — your free SAIHM memory is active.",
-    `  identity: ${(s.result as FreeEntitlementResult).agentIdHash}`,
+    // `hexOrMarker`, because this is the ENDPOINT'S copy of the hash: `s.result` is an unvalidated
+    // cast of the join response. `saihm_status` refuses this same field on purpose - "the agent's
+    // own identity is the last value that should come from a party it does not trust" - and reads
+    // the local one, while this line rendered the endpoint's raw, on a line beginning `identity: `.
+    // A hash with a newline in it forges whatever lines it likes in a success message. The checker
+    // answers the marker for anything that is not 64 lowercase hex, so there is nothing to forge
+    // WITH, and it is the same fence `sharer=` already uses for the same kind of value.
+    `  identity: ${hexOrMarker((s.result as FreeEntitlementResult).agentIdHash)}`,
     s.keyPath === null
       ? '  key: the SAIHM_MASTER_SECRET_HEX value you supplied (the only key to your memory; keep it safe — it cannot be recovered)'
       : `  key file: ${safePathField(s.keyPath, MAX_PATH_FIELD_CHARS)} (the only key to your memory; keep it safe — it cannot be recovered)`,
@@ -1247,7 +1254,10 @@ async function runFreeJoin(): Promise<void> {
       '',
       'FREE memory activated for this identity:',
       '',
-      `  identity (agentIdHash): ${r.agentIdHash}`,
+      // `hexOrMarker` for the same reason as `joinSuccessText`: `r` is the endpoint's response to
+      // `acquireFreeEntitlement`, so this is the ENDPOINT'S copy of the hash, not ours. Fixing the
+      // tool path and leaving the CLI verb was the one-arm pattern once more.
+      `  identity (agentIdHash): ${hexOrMarker(r.agentIdHash)}`,
       '',
       // Name the key the caller ACTUALLY has. This line was unconditionally
       // "Keep SAIHM_MASTER_SECRET_HEX safe", which for a self-generated identity points at an env
@@ -1299,10 +1309,14 @@ async function runUpgrade(): Promise<void> {
     (process.argv[3] ?? process.env.SAIHM_UPGRADE_TIER ?? 'PRO').trim() || 'PRO';
   const url = await c.requestUpgradeUrl(target);
   const fenced = safeField(url, MAX_URL_FIELD_CHARS);
+  // The tier is the operator's own `argv`/env, so this is not a trust boundary - but it is still a
+  // value from outside the program rendered into a line the agent reads, and every other such value
+  // on this branch is fenced. A tier carrying a newline should not be able to add a line here.
+  const fencedTier = safeField(target, MAX_JOIN_FIELD_CHARS);
   process.stdout.write(
     [
       '',
-      `SAIHM — upgrade this identity to ${target} (monthly). Your memories stay on this same key:`,
+      `SAIHM — upgrade this identity to ${fencedTier} (monthly). Your memories stay on this same key:`,
       '',
       ...checkoutUrlBlock(fenced, persistCheckoutUrl(fenced)),
       `  identity (agentIdHash): ${c.agentIdHash}`,
