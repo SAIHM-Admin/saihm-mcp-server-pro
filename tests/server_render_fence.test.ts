@@ -377,8 +377,11 @@ const parse = (text: string): ts.SourceFile =>
 // exists to ask.
 const SAFESCALAR_SITES_PIN = 23;
 const RENDER_HELPER_EXPORTS: string[] = [
-  'boundedOrMarker', 'epochOrMarker', 'failText', 'hexOrMarker', 'labelSafe',
-  'safeField', 'safePathField', 'safeScalar', 'scopeOrMarker', 'shortScalar',
+  'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
+  'MAX_JOIN_FIELD_CHARS', 'MAX_PATH_FIELD_CHARS', 'MAX_PATH_MESSAGE_CHARS', 'MAX_SCALAR_CHARS',
+  'MAX_STRUCTURED_SCALAR_CHARS', 'MAX_URL_FIELD_CHARS', 'MAX_URL_MESSAGE_CHARS',
+  'boundedOrMarker', 'epochOrMarker', 'failText', 'hexOrMarker', 'labelSafe', 'safeField',
+  'safePathField', 'safeScalar', 'scopeOrMarker', 'shortScalar'
 ];
 const SCALAR_FENCES = [
   'safeField', 'safePathField', 'safeScalar', 'shortScalar', 'boundedOrMarker',
@@ -483,6 +486,98 @@ const calleeName = (n: ts.Node): string => {
 /** A line in authenticated-memory shape: `  [<id>] seq=<n> | <plaintext>`. */
 const MEMORY_LINE = /^ {2}\[[^\]\n]*\] seq=/;
 const mints = (s: string): boolean => s.split('\n').some((l) => MEMORY_LINE.test(l));
+
+// ONE PREDICATE for "is this value fenced", shared by every arm of every sweep.
+//
+// It was three. The delimiter sweep has a template arm, a `+`-chain arm and a `.join('')` arm, and
+// round 14 widened the TEMPLATE arm alone - so the `+` arm still knew two fences of five, and the
+// exact attack that round fixed could be reinstated verbatim by moving one character across a `+`
+// boundary, with the whole suite green. Widening one arm of a three-arm sweep is the same one-arm
+// defect the widening was for.
+//
+// `hopExpr` is here for the same reason it is in `rendersFenced`: hoisting a subexpression into a
+// local is an ordinary refactor, and without it the sweep loses sight of the slot entirely - which
+// its own count pin then reports as "a site was removed", steering the next author into raising the
+// pin and shipping the hazard.
+const unwrapExpr = (n: ts.Expression): ts.Expression =>
+  ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n)
+    ? unwrapExpr(n.expression)
+    : n;
+const hopExpr = (n: ts.Expression): ts.Expression => {
+  const e = unwrapExpr(n);
+  if (!ts.isIdentifier(e)) return e;
+  const d = symbolOf(e)?.declarations?.[0];
+  return d !== undefined && ts.isVariableDeclaration(d) && d.initializer !== undefined
+    ? unwrapExpr(d.initializer)
+    : e;
+};
+const carriesFence = (n: ts.Expression): boolean =>
+  walk(hopExpr(n)).some((d) => fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d));
+
+/** Is this node inside a `+` chain, i.e. already covered when the chain's TOP is flattened? */
+const insidePlusChain = (n: ts.Node): boolean => {
+  for (let p: ts.Node | undefined = n.parent; p !== undefined; p = p.parent)
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.PlusToken) return true;
+  return false;
+};
+
+/**
+ * A rendered sequence flattened to its ORDERED pieces - static text and interpolated expressions -
+ * across `+` operands AND through the templates inside them.
+ *
+ * Both line sweeps treated a `+` operand as one opaque part whose static text was compared only
+ * against its NEIGHBOURS', while their template arms read one template at a time. A delimiter or a
+ * label opened in one operand and closed in the next fell between the two models. Every `+` chain
+ * in `src/` is a chain of templates, so that was not an edge case - it was the arm. Measured: the
+ * site round 14 fixed could be reinstated verbatim by moving one character across a `+`, suite green.
+ */
+type RenderPiece = { text: string } | { expr: ts.Expression };
+const flattenPieces = (parts: ts.Expression[]): RenderPiece[] => {
+  const out: RenderPiece[] = [];
+  const push = (e: ts.Expression): void => {
+    const x = unwrapExpr(e);
+    if (ts.isTemplateExpression(x)) {
+      out.push({ text: x.head.text });
+      for (const sp of x.templateSpans) {
+        out.push({ expr: sp.expression });
+        out.push({ text: sp.literal.text });
+      }
+    } else if (ts.isStringLiteralLike(x)) out.push({ text: x.text });
+    else out.push({ expr: x });
+  };
+  parts.forEach(push);
+  return out;
+};
+const piecesText = (xs: RenderPiece[]): string =>
+  xs.map((pc) => ('text' in pc ? pc.text : '')).join('');
+
+/**
+ * Does every rendering of this expression START A NEW LINE (or render nothing)?
+ *
+ * Such a value cannot sit in the `label=` slot that precedes it, because it is not on that line at
+ * all. Flattening made this matter: once the static text of earlier `+` operands is visible, a
+ * conditional whose arms are `''` and `` `\n  ! ${fence(x)}` `` looks like it follows the previous
+ * line's trailing `epoch=` - and it does follow it, one line down.
+ */
+const rendersOnNewLine = (e: ts.Expression): boolean => {
+  const x = unwrapExpr(e);
+  if (ts.isConditionalExpression(x))
+    return rendersOnNewLine(x.whenTrue) && rendersOnNewLine(x.whenFalse);
+  if (ts.isTemplateExpression(x)) return x.head.text.startsWith('\n');
+  if (ts.isStringLiteralLike(x)) return x.text === '' || x.text.startsWith('\n');
+  return false;
+};
+
+// The STATIC text an operand contributes to the rendered line. A template operand contributes its
+// head and every span literal; mapping it to `''` - which this did - discarded the delimiters of
+// every `+` chain in `src/`, because every one of them is a chain of TEMPLATES.
+const staticTextOf = (x: ts.Expression): string =>
+  ts.isTemplateExpression(x)
+    ? [x.head.text, ...x.templateSpans.map((s) => s.literal.text)].join('')
+    : ts.isStringLiteralLike(x)
+      ? x.text
+      : '';
+
 
 test('safeField TRUNCATES over-budget input and marks it — the half the client cap hides', () => {
   const out = safeField('a'.repeat(500), 64);
@@ -3611,9 +3706,28 @@ test('the blank list is ESCAPED into its character class, not spliced raw', () =
   const dash = countAll(`${shippedEsc[0]}-${shippedEsc.slice(1).join('')}`);
   const negated = countAll(`^${shippedEsc.join('')}`);
   const caretMid = countAll(`${shippedEsc[0]}^${shippedEsc.slice(1).join('')}`);
-  const prose = readFileSync(new URL('render_fence.ts', SRC_ROOT), 'utf-8')
+  const whole = readFileSync(new URL('render_fence.ts', SRC_ROOT), 'utf-8')
     .replace(/\n\s*\*\s?/g, ' ')
     .replace(/\s+/g, ' ');
+  // THE CLAIM FIRST, then its figures - and both inside ONE paragraph rather than anywhere in the
+  // file. Checking digits against a flattened whole file let two rewrites pass green: the claim was
+  // INVERTED to "SPLICED, not escaped ... on the mistaken theory that a `-` between two entries
+  // makes a RANGE" with every figure left verbatim, so the paragraph instructed the next author to
+  // do the thing the class forbids; and the paragraph was DELETED with its sentences relocated to a
+  // comment labelled stale, where `exec` still found them. A number is only a disclosure while the
+  // sentence around it still asserts the thing.
+  const CLAIM = 'ESCAPED, not spliced.';
+  assert.ok(
+    whole.includes(CLAIM),
+    `render_fence.ts no longer asserts "${CLAIM}" - the raw-splice paragraph was rewritten or moved, ` +
+      'and every figure below is a measurement of a claim that is no longer being made',
+  );
+  assert.ok(
+    !/SPLICED, not escaped/i.test(whole),
+    'render_fence.ts now asserts the INVERSE of the escaping rule its class depends on',
+  );
+  // The window is the paragraph, so a stale copy elsewhere cannot satisfy a pin about this one.
+  const prose = whole.slice(whole.indexOf(CLAIM), whole.indexOf(CLAIM) + 1800);
   const fig = (re: RegExp, what: string): RegExpExecArray => {
     const m = re.exec(prose);
     assert.ok(m, `the raw-splice paragraph no longer states ${what}; it was rewritten and this pin found nothing`);
@@ -3898,19 +4012,31 @@ test('the render-helper export set is PINNED, so a sixth fence cannot join unnot
   // in `SCALAR_FENCES` or in the exclusion below, in the same commit.
   const sf = SOURCES().find((s) => s.file === 'render_fence.ts');
   assert.ok(sf, 'render_fence.ts is not among the swept sources');
+  // EVERY export, of every FORM and every KIND. The first cut collected `export function f(){}` and
+  // `export const f = <arrow|function-expression>` only, and both plainest ways around it were
+  // measured green: `export const tagScalar = mkFence(32)` (the initializer is a CALL, so the kind
+  // test rejected it) and `export { tagScalar }` (an `ExportDeclaration` carries no `export`
+  // MODIFIER, so it was skipped before any kind test ran). A fence introduced either way was
+  // invisible to all four sweeps at once, which is precisely what this pin's own message promises
+  // it prevents.
+  //
+  // So no kind test at all: constants are pinned alongside functions. A wider list is the point -
+  // any new export is a red line that asks the author one question, and "is this a fence?" is
+  // cheaper to answer than the sweep gap is to find.
   const exported: string[] = [];
   sf.sf.forEachChild((n) => {
+    if (ts.isExportDeclaration(n)) {
+      const cl = n.exportClause;
+      if (cl && ts.isNamedExports(cl)) for (const el of cl.elements) exported.push(el.name.text);
+      return;
+    }
     const mods = ts.canHaveModifiers(n) ? ts.getModifiers(n) : undefined;
     if (!mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return;
     if (ts.isFunctionDeclaration(n) && n.name) exported.push(n.name.text);
+    else if (ts.isClassDeclaration(n) && n.name) exported.push(n.name.text);
     else if (ts.isVariableStatement(n))
       for (const d of n.declarationList.declarations)
-        if (
-          ts.isIdentifier(d.name) &&
-          d.initializer &&
-          (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))
-        )
-          exported.push(d.name.text);
+        if (ts.isIdentifier(d.name)) exported.push(d.name.text);
   });
   assert.deepEqual(
     exported.sort(),
@@ -3931,10 +4057,16 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // `> 0`, so that a predicate narrowing which silently drops slots is a red line rather than a
   // quieter pass. The number is measured from real `src/`; if a render site is legitimately added or
   // removed, update it in the same commit and say which site moved.
-  // 46, not 45, since the self-join label fix: the third `secretSource` arm gained a template that
-  // interpolates a caller-chosen path, so there is one more slot to examine. The pin moving is the
-  // guard working - a render site was added and the count says so.
-  const EXAMINED_SPANS_PIN = 46;
+  // 69 since the three arms were unified. It was 46 while only the TEMPLATE arm counted and only the
+  // template arm knew all five fences; the `+`-chain arm examined 23 further fenced parts and was
+  // counting none of them, which is why its blindness could not show up as a number.
+  //
+  // READ A DROP CORRECTLY. The message below used to say only "if a render site was added or removed
+  // on purpose, update the pin". That instruction is right for a rise and DANGEROUS for a fall: a
+  // predicate that loses sight of a slot reports the same `n-1` as a deleted site, and following the
+  // instruction ships the hazard with the suite green. A fall means "prove no predicate narrowed"
+  // BEFORE it means "a site went away".
+  const EXAMINED_SPANS_PIN = 67;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
@@ -3962,8 +4094,12 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
    * ordinary parenthetical earlier in the same sentence from counting. The closer is looked for on
    * the value's own rendered LINE, because a `\n` ends the line the delimiter was opened on.
    */
-  const wrappedBy = (before: string, after: string): string | undefined => {
+  const wrappedBy = (beforeAll: string, after: string): string | undefined => {
     const line = (after.split('\n')[0] ?? '') as string;
+    // The value's OWN line on both sides. An opener on an earlier line was ended by the newline
+    // between them, so it cannot enclose this value - and once `+` operands are flattened, that
+    // earlier text is visible where it previously was not.
+    const before = beforeAll.slice(beforeAll.lastIndexOf('\n') + 1);
     for (let i = before.length - 1; i >= 0; i--) {
       const open = before[i] as string;
       const close = PAIRS[open];
@@ -3979,15 +4115,24 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
     assertWalked(file, nodes);
     /** One sequence of rendered parts - a `+` chain or a `.join('')` array - checked for wrapping. */
     const scanParts = (parts: ts.Expression[]): void => {
-      const staticText = (xs: ts.Expression[]): string =>
-        xs.map((x) => (ts.isStringLiteralLike(x) ? x.text : '')).join('');
-      parts.forEach((part, i) => {
-        if (!walk(part).some((d) => fenceOf(d) !== null || seedOf(d) !== null)) return;
-        const open = wrappedBy(staticText(parts.slice(0, i)), staticText(parts.slice(i + 1)));
+      // FLATTENED THROUGH TEMPLATES, not treated as atoms - and this is the whole fix. Each `+`
+      // operand used to be one opaque part whose static text was compared only against its
+      // NEIGHBOURS', while the template arm read one template at a time. A delimiter opened in one
+      // operand and closed in the next therefore fell between the two models, and the site round 14
+      // fixed could be reinstated verbatim by moving a single character across the `+`, with the
+      // entire suite green. Every `+` chain in `src/` is a chain of TEMPLATES, so this was not an
+      // edge case: it was the arm.
+      const pieces = flattenPieces(parts);
+      const textOf = piecesText;
+      pieces.forEach((pc, i) => {
+        if (!('expr' in pc)) return;
+        if (!carriesFence(pc.expr)) return;
+        examinedSpans++;
+        const open = wrappedBy(textOf(pieces.slice(0, i)), textOf(pieces.slice(i + 1)));
         if (open !== undefined)
           found.push(
-            `${file}:${sf.getLineAndCharacterOfPosition(part.getStart(sf)).line + 1} ` +
-              `${open}...${PAIRS[open]} around ${part.getText(sf)}`,
+            `${file}:${sf.getLineAndCharacterOfPosition(pc.expr.getStart(sf)).line + 1} ` +
+              `${open}...${PAIRS[open]} around ${pc.expr.getText(sf)}`,
           );
       });
     };
@@ -4014,9 +4159,15 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
         scanParts(parts);
         continue;
       }
-      // ...and the THIRD shape. Two syntaxes were swept and `['a', fence(x), 'b'].join('')` - the
-      // dominant render idiom in `server.ts` - was neither. A sweep gated on the syntaxes someone
-      // happened to write is not a sweep; the wrapping is the property, not the operator.
+      // ...and the THIRD shape. Two syntaxes were swept and `['a', fence(x), 'b'].join('')` was
+      // neither. It was called "the dominant render idiom in `server.ts`" here, and that was simply
+      // false: `join('')` occurs ZERO times in `server.ts` or `client.ts`, while `join('\n')` occurs
+      // ten times and this arm skips it by design (a newline ends the line a delimiter opened on).
+      // So this arm has never matched a shipped site. It is kept because the idiom is one refactor
+      // away and an unmatched arm costs nothing - but a sweep is not proven by an arm that never
+      // fires, which is why the examined COUNT is pinned rather than merely asserted positive.
+      // A sweep gated on the syntaxes someone happened to write is not a sweep; the wrapping is the
+      // property, not the operator.
       if (ts.isArrayLiteralExpression(n)) {
         const par = n.parent;
         if (
@@ -4039,10 +4190,7 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
         // `isFenceCall` as well as `fenceOf`: the latter knows `safeField`/`safePathField` only, so a
         // value fenced through `safeScalar`, `shortScalar` or `boundedOrMarker` was not seen to be a
         // fenced value at all, and this sweep skipped it before ever looking at its delimiters.
-        const carries = walk(sp.expression).some(
-          (d) => fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d),
-        );
-        if (!carries) return;
+        if (!carriesFence(sp.expression)) return;
         examinedSpans++;
         // The value's rendered LINE, not the chunk up to the next span. `sp.literal.text` stops at
         // the following interpolation, so `(${fence(x)}${flag ? ', y' : ''})` rendered a
@@ -4061,9 +4209,11 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   assert.equal(
     examinedSpans,
     EXAMINED_SPANS_PIN,
-    'the delimiter sweep examined a different number of fenced values than it was pinned to. If a ' +
-      'render site was added or removed on purpose, update the pin in that commit; if not, a ' +
-      'predicate just narrowed and this sweep is now looking at less than it claims',
+    'the delimiter sweep examined a different number of fenced values than it was pinned to. A RISE ' +
+      'is usually a render site you added - confirm that, then update the pin in the same commit. A ' +
+      'FALL is guilty until proven innocent: a predicate that stops recognising a fence reports the ' +
+      'same number as a site that was deleted, so establish WHICH before touching this pin. Raising ' +
+      'it to match a fall is how a hazard ships green',
   );
   assert.deepEqual(
     found,
@@ -4200,7 +4350,9 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
       out.push(`${file}:${line} ...${before.slice(-20)}${part.getText(sf)}`);
     };
     for (const n of walk(sf)) {
-      if (ts.isTemplateExpression(n)) {
+      // Skipped when the template is an operand of a `+` chain: `scanParts` already flattened it,
+      // and scanning it again would both double the examined count and report one hazard twice.
+      if (ts.isTemplateExpression(n) && !insidePlusChain(n)) {
         const chunks = [n.head.text, ...n.templateSpans.map((sp2) => sp2.literal.text)];
         n.templateSpans.forEach((sp, i) =>
           check(sp.expression, chunks.slice(0, i + 1).join(''), chunks.slice(i + 1).join('')),
@@ -4233,9 +4385,15 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
           parts = [...n.elements];
       }
       if (parts === null) continue;
-      parts.forEach((part, i) =>
-        check(part, staticText(parts.slice(0, i)), staticText(parts.slice(i + 1))),
-      );
+      // Flattened for the same reason the delimiter sweep is: a `label=` in one `+` operand and its
+      // value in the next was invisible to both of this sweep's arms.
+      const pieces = flattenPieces(parts);
+      pieces.forEach((pc, i) => {
+        if (!('expr' in pc)) return;
+        // A value that begins its own line is not in the PRECEDING line's label slot.
+        if (rendersOnNewLine(pc.expr)) return;
+        check(pc.expr, piecesText(pieces.slice(0, i)), piecesText(pieces.slice(i + 1)));
+      });
     }
   };
   const found: string[] = [];
@@ -4249,7 +4407,9 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
   assert.ok(
     checkedSlots > 0,
     'the label sweep examined NO fenced value in a label position. It is passing vacuously, which ' +
-      'is how every one of its predicate failures presented before they were measured',
+      'is how every one of its predicate failures presented before they were measured. And if the ' +
+      'COUNT below merely FELL, do not raise the pin to match it: a predicate that stops seeing a ' +
+      'slot reports the same number as a slot that was deleted, and raising the pin ships the hazard',
   );
   assert.deepEqual(
     found,

@@ -456,6 +456,25 @@ test('free-join composition: the shipped CLI actually performs it (re-derived fr
         visit(n.right, [...guards, n.left.getText(sf)]);
         return;
       }
+      // A NESTED FUNCTION is not a call - it is a call SITE that runs whenever someone invokes it.
+      // Hoisting the mint into `const mintIdentity = () => { if (selfJoinEnabled()) ... }` and
+      // invoking it AFTER `bootFromEnv` leaves both the guard TEXT and the TEXTUAL order untouched,
+      // so this sweep and the `firstOf` check below were both green while `free-join` regressed on a
+      // bare machine: boot ran first and threw the "Join SAIHM" hint, with no way for the caller to
+      // comply. Recorded as a guard so it shows up in the comparison rather than silently passing;
+      // the mint must be a direct statement of this function, where the order below is meaningful.
+      if (
+        n !== fn &&
+        (ts.isFunctionDeclaration(n) ||
+          ts.isArrowFunction(n) ||
+          ts.isFunctionExpression(n) ||
+          ts.isMethodDeclaration(n))
+      ) {
+        n.forEachChild((c) => {
+          visit(c, [...guards, '<nested function: statement order does not decide run order>']);
+        });
+        return;
+      }
       n.forEachChild((c) => {
         visit(c, guards);
       });
