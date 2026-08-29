@@ -147,6 +147,13 @@ const symbolOf = (n: ts.Node): ts.Symbol | undefined => {
     s && s.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(s) : s;
   let s = deAlias(checker.getSymbolAtLocation(n));
   for (let hop = 0; hop < 8 && s; hop++) {
+    // ONE declaration, or stop. `declarations[0]` silently picks a representative when a symbol has
+    // several - declaration merging, or a binding written in more than one place - and following the
+    // first is a guess about which one the value came from. There is no right answer to guess, so
+    // the hop stops and the symbol resolves to itself, which is the conservative end: this walk only
+    // ever makes a name resolve FURTHER, so declining to hop can widen a sweep's count but cannot
+    // narrow it. `src/` has no merged symbol on these paths today (measured: no sweep count moved).
+    if ((s.declarations?.length ?? 0) !== 1) break;
     const d = s.declarations?.[0];
     if (d === undefined || !ts.isVariableDeclaration(d)) break;
     if (d.initializer === undefined || !ts.isIdentifier(d.initializer)) break;
@@ -306,6 +313,15 @@ const walkScope = (n: ts.Node, out: ts.Node[] = []): ts.Node[] => {
  * with every edit, and a number that goes stale on contact is worse than a description. A ratio measures comment density; this measures the tree.
  */
 const assertWalked = (file: string, nodes: ts.Node[]): void => {
+  // An EMPTY walk passed this in silence: the loop below never ran, so a traversal that returned
+  // nothing was certified complete. That is the vacuous-guard shape this file records elsewhere,
+  // sitting inside the positive control written to prevent it. One node is not a real tree either,
+  // but a one-node result is caught by the child check the moment that node has children.
+  assert.ok(
+    nodes.length > 0,
+    `${file}: the walk returned NO nodes at all. Every sweep reading it is reporting a clean result ` +
+      'on source it never saw',
+  );
   const seen = new Set(nodes);
   for (const n of nodes)
     n.forEachChild((c) => {
@@ -441,9 +457,17 @@ test('every character RFC 3986 permits in a fragment survives the fence — chec
   assert.equal(safeField('a[b]c|d', MAX_URL_FIELD_CHARS), 'a?b?c?d');
 
   // The budget is the other way to corrupt a link, since a truncation marker breaks it just as surely
-  // as a `?`. The measured hosted URL is 523 characters against 2048, so assert the headroom exists
-  // rather than trusting it.
+  // as a `?`. The fixture stands in for a real hosted checkout URL, so its LENGTH is the thing being
+  // claimed and it is asserted rather than written in this sentence: a measured number that lives
+  // only in a comment goes stale silently, and this one already had - the fixture is built from
+  // `legal`, so editing the character inventory above changes it with nothing to notice.
   const realistic = `https://checkout.stripe.com/c/pay/cs_live_${'a'.repeat(58)}#${legal.repeat(4)}`;
+  assert.equal(
+    realistic.length,
+    485,
+    'the realistic-URL fixture changed length; it stands in for a hosted checkout URL, so a new ' +
+      'value needs a look rather than a re-pin',
+  );
   assert.ok(realistic.length < MAX_URL_FIELD_CHARS, 'the fixture must sit inside the budget');
   assert.equal(safeField(realistic, MAX_URL_FIELD_CHARS), realistic);
 });
@@ -743,7 +767,7 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   // as one that appears or vanishes. The per-name assertions above are kept rather than folded in:
   // they carry the reasoning for their particular values, and this test deliberately carries none,
   // so that it never becomes the place a value gets justified.
-  const PINNED: Record<string, Record<string, number>> = {
+  const PINNED: Record<string, Record<string, number | number[]>> = {
     'render_fence.ts': {
       MAX_SCALAR_CHARS: 64,
       ABBREV_CHARS: 16,
@@ -760,6 +784,23 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       MAX_SHARED_ANNOUNCEMENTS: 256,
       MAX_ANNOUNCEMENT_FIELD_CHARS: 64,
       MAX_ANNOUNCEMENT_TOTAL_CHARS: 32 * 1024,
+      // MODULE-PRIVATE, and the reason this sweep now reads SOURCE for every module rather than
+      // only for `server.ts`. Six constants sat here unpinned under a test named EVERY declared
+      // budget: the import arm can only see EXPORTS, and `server.ts` was read from source for a
+      // reason that reads like an exemption but is not one - it cannot be imported. Nothing made
+      // the source arm the general case, so an unexported budget in an IMPORTABLE module was
+      // invisible to both arms at once. `MAX_COUNTER_CHARS` is the character budget of the pair;
+      // the timeouts are here because the doctrine three paragraphs up is to pin a number rather
+      // than teach the sweep to look away, and a silent 30s -> 300s widening is a real change.
+      REQUEST_TIMEOUT_MS: 30_000,
+      MAX_RESPONSE_BYTES: 16 * 1024 * 1024,
+      JWT_REFRESH_SKEW_MS: 60_000,
+      OPAQUE_TOKEN_TTL_MS: 5 * 60_000,
+      FREE_ONBOARD_POLL_MS: 5_000,
+      MAX_COUNTER_CHARS: 32,
+      // A TUPLE, and the first constant the widened sweep reached that no arm had ever seen. These
+      // are the percentages a user is warned at; a silent edit changes what they are told and when.
+      QUOTA_NAG_THRESHOLDS: [80, 95, 100],
     },
     // The package's PUBLIC surface: a barrel of re-exports. It declares no budget of its own, and
     // `{}` says so deliberately rather than by omission — omission is what left it outside this
@@ -803,28 +844,27 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       unknown
     >;
   }
-  for (const [name, mod] of Object.entries(MODULES)) {
-    // EVERY numeric export, with no name filter. An earlier cut kept only `MAX_*` and `ABBREV_*`,
-    // which reintroduced in the predicate the very hole the test exists to close: a budget named
-    // outside the convention would have been skipped in silence, while the paragraph above promised
-    // that any new one turns this red. Measured across both modules, every numeric export IS a
-    // budget and none is anything else, so the filter bought no precision and cost exhaustiveness.
-    // If a non-budget number is ever exported here, the right answer is to pin it too rather than to
-    // teach this sweep to look away.
-    const live = Object.entries(mod)
-      .filter(([, v]) => typeof v === 'number')
-      .map(([k]) => k)
-      .sort();
-    assert.deepEqual(
-      live,
-      Object.keys(PINNED[name]).sort(),
-      `${name}: a budget was added, removed or moved without pinning its value here — add it to ` +
-        'PINNED, with the value stated as a literal, in the same commit that introduces the constant',
-    );
-    for (const [k, want] of Object.entries(PINNED[name])) {
-      assert.equal(mod[k], want, `${name}: ${k} was widened or narrowed`);
-    }
-  }
+  // EVERY numeric export, with no name filter. An earlier cut kept only `MAX_*` and `ABBREV_*`,
+  // which reintroduced in the predicate the very hole the test exists to close: a budget named
+  // outside the convention would have been skipped in silence, while the paragraph above promised
+  // that any new one turns this red. Measured across both modules, every numeric export IS a
+  // budget and none is anything else, so the filter bought no precision and cost exhaustiveness.
+  // If a non-budget number is ever exported here, the right answer is to pin it too rather than to
+  // teach this sweep to look away.
+  //
+  // GATHERED, not asserted here: the exports are one of TWO arms now, and the check is the UNION.
+  // Asserting this arm alone against `PINNED` is what kept six module-private `client.ts` budgets
+  // outside a sweep whose name claims all of them.
+  // Numbers AND number tuples: an exported `[80, 95] as const` is as much a budget as a scalar,
+  // and a `typeof v === 'number'` filter is the same look-away this test keeps indicting.
+  const exportedNums: Record<string, Record<string, number | number[]>> = {};
+  for (const [name, mod] of Object.entries(MODULES))
+    exportedNums[name] = Object.fromEntries(
+      Object.entries(mod).filter(
+        ([, v]) =>
+          typeof v === 'number' || (Array.isArray(v) && v.every((x) => typeof x === 'number')),
+      ),
+    ) as Record<string, number | number[]>;
 
   // `server.ts` is the module that APPLIES these fences, and it declares two budgets of its own that
   // sat outside this enumeration while its name claimed EVERY declared budget. That is the same shape
@@ -840,7 +880,6 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   // phantom block over the code beneath it - and it was reading `server.ts` through that pair with
   // no honesty check of its own. Measured, before: a planted comment of that shape blanked a real
   // budget declaration and this sweep reported the module fully pinned.
-  const serverSf = SOURCES().find((x) => x.file === 'server.ts')?.sf as ts.SourceFile;
   // `export const` as well as `const`. A cut of this line read `\n *const` alone, so an exported
   // budget was invisible to it — and nothing in the tree would have shown that, because `server.ts`
   // has no exports for it to miss. That is an OBSERVATION about the file, not the reason it is read
@@ -906,15 +945,32 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     return parts.some((x) => x === null) ? null : parts.flat() as ts.Identifier[];
   };
 
-  /** `4096`, `A + 2 * B`, `(A)` - the only shapes this evaluates. */
-  const evaluate = (n: ts.Node, syms: Record<string, number>): number | null => {
+  /** `4096`, `A + 2 * B`, `(A)`, `[80, 95] as const` - the only shapes this evaluates. */
+  const evaluate = (n: ts.Node, syms: Record<string, number>): number | number[] | null => {
     if (ts.isParenthesizedExpression(n)) return evaluate(n.expression, syms);
+    // `as const` is the only spelling a readonly tuple budget comes in, so an `as` left unwrapped
+    // here makes every one of them unevaluable. Unwrapping does NOT widen what resolves: an object
+    // literal behind `as const` reaches no case below and still goes RED, which is pinned.
+    if (ts.isAsExpression(n)) return evaluate(n.expression, syms);
     if (ts.isNumericLiteral(n)) return Number(n.text);
     if (KNOWN(syms, n)) return syms[(n as ts.Identifier).text] as number;
+    // A TUPLE is a budget with more than one number in it, not a shape to look away from. The
+    // previous cut sent every array literal to the loud guard, which reads as rigour and in fact
+    // meant the ONE tuple budget in `src/` could not be swept at all - it was reached for the first
+    // time by the widening above and had to be either folded or exempted. Elements must each fold
+    // to a SCALAR: a nested array has no meaning here and goes RED rather than flattening into
+    // something that reads pinned. An EMPTY array is not a budget and stays silent.
+    if (ts.isArrayLiteralExpression(n)) {
+      const parts = n.elements.map((e) => evaluate(e, syms));
+      if (parts.length === 0 || parts.some((v) => typeof v !== 'number')) return null;
+      return parts as number[];
+    }
     if (ts.isBinaryExpression(n)) {
       const l = evaluate(n.left, syms);
       const r = evaluate(n.right, syms);
-      if (l === null || r === null) return null;
+      // Arithmetic is SCALAR-only. JavaScript's answer to `[80, 95] + 1` is a STRING, so folding it
+      // would invent a value and pin the invention.
+      if (typeof l !== 'number' || typeof r !== 'number') return null;
       if (n.operatorToken.kind === ts.SyntaxKind.PlusToken) return l + r;
       if (n.operatorToken.kind === ts.SyntaxKind.AsteriskToken) return l * r;
     }
@@ -923,10 +979,10 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   const budgetsIn = (
     sf: ts.SourceFile,
     syms: Record<string, number> = {},
-  ): { name: string; value: number }[] => {
+  ): { name: string; value: number | number[] }[] => {
     const nodes = walk(sf);
     assertWalked(sf.fileName, nodes);
-    const out: { name: string; value: number }[] = [];
+    const out: { name: string; value: number | number[] }[] = [];
     for (const d of nodes) {
       // WHERE a budget can be declared: an IMMUTABLE declaration, in any of its forms. A class static and a
       // defaulted parameter were both measured shipping unpinned under a test titled "EVERY declared
@@ -951,6 +1007,16 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       if (!(constVar || readonlyProp || ts.isParameter(d) || ts.isEnumMember(d))) continue;
       if (!d.initializer || !ts.isIdentifier(d.name)) continue;
       const init = d.initializer;
+      // A bare ALIAS of a constant this table already knows introduces no NEW number, so it is not
+      // a budget - it is a second name for one, and the number itself is pinned where it is
+      // declared. Widening the sweep to every module made this load-bearing: `safeScalar(v, max =
+      // MAX_SCALAR_CHARS)` and `boundedOrMarker(v, max = MAX_STRUCTURED_SCALAR_CHARS)` are two
+      // defaulted parameters that share the NAME `max` and carry DIFFERENT values, so pinning them
+      // by name is not merely noisy, it is incoherent - one silently overwrote the other in a
+      // name-keyed table. Note the asymmetry this REMOVES: an alias of an unknown symbol was
+      // already skipped (its leaves are not KNOWN), so only aliases of PINNED constants were being
+      // pinned a second time, which is the one case that needs it least.
+      if (ts.isIdentifier(init) && KNOWN(syms, init)) continue;
       const leaves = resultLeaves(init);
       const literals = walk(init).filter(ts.isNumericLiteral);
       // Could this hold a budget? Either it carries a numeric literal, or every name in it is one
@@ -972,7 +1038,23 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
           `(${init.getText(sf)}). Extend \`evaluate\`, or give the budget its own \`const\` as a ` +
           'sum or product of integers - do not leave it unpinned.',
       );
-      out.push({ name: d.name.text, value: value as number });
+      out.push({ name: d.name.text, value: value as number | number[] });
+    }
+    // NAME COLLISION is a silent-wrong in a name-keyed sweep, and sweeping every module rather than
+    // `server.ts` alone is what made it reachable: two immutable declarations of one name in
+    // different scopes both land in `live[name]`, where the last one wins and the other is reported
+    // as pinned while nothing checks it. Equal values are harmless shadowing; DIFFERENT values mean
+    // this sweep cannot say which number it pinned, and that must be loud rather than arbitrary.
+    const seen = new Map<string, number | number[]>();
+    for (const b of out) {
+      if (seen.has(b.name))
+        assert.deepEqual(
+          seen.get(b.name),
+          b.value,
+          `${b.name}: two immutable declarations of this name hold DIFFERENT values, so a ` +
+            'name-keyed pin cannot say which one it covers. Rename one of them',
+        );
+      seen.set(b.name, b.value);
     }
     return out;
   };
@@ -1022,6 +1104,29 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   assert.deepEqual(budgetsIn(parse('\nconst __H = 0x1000;\n')), [{ name: '__H', value: 4096 }]);
   assert.deepEqual(budgetsIn(parse('\nconst __H = 4e3;\n')), [{ name: '__H', value: 4000 }]);
   assert.deepEqual(budgetsIn(parse('\nconst __H = 4096.0;\n')), [{ name: '__H', value: 4096 }]);
+  // TUPLES resolve, including behind `as const`, and an element that is not a scalar still goes RED
+  // rather than folding to something that reads pinned. The `as const` row is the shape `src/`
+  // actually holds; the bare-array row is the shape it does not, and an instrument proved only on
+  // the shape its author just wrote is not proved.
+  assert.deepEqual(budgetsIn(parse('\nconst __H = [4096, 2048];\n')), [
+    { name: '__H', value: [4096, 2048] },
+  ]);
+  assert.deepEqual(budgetsIn(parse('\nconst __H = [80, 95, 100] as const;\n')), [
+    { name: '__H', value: [80, 95, 100] },
+  ]);
+  assert.deepEqual(budgetsIn(parse('\nconst __H = [__A + 1, 2] as const;\n'), { __A: 7 }), [
+    { name: '__H', value: [8, 2] },
+  ]);
+  assert.throws(
+    () => budgetsIn(parse('\nconst __H = [[4096], 2048];\n')),
+    /cannot evaluate/,
+    'a NESTED array must go RED, not flatten into a value that reads pinned',
+  );
+  assert.throws(
+    () => budgetsIn(parse('\nconst __H = [4096, 2048] + 1;\n')),
+    /cannot evaluate/,
+    'tuple arithmetic yields a STRING in JS, so folding it would invent a value',
+  );
   assert.deepEqual(budgetsIn(parse('\nconst __H = 4, __I = 8;\n')), [
     { name: '__H', value: 4 },
     { name: '__I', value: 8 },
@@ -1052,7 +1157,6 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   for (const [shape, probe] of [
     ['object literal', '\nconst __H = { path: 4096 };\n'],
     ['object literal behind a type assertion', '\nconst __H = { path: 4096 } as const;\n'],
-    ['array literal', '\nconst __H = [4096, 2048];\n'],
     ['conditional', '\nconst __H = process.env.X ? 4096 : 2048;\n'],
     ['division', '\nconst __H = 4096 / 2;\n'],
     ['subtraction', '\nconst __H = 4096 - 1;\n'],
@@ -1068,6 +1172,25 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     { name: '__H', value: 352 },
   ]);
   assert.deepEqual(budgetsIn(parse('\nconst __H = someOtherThing;\n')), []);
+  // A bare alias of a KNOWN constant is skipped for the same reason, and that is the row that was
+  // asymmetric before: it used to be pinned under its own name while the unknown alias above was
+  // silent. A default that introduces a NEW number is still swept, which is the half that matters.
+  assert.deepEqual(budgetsIn(parse('\nconst __H = __SEEDED;\n'), { __SEEDED: 96 }), []);
+  assert.deepEqual(budgetsIn(parse('\nfunction f(max = __SEEDED) { return max; }\n'), { __SEEDED: 96 }), []);
+  assert.deepEqual(budgetsIn(parse('\nfunction f(max = 8192) { return max; }\n')), [
+    { name: 'max', value: 8192 },
+  ]);
+  // Two scopes, one name, two values: RED. Same name and the SAME value is ordinary shadowing and
+  // stays silent, because the pin it produces is not ambiguous.
+  assert.throws(
+    () => budgetsIn(parse('\nconst __H = 4;\nfunction f() { const __H = 8; return __H; }\n')),
+    /DIFFERENT values/,
+    'a name-keyed sweep must not silently last-wins two different budgets of one name',
+  );
+  assert.deepEqual(budgetsIn(parse('\nconst __H = 4;\nfunction f() { const __H = 4; return __H; }\n')), [
+    { name: '__H', value: 4 },
+    { name: '__H', value: 4 },
+  ]);
   // A container carrying no digit is still a budget if it names one, so the symbol table is part
   // of the test and not only of the arithmetic.
   assert.throws(
@@ -1084,30 +1207,61 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     '\nconst __H = savedTo.length > 0;\n', // a comparison: a boolean, not a budget
   ])
     assert.deepEqual(budgetsIn(parse(probe), { RENDER_LIMIT: 8 }), [], `must stay silent: ${probe.trim()}`);
-  // A budget written as a SUM in `server.ts` references constants imported from the modules swept
-  // above, so those are the symbols it resolves against.
+  // A budget written as a SUM references constants declared across these modules, so those are the
+  // symbols it resolves against.
   const syms: Record<string, number> = {};
   for (const mod of Object.values(MODULES))
     for (const [k, v] of Object.entries(mod)) if (typeof v === 'number') syms[k] = v;
   // Seeded in TWO passes. `render_fence.ts` argues for expressing a budget as a sum rather than a
-  // literal, and a sum over a constant declared in `server.ts` itself resolved against nothing -
+  // literal, and a sum over a constant declared in the SAME module resolved against nothing -
   // the exact style this file advocates was the style it could not see.
-  for (const b of budgetsIn(serverSf, syms)) syms[b.name] = b.value;
-  const found = budgetsIn(serverSf, syms);
-  assert.ok(found.length > 0, 'the `server.ts` budget matcher found nothing — it is broken, not the file');
-  assert.deepEqual(
-    found.map((f) => f.name).sort(),
-    Object.keys(PINNED['server.ts'] as Record<string, number>).sort(),
-    'server.ts: a numeric constant was added, removed or renamed without pinning its value here — ' +
-      'add it to PINNED, with the value stated as a literal, in the same commit that introduces it',
-  );
-  for (const f of found) {
-    assert.equal(
-      f.value,
-      (PINNED['server.ts'] as Record<string, number>)[f.name],
-      `server.ts: ${f.name} was widened or narrowed`,
+  for (const { sf } of SOURCES())
+    for (const b of budgetsIn(sf, syms)) if (typeof b.value === 'number') syms[b.name] = b.value;
+
+  // EVERY module, read from SOURCE, unioned with its numeric EXPORTS.
+  //
+  // `server.ts` is still read from source for the reason given above - `main()` at module scope
+  // means importing it starts a server - but that reason is why source was POSSIBLE there, never
+  // why it should have been the exception. Reading source only where import was impossible left
+  // the larger of the two holes: an importable module's MODULE-PRIVATE constants are invisible to
+  // the import arm, and no arm read them. Measured: six in `client.ts`, including a character
+  // budget, all unpinned under a test titled EVERY declared budget. That is this test's FOURTH
+  // correction on one axis, and each previous one widened the SET of modules while leaving the
+  // instrument pointed at exports; this one widens the INSTRUMENT.
+  //
+  // The two arms must AGREE where they overlap, which is a positive control on `evaluate` rather
+  // than a redundancy: an exported budget's runtime value is ground truth, so a matcher that folds
+  // `16 * 1024 * 1024` wrongly is caught against the number the module actually holds.
+  let total = 0;
+  for (const { file, sf } of SOURCES()) {
+    const found = budgetsIn(sf, syms);
+    total += found.length;
+    const exported = exportedNums[file] ?? {};
+    for (const f of found)
+      if (Object.prototype.hasOwnProperty.call(exported, f.name))
+        assert.deepEqual(
+          f.value,
+          exported[f.name],
+          `${file}: ${f.name} reads ${f.value} from source but ${exported[f.name]} at runtime — ` +
+            'the budget matcher folded the initializer wrongly, or the module is stale',
+        );
+    const live: Record<string, number | number[]> = { ...exported };
+    for (const f of found) live[f.name] = f.value;
+    const want = PINNED[file] as Record<string, number | number[]>;
+    assert.deepEqual(
+      Object.keys(live).sort(),
+      Object.keys(want).sort(),
+      `${file}: a budget was added, removed, renamed or moved without pinning its value here — ` +
+        'add it to PINNED, with the value stated as a literal, in the same commit that introduces ' +
+        'the constant. Module-private counts: this sweep reads SOURCE, not only exports',
     );
+    for (const [k, v] of Object.entries(want))
+      assert.deepEqual(live[k], v, `${file}: ${k} was widened or narrowed`);
   }
+  // The instrument is proved able to FIND before it is trusted to report a clean sweep. Per-file
+  // was the wrong place for this control - `index.ts` is a barrel and correctly holds none - so it
+  // is asserted over the tree, where a zero genuinely means the matcher is broken.
+  assert.ok(total > 0, 'the budget matcher found nothing anywhere under `src/` — it is broken, not the tree');
 });
 test('EVERY safeField call site carries a PINNED budget - the defect class, mechanised', () => {
   // Four instances of one defect were found by reading: a value fenced at a budget sized for a
@@ -1115,43 +1269,10 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
   // already sweeps `safeScalar` call sites and never swept `safeField` - the function every one of
   // those defects went through. This is that sweep.
   //
-  // Parsed by matching parentheses, not by regex: two call sites span lines and end in a trailing
-  // comma, and a pattern that stops at the first `)` or `,` reports the wrong argument on exactly
-  // the multi-line shape a new site is most likely to be written in.
-  const budgetArgOf = (src: string, fn: string): string[] => {
-    const out: string[] = [];
-    // `fn` then OPTIONAL WHITESPACE then `(`. Matching `fn + '('` literally meant one space hid a
-    // call site completely: `safeField (savedTo, MAX_PATH_FIELD_CHARS)` - a path budget rendered
-    // through the ASCII-collapsing fence, which is the precise pairing this sweep exists to
-    // reject - passed the whole suite. Nothing normalises that space: there is no formatter step
-    // in `npm test` and no lint. The enumeration sweep's span regex already used `\s*\(`, so the
-    // two sweeps disagreed about what a call is, and the gap between them was the green path.
-    const call = new RegExp(fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\(', 'g');
-    for (const m of [...src.matchAll(call)]) {
-      const i = m.index as number;
-      if (/[\w$.]/.test(src[i - 1] ?? '')) continue; // some other `...safeField(`, not this one
-      const needle = m[0];
-      const segs: string[] = [];
-      let depth = 0;
-      let j = i + needle.length - 1;
-      let last = j + 1;
-      for (; j < src.length; j++) {
-        const c = src[j];
-        if (c === '(') depth++;
-        else if (c === ')') {
-          if (--depth === 0) break;
-        } else if (c === ',' && depth === 1) {
-          const seg = src.slice(last, j).trim();
-          if (seg) segs.push(seg);
-          last = j + 1;
-        }
-      }
-      const tail = src.slice(last, j).trim();
-      if (tail) segs.push(tail);
-      out.push(fn + ':' + (segs[segs.length - 1] ?? '(none)'));
-    }
-    return out;
-  };
+  // The parenthesis-matching `budgetArgOf` helper that used to stand here is GONE, not disabled:
+  // the sweep below reads CallExpressions from the AST, where an argument list is already a list
+  // and needs no bracket counting. Its two defects are the reason this sweep is parsed at all, and
+  // both are cited at the read site below rather than kept alive in dead code.
   // Keyed `fence:budget`, because the budget alone was never the whole decision. Both halves shipped
   // wrong together: the budgets were right while seven of them were rendered through the fence for a
   // different value class. Branch at the CALL rather than passing a ternary budget to one fence -
@@ -1216,9 +1337,49 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     // "Back up" line, all wrong since 0.4.0 - while the budgets alone were correctly pinned. The
     // other four were unfenced or did not yet exist, so "shipped at seven" would be an
     // intermediate working-tree state described as a released one.
+    // WHICH budgets are path budgets, as an EXHAUSTIVE table rather than a two-name boolean. The
+    // previous cut asked `budget === 'MAX_PATH_FIELD_CHARS' || budget === 'MAX_PATH_MESSAGE_CHARS'`
+    // and so failed OPEN: a THIRD path budget is not recognised as one, and pairing it with the
+    // ASCII-collapsing `safeField` therefore SATISFIES this invariant instead of violating it. That
+    // is not hypothetical - the URL/IDN fence deferred in this release is exactly that shape, and it
+    // is the hardcoded-list failure this file has now recorded four times, this time inside the
+    // guard written to mechanise the defect class.
+    //
+    // UNCLASSIFIED IS RED. An author adding a budget has to say which class of value it fences,
+    // which is the decision this whole sweep exists to force rather than to infer.
+    const BUDGET_CLASS: Record<string, 'path' | 'other' | 'passthrough'> = {
+      MAX_PATH_FIELD_CHARS: 'path',
+      MAX_PATH_MESSAGE_CHARS: 'path',
+      MAX_ANNOUNCEMENT_FIELD_CHARS: 'other',
+      MAX_JOIN_FIELD_CHARS: 'other',
+      MAX_URL_FIELD_CHARS: 'other',
+      MAX_URL_MESSAGE_CHARS: 'other',
+      MAX_ERROR_CODE_CHARS: 'other',
+      MAX_ERROR_MESSAGE_CHARS: 'other',
+      // Not one of ours: `safeScalar` forwards the CALLER's `max` to `safeField`, so it carries no
+      // value class at this site. The caller's own call site is swept wherever it is written.
+      max: 'passthrough',
+    };
     for (const key of Object.keys(tally)) {
       const [fn, budget] = key.split(':');
-      const isPathBudget = budget === 'MAX_PATH_FIELD_CHARS' || budget === 'MAX_PATH_MESSAGE_CHARS';
+      const cls = BUDGET_CLASS[budget as string];
+      assert.ok(
+        cls !== undefined,
+        `${file}: the budget \`${budget}\` is not classified in BUDGET_CLASS. Say which class of ` +
+          'value it fences - an unclassified budget silently treated as non-path is exactly how a ' +
+          'path budget reaches the ASCII fence with this sweep green',
+      );
+      // The NAME is a CROSS-CHECK, never the mechanism. The table is what decides; this catches the
+      // one-line mistake of classifying an obviously-path budget as `other` to make a new call site
+      // go green. A convention used as a check costs nothing; used as the mechanism it is the
+      // predicate-shaped hole the enumeration sweep above records twice.
+      if (/PATH/.test(budget as string))
+        assert.equal(
+          cls,
+          'path',
+          `${file}: \`${budget}\` is named as a path budget but classified as '${cls}'`,
+        );
+      const isPathBudget = cls === 'path';
       assert.equal(
         isPathBudget,
         fn === 'safePathField',
@@ -1305,6 +1466,28 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     'a method reaching persist() is neither swept nor excluded here. Wrap its call site and add ' +
       'it to CALLS, or record why its failure cannot reach failText and add it to EXCLUDED',
   );
+  // The EXCLUSION'S PREMISE, verified rather than trusted. `EXCLUDED` carries the reason "failures
+  // swallowed locally, never reach failText" - which is a claim about these methods' CALL SITES,
+  // not about the methods themselves, and nothing re-derived it. A call site added later that lets
+  // the failure propagate is exempt BY NAME, and the comment justifying the exemption quietly stops
+  // being true with the suite green. That is this file's recurring shape one more time: a list whose
+  // membership is remembered while its reason is not.
+  const EXCLUDED_SYMS = new Set(
+    reachingDecls
+      .filter((n) => EXCLUDED.includes((n.name as ts.Identifier).text))
+      .map((n) => CHECKER().getSymbolAtLocation(n.name))
+      .filter((sy): sy is ts.Symbol => sy !== undefined),
+  );
+  assert.equal(
+    EXCLUDED_SYMS.size,
+    EXCLUDED.length,
+    'EXCLUDED names a method that does not reach persist() - the exclusion is stale',
+  );
+  // SWALLOWS means the exception does not leave the catch. Any throw in the clause's own scope is
+  // enough to fail this: a CONDITIONAL rethrow propagates on exactly the path the exclusion claims
+  // is impossible, so this is deliberately fail-closed rather than a check for an unconditional one.
+  // Scoped like every other predicate here, so a throw inside a nested callback is not counted.
+  const swallows = (cc: ts.CatchClause): boolean => !walkScope(cc.block).some(ts.isThrowStatement);
   // The WRAPPER, structurally: the catch clause rethrows the binding it caught, marked. The regex cut
   // spelled it `catch \(e\) \{` letter for letter, so `catch(e)` or `catch (err)` read as an
   // UNWRAPPED call site. Fail-closed, so it was never going to ship a hole - but it fails on the
@@ -1399,6 +1582,7 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // in any other module under `src/` shipped unmarked and green, while the commit message claimed
   // both sweeps derived. Every module is swept; the ones that hold no such call must hold none.
   let total = 0;
+  let excluded = 0;
   const perFile: Record<string, number> = {};
   for (const { file, sf } of SOURCES()) {
     const nodes = walk(sf);
@@ -1406,7 +1590,21 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     let seen = 0;
     for (const n of nodes) {
       const s = calleeSymbol(n);
-      if (s === undefined || !SWEPT.has(s)) continue;
+      if (s === undefined) continue;
+      if (EXCLUDED_SYMS.has(s)) {
+        const held = wrappedBy(n);
+        const { line: exLine } = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+        excluded++;
+        assert.ok(
+          held !== null && held.catchClause !== undefined && swallows(held.catchClause),
+          `${file}:${exLine + 1}: ${calleeName(n) || CHECKER().symbolToString(s)}(...) is EXCLUDED ` +
+            'from the wrapper sweep on the grounds that its failure is swallowed locally, but this ' +
+            'call site lets it propagate. Either contain it in a try whose catch swallows, or move ' +
+            'the method out of EXCLUDED and wrap it like every other persist-reaching call',
+        );
+        continue;
+      }
+      if (!SWEPT.has(s)) continue;
       const name = calleeName(n) || CHECKER().symbolToString(s);
       seen++;
       total++;
@@ -1430,6 +1628,18 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 4, 'the number of persist-reaching call sites changed');
+  // POSITIVE CONTROL on the exclusion check above. If `EXCLUDED` names methods that are never
+  // called, the swallow assertion runs zero times and reports a clean pass on nothing - the
+  // vacuous-guard failure this file records at four other sites. A zero here means either the
+  // exclusion is dead and should be deleted, or the call-site resolution is broken; both need a
+  // person, so neither may pass in silence. PINNED like `total`, so a new excluded call site has to
+  // be looked at rather than absorbed.
+  assert.equal(
+    excluded,
+    3,
+    'the number of EXCLUDED persist-reaching call sites changed - each one is exempt from the ' +
+      'wrapper sweep only because its failure is swallowed there, so a new one is a decision',
+  );
 });
 
 test('the error budgets are PINNED, not merely self-consistent', () => {
@@ -2135,6 +2345,49 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       keyPath: 9,
     },
   };
+  // An occurrence is a NAME, however it is spelled. Counting only `ts.isIdentifier` meant
+  // `s['keyPath']` and `process.env['SAIHM_HOME']` were not occurrences at all, so an unfenced
+  // caller-chosen path shipped green through the one sweep whose entire job is catching a value
+  // rendered with NO fence - measured, twice, at 43 pass / 0 fail. Bracket notation is a spelling,
+  // and this file's whole argument is that a guard keyed on spelling is a guard with an exit.
+  //
+  // ANY string literal that spells a seed, in ANY position - which is a widening of the cut above,
+  // and the reason is that the cut above replaced one spelling gate with another. It admitted a seed
+  // literal ONLY as the argument of an ElementAccessExpression, so `Reflect.get(s, 'keyPath')` was
+  // not an occurrence: same value, same caller-chosen path, reached by a different property-access
+  // primitive. MEASURED both ways - planted at a render site in `server.ts`, the previous rule stayed
+  // at 45 pass and this one goes red. Enumerating the property-access primitives that count
+  // (`Reflect.get`, `Object.getOwnPropertyDescriptor`, ...) would be the hand-kept list this file
+  // indicts on every other page, so no position is privileged at all.
+  //
+  // The widening cost NOTHING here, measured: not one ALLOWED count changed, because `src/` spells
+  // these names as identifiers everywhere else. Where it does cost something later - a seed name
+  // appearing inside a message string - the answer is the one this sweep always gives: write it down
+  // with its reason. A false positive costs a line in ALLOWED; a false negative ships an unfenced
+  // path on the line naming the only key to the caller's memory.
+  const seedOf = (n: ts.Node): string | null => {
+    if (ts.isIdentifier(n)) return SEEDS.includes(n.text) ? n.text : null;
+    return ts.isStringLiteralLike(n) && SEEDS.includes(n.text) ? n.text : null;
+  };
+  // Proved on the SPELLINGS, not only on the tree it is about to read. `src/` contains no seed
+  // string literal at all today, so every string-literal branch above is unexercised by the sweep
+  // itself - an instrument whose interesting half never runs on the real input is an instrument
+  // whose interesting half is unproved.
+  for (const [shape, src, want] of [
+    ['identifier', 'const x = keyPath;', 1],
+    ['element access', "const x = s['keyPath'];", 1],
+    ['Reflect.get', "const x = Reflect.get(s, 'keyPath');", 1],
+    ['descriptor lookup', "const x = Object.getOwnPropertyDescriptor(s, 'savedTo');", 1],
+    ['object key', "const x = { 'secretFile': 1 };", 1],
+    ['unrelated name', 'const x = somethingElse;', 0],
+    ['unrelated literal', "const x = 'notASeed';", 0],
+  ] as const)
+    assert.equal(
+      walk(parse(src)).filter((n) => seedOf(n) !== null).length,
+      want,
+      `seedOf is blind to a spelling it must see, or sees one it must not: ${shape}`,
+    );
+
   const found: Record<string, Record<string, number>> = {};
   const where: string[] = [];
   for (const { file, sf } of SOURCES()) {
@@ -2148,19 +2401,6 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       if (fenceOf(n) === null) continue;
       for (const arg of (n as ts.CallExpression).arguments) for (const d of walk(arg)) fenced.add(d);
     }
-    // An occurrence is a NAME, however it is spelled. Counting only `ts.isIdentifier` meant
-    // `s['keyPath']` and `process.env['SAIHM_HOME']` were not occurrences at all, so an unfenced
-    // caller-chosen path shipped green through the one sweep whose entire job is catching a value
-    // rendered with NO fence - measured, twice, at 43 pass / 0 fail. Bracket notation is a spelling,
-    // and this file's whole argument is that a guard keyed on spelling is a guard with an exit.
-    const seedOf = (n: ts.Node): string | null => {
-      if (ts.isIdentifier(n)) return SEEDS.includes(n.text) ? n.text : null;
-      if (!ts.isStringLiteralLike(n) || !SEEDS.includes(n.text)) return null;
-      const p = n.parent;
-      return p !== undefined && ts.isElementAccessExpression(p) && p.argumentExpression === n
-        ? n.text
-        : null;
-    };
     const counts: Record<string, number> = {};
     for (const n of nodes) {
       const seed = seedOf(n);
@@ -2374,21 +2614,89 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
   // certified 5534 bytes, a figure no input can reach - it encoded the same error as the sentence it
   // was written to police, which is how a self-checking number fails. The optimum over a mixed-width
   // alphabet is the dominant root of `bmp/c + astral/c^2 = 1`.
-  const perUnit = Math.log2((bmpMarks + Math.sqrt(bmpMarks * bmpMarks + 4 * astralMarks)) / 2);
-  const bytes = Math.floor((MAX_PATH_FIELD_CHARS * perUnit) / 8);
+  const perUnit = (bmp: number, astral: number): number =>
+    Math.log2((bmp + Math.sqrt(bmp * bmp + 4 * astral)) / 2);
+  const capBytes = (bmp: number, astral: number): number =>
+    Math.floor((MAX_PATH_FIELD_CHARS * perUnit(bmp, astral)) / 8);
+  const bytes = capBytes(bmpMarks, astralMarks);
   const doc = readFileSync(new URL('render_fence.ts', SRC_ROOT), 'utf-8');
-  const claimedMarks = /(\d+) nonspacing marks survive/.exec(doc);
-  const claimedBytes = /(\d+) bytes at\n \* {5}MAX_PATH_FIELD_CHARS/.exec(doc);
-  assert.ok(claimedMarks && claimedBytes, 'safePathField no longer discloses its residual channel at all');
-  assert.equal(
-    Number(claimedMarks[1]),
-    survivingMarks,
-    'the disclosed mark count on `safePathField` is not the measured one',
+  // FLATTENED first. The previous cut matched `bytes at\n \*     MAX_PATH_FIELD_CHARS` - a regex
+  // carrying the comment's line break and indent - so rewrapping the paragraph, which this file
+  // does every review round, silently stopped the check from finding its own figure. A pin whose
+  // failure mode is "matches nothing" is the shape this suite keeps indicting, so the prefix comes
+  // off before anything is matched, and every `exec` below is asserted non-null.
+  // Whitespace COLLAPSED as well as unwrapped: the continuation indent is five spaces, so stripping
+  // only the `*` left runs of them mid-sentence and every single-space pattern below missed. That
+  // was measured, not reasoned - the first run of this pin reported the paragraph as absent.
+  const flat = doc.replace(/\n\s*\*\s?/g, ' ').replace(/\s+/g, ' ');
+  const figure = (re: RegExp, what: string): RegExpExecArray => {
+    const m = re.exec(flat);
+    assert.ok(m, `safePathField no longer discloses ${what} - the paragraph was rewritten and this pin found nothing`);
+    return m as RegExpExecArray;
+  };
+
+  // EVERY figure in the residual paragraph, not two of them. The earlier cut checked the mark COUNT
+  // and the BYTE capacity and left the BMP/astral split and the bits-per-unit rate unchecked - the
+  // two numbers the byte figure is DERIVED from, so the derivation could go stale while the result
+  // it feeds stayed green. A disclosure is only as checked as its least-checked number.
+  assert.equal(Number(figure(/(\d+) nonspacing marks survive/, 'its mark count')[1]), survivingMarks,
+    'the disclosed mark count on `safePathField` is not the measured one. This figure is coupled ' +
+      "to the Unicode data in this Node's ICU, so a runtime upgrade moves it legitimately: if that " +
+      'is what happened, update the paragraph to the measured value rather than loosening this pin ' +
+      '- a disclosure that is allowed to drift from the code is the failure five earlier cuts had');
+  const split = figure(/(\d+) of those marks are BMP and (\d+) are astral/, 'its BMP/astral split');
+  assert.equal(Number(split[1]), bmpMarks, 'the disclosed BMP mark count is not the measured one');
+  assert.equal(Number(split[2]), astralMarks, 'the disclosed astral mark count is not the measured one');
+  assert.equal(Number(figure(/or ([\d.]+) bits per unit/, 'its per-unit rate')[1]),
+    Number(perUnit(bmpMarks, astralMarks).toFixed(2)),
+    'the disclosed per-unit rate on `safePathField` is not the measured one');
+  assert.equal(Number(figure(/(\d+) bytes at MAX_PATH_FIELD_CHARS/, 'its residual capacity')[1]), bytes,
+    'the disclosed residual capacity on `safePathField` is not the measured one');
+
+  // THE CLOSED CHANNELS, on the SAME basis, and MEASURED through the shipped fence rather than
+  // copied off the paragraph. The sentence ranking the residual against them was wrong twice, in
+  // opposite directions, because it compared a channel OPTIMUM against `2048 each` - a figure one
+  // naive encoder achieved. Numbers on two bases do not compare, and the only durable fix is to
+  // derive both sides here: a channel counts as CLOSED only if the fence actually scrubs it, so if
+  // a later cut reopens one, this goes red rather than continuing to cite it as closed.
+  const closed = (cps: number[]): { bmp: number; astral: number } => {
+    let bmp = 0;
+    let astral = 0;
+    for (const cp of cps) {
+      const ch = String.fromCodePoint(cp);
+      if (safePathField(ch, MAX_PATH_FIELD_CHARS) === ch) continue; // survives: not closed
+      if (cp > 0xffff) astral++;
+      else bmp++;
+    }
+    return { bmp, astral };
+  };
+  const range = (a: number, b: number): number[] => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+  const TAG = closed(range(0xe0020, 0xe007e));
+  const VS = closed([...range(0xfe00, 0xfe0f), ...range(0xe0100, 0xe01ef)]);
+  const BLANK = closed([...BLANK_SYMBOLS].map((c) => c.codePointAt(0) as number));
+  assert.deepEqual(
+    [TAG.bmp + TAG.astral, VS.bmp + VS.astral, BLANK.bmp + BLANK.astral],
+    [95, 256, [...BLANK_SYMBOLS].length],
+    'a channel the residual paragraph cites as CLOSED is no longer fully scrubbed by this fence',
   );
-  assert.equal(
-    Number(claimedBytes[1]),
-    bytes,
-    'the disclosed residual capacity on `safePathField` is not the measured one',
+  const tagBytes = capBytes(TAG.bmp, TAG.astral);
+  const vsBytes = capBytes(VS.bmp, VS.astral);
+  const blankBytes = capBytes(BLANK.bmp, BLANK.astral);
+  const three = figure(
+    /CLOSED are (\d+) bytes \(TAG block: (\d+) printable, all astral\), (\d+) \(variation selectors: (\d+) BMP and (\d+) astral\) and (\d+) \(the six blank symbols: (\d+) BMP and (\d+) astral\)\. (\d+) together, against a residual of (\d+)/,
+    'the capacities of the channels it closed',
+  );
+  assert.deepEqual(
+    three.slice(1).map(Number),
+    [tagBytes, TAG.astral, vsBytes, VS.bmp, VS.astral, blankBytes, BLANK.bmp, BLANK.astral, tagBytes + vsBytes + blankBytes, bytes],
+    'the disclosed closed-channel capacities are not the measured ones',
+  );
+  // ...and the RANKING the sentence draws from them. This is the claim a reader acts on, so it is
+  // asserted as an inequality rather than left implied by the numbers above.
+  assert.ok(
+    tagBytes + vsBytes + blankBytes < bytes,
+    'the residual is no longer larger than all three closed channels together - the sentence saying ' +
+      'it is must be rewritten to match, and rewritten from THESE numbers rather than from an encoder measurement',
   );
 });
 

@@ -88,10 +88,11 @@ export const safeField = (s: string, max: number): string => {
  * EXPORTED so the guard can pin the list rather than a copy of it. It was a literal inside the
  * regex below, and the test that checks this fence hand-kept its own two-entry copy: when the list
  * grew from three to five, the copy did not, and three of the five could be deleted from the scrub
- * with the whole suite green. Measured. A hand-kept duplicate of a security-relevant list is the
+ * with the whole suite green. Measured. (Six now — the growth that exposed the duplicate has not
+ * stopped, which is the argument for one home rather than a reason to re-count this sentence.) A hand-kept duplicate of a security-relevant list is the
  * same defect this module's sweeps exist to catch, one level up, so the list has exactly one home.
  */
-export const BLANK_SYMBOLS = '\u2800\u2d7f\u{1D159}\u{13441}\u{13442}';
+export const BLANK_SYMBOLS = '\u2800\u2d7f\u{16FE4}\u{1D159}\u{13441}\u{13442}';
 
 /**
  * Format characters, default-ignorables, every whitespace but the ASCII space, and the blanks above.
@@ -124,17 +125,24 @@ const BLANK_AND_FORMAT = new RegExp(
  *   - every Unicode FORMAT character (Cf) AND every DEFAULT-IGNORABLE one - see below. Neither
  *     class contains the other, so the scrub is their union.
  *   - every WHITESPACE character except the ASCII space, plus the blank SYMBOLS that belong to no
- *     ignorable class: U+2800 BRAILLE PATTERN BLANK, U+2D7F TIFINAGH CONSONANT JOINER, U+1D159
- *     MUSICAL SYMBOL NULL NOTEHEAD, and U+13441/U+13442 EGYPTIAN HIEROGLYPH FULL BLANK and HALF
- *     BLANK. That list is hand-read, which is its disclosed limit - there is no Unicode property for
+ *     ignorable class: U+2800 BRAILLE PATTERN BLANK, U+2D7F TIFINAGH CONSONANT JOINER, U+16FE4
+ *     KHITAN SMALL SCRIPT FILLER, U+1D159 MUSICAL SYMBOL NULL NOTEHEAD, and U+13441/U+13442
+ *     EGYPTIAN HIEROGLYPH FULL BLANK and HALF BLANK.
+ *     That list is hand-read, which is its disclosed limit - there is no Unicode property for
  *     "renders as blank" - and the limit is not theoretical: the list said a fourth would have to be
- *     found the way the first three were, and the next review found two. U+13443 LOST SIGN is the
- *     control and is correctly KEPT; it is a hatched box, which is ink. NOTE the tension, kept
- *     deliberately: U+2D7F is itself a nonspacing mark, so scrubbing it costs a legitimate
- *     Tifinagh path exactly what the residual below says marks must never be made to pay. It
- *     goes because it renders as nothing and joins nothing a reader can see - a judgement about
- *     ONE character, not a rule about marks, written here rather than left to be found as an
- *     inconsistency. See the fifth cut below.
+ *     found the way the first three were, the next review found two, and the review after that
+ *     found a sixth. U+13443 LOST SIGN is the control and is correctly KEPT; it is a hatched box,
+ *     which is ink. NOTE the tension, kept deliberately: U+2D7F is itself a nonspacing mark, so
+ *     scrubbing it costs a legitimate Tifinagh path exactly what the residual below says marks must
+ *     never be made to pay. It goes because it renders as nothing and joins nothing a reader can
+ *     see - a judgement about ONE character, not a rule about marks, written here rather than left
+ *     to be found as an inconsistency. See the fifth cut below.
+ *     U+16FE4 is that judgement APPLIED, and it is how the sixth was found: measured, it has the
+ *     IDENTICAL profile to U+2D7F - nonspacing mark, not Cf, not default-ignorable, not whitespace -
+ *     so scrubbing one while keeping the other was an inconsistency in this list rather than a
+ *     distinction between the characters. Both are marks of scripts a path will effectively never
+ *     be written in, and both render as nothing. The rule for MARKS AT LARGE is unchanged, and the
+ *     residual below still says so.
  *     They ride in the `u`-flagged regex with the format classes, NOT in the BMP-only bracket class
  *     below, because U+1D159 is astral: written `\u1d159` in a class without `u` it is
  *     `\u1d15` followed by a literal `9`, which silently scrubbed every DIGIT 9 out of every path.
@@ -170,7 +178,9 @@ const BLANK_AND_FORMAT = new RegExp(
  *     is not a property of Cf. The VARIATION SELECTORS (U+FE00-FE0F and U+E0100-E01EF, 256 code
  *     points, category Mn) are a strictly larger channel than the TAG block and Cf does not touch
  *     them. Measured through this fence at that cut: 2048 smuggled bytes survive at
- *     MAX_PATH_FIELD_CHARS and 4224 at MAX_PATH_MESSAGE_CHARS.
+ *     MAX_PATH_FIELD_CHARS and 4224 at MAX_PATH_MESSAGE_CHARS. Both are ENCODER measurements - what
+ *     one astral-only encoder achieved - and not the channel optimum, which is 2390. The residual
+ *     paragraph below states why the distinction matters and where mixing the two went wrong.
  *   - the fourth scrubbed the union of Cf and Default_Ignorable and was STILL a narrowing, for the
  *     third time and for the same reason: those classes mean "invisible FORMATTING", which is not
  *     the property being reached for. 16 non-ASCII WHITESPACE code points survived it, together
@@ -193,16 +203,24 @@ const BLANK_AND_FORMAT = new RegExp(
  * default-ignorable classes, all whitespace but the ordinary space, and the blank symbols listed
  * above. What it cannot remove is the rest, and the reason is structural rather than incidental:
  *
- *   - COMBINING MARKS. 1795 nonspacing marks survive, and must - `cafe` in NFD, a Devanagari
+ *   - COMBINING MARKS. 1794 nonspacing marks survive, and must - `cafe` in NFD, a Devanagari
  *     conjunct and a Thai stack are all mark sequences, and a path that loses them is the defect
  *     this function exists to fix. The capacity is per UTF-16 UNIT, because that is what `max`
- *     slices: 1069 of those marks are BMP and 726 are astral at two units each, so the optimum is
- *     the dominant root of `1069/c + 726/c^2 = 1`, or 10.06 bits per unit - 5152 bytes at
- *     MAX_PATH_FIELD_CHARS. Counting 1795 symbols at 10.81 bits gives 5534, which is what an
- *     earlier cut of this paragraph claimed and no input can reach. That is larger than any TWO of
- *     the TAG, variation-selector and blank-glyph channels at 2048 each, and smaller than all three
- *     together - which the same earlier cut also got wrong. It is the residual, it is disclosed,
- *     and it is not closeable here.
+ *     slices: 1069 of those marks are BMP and 725 are astral at two units each, so the optimum is
+ *     the dominant root of `1069/c + 725/c^2 = 1`, or 10.06 bits per unit - 5152 bytes at
+ *     MAX_PATH_FIELD_CHARS. Counting all 1794 symbols at 10.81 bits gives 5534, which is what an
+ *     earlier cut of this paragraph claimed and no input can reach.
+ *     Restated on the SAME basis - channel optimum, bits per UTF-16 unit, at MAX_PATH_FIELD_CHARS -
+ *     the three channels this fence CLOSED are 1681 bytes (TAG block: 95 printable, all astral),
+ *     2390 (variation selectors: 16 BMP and 240 astral) and 867 (the six blank symbols: 2 BMP and
+ *     4 astral). 4938 together, against a residual of 5152, so the residual is larger than ALL
+ *     THREE PUT TOGETHER. Two earlier cuts of this sentence ranked it against `2048 each` and
+ *     disagreed with each other; both were wrong the same way, because 2048 is a figure a naive
+ *     encoder ACHIEVED and 5152 is a capacity, and two numbers on different bases do not compare.
+ *     The fix is to restate the closed channels on the residual's basis, not to re-rank them on the
+ *     encoder's. 5152 is itself a LOWER bound on what leaves here: marks, homoglyphs and runs of
+ *     U+0020 are independent channels and an encoder may use them together.
+ *     It is the residual, it is disclosed, and it is not closeable here.
  *   - HOMOGLYPHS, for the same reason one level up: preserving the characters is what makes a path
  *     openable, and preserving them admits look-alikes.
  *   - U+0020. Paths legitimately contain spaces, so runs of them stay a low-rate channel.

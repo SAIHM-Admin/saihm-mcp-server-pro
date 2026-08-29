@@ -69,10 +69,10 @@ MESSAGES that embed a value in a sentence, which is a different unit, and one of
 those four is a URL rendered by `safeField`.) A path keeps every printable
 character a filesystem can hold, while removing the invisible and blank characters it
 can NAME — which is not the same as all of them, and the difference is the blank-symbol
-list below, hand-read and already grown from three to five in two rounds: line terminators, C0/C1 controls, the union of Unicode `Cf` and
+list below, hand-read and already grown from three to six in three rounds: line terminators, C0/C1 controls, the union of Unicode `Cf` and
 `Default_Ignorable_Code_Point`, every whitespace character except the ordinary
-space, five blank symbols in no ignorable class (`U+2800`, `U+2D7F`, `U+1D159` and
-`U+13441`/`U+13442` EGYPTIAN HIEROGLYPH FULL and HALF BLANK),
+space, six blank symbols in no ignorable class (`U+2800`, `U+2D7F`, `U+16FE4`,
+`U+1D159` and `U+13441`/`U+13442` EGYPTIAN HIEROGLYPH FULL and HALF BLANK),
 `[`/`]`/`|`, `U+2026` and unpaired surrogates. What it does NOT remove, and cannot,
 is set out under "The residual" below.
 
@@ -99,8 +99,12 @@ The scrubbed classes are derived from Unicode rather than listed by hand — wit
 disclosed exception, the blank symbols, because Unicode has no property for "renders
 as blank" and they were found by reading. Hand-listing is what missed U+061C ARABIC
 LETTER MARK in the first place — and the limit is not theoretical: the list shipped as
-three with a note that a fourth would have to be found the same way, and the next
-review found two more. `U+13443 LOST SIGN` is the control and is correctly KEPT, being
+three with a note that a fourth would have to be found the same way, the next
+review found two more, and the round after that found a sixth — `U+16FE4 KHITAN SMALL
+SCRIPT FILLER`, which has the measured profile of `U+2D7F` exactly (nonspacing mark,
+not `Cf`, not default-ignorable, not whitespace), so keeping one while scrubbing the
+other was an inconsistency in the list rather than a distinction between the
+characters. `U+13443 LOST SIGN` is the control and is correctly KEPT, being
 a hatched box rather than a blank. The scope then widened again, and
 the reason is worth stating: `Bidi_Control` is 12 code points, `Cf` is 170, and the
 158 left behind included the 96 code points of the TAG block, U+E0020–U+E007F, 95
@@ -139,16 +143,20 @@ does not eliminate the channel.**
 
 What cannot be removed, and why it is structural rather than an oversight:
 
-- **Combining marks.** 1,795 nonspacing marks survive, and must: `café` in NFD, a
+- **Combining marks.** 1,794 nonspacing marks survive, and must: `café` in NFD, a
   Devanagari conjunct and a Thai stack are all mark sequences, and a path that loses
   them is precisely the defect this release exists to fix. The capacity is per UTF-16
-  UNIT, because that is what the budget slices: 1,069 of those marks are BMP and 726
+  UNIT, because that is what the budget slices: 1,069 of those marks are BMP and 725
   are astral at two units each, giving 10.06 bits per unit — **5,152 bytes at
-  `MAX_PATH_FIELD_CHARS`**. That is larger than any TWO of the TAG, variation-selector
-  and blank-glyph channels at 2,048 each, and smaller than all three together. An
-  earlier draft counted 1,795 symbols at 10.8 bits and claimed 5,534 bytes and "larger
-  than all three put together"; both were wrong, and the test meant to police the
-  figure had encoded the same error.
+  `MAX_PATH_FIELD_CHARS`**. Measured on that same basis, the three channels this fence
+  CLOSES are 1,681 bytes (TAG block), 2,390 (variation selectors) and 867 (the blank
+  symbols): 4,938 together, so the residual is larger than **all three put together**.
+  Two earlier drafts ranked it against "2,048 each" and disagreed with each other —
+  first claiming "larger than all three", then "larger than any two and smaller than
+  all three". Both were wrong the same way: 2,048 is a figure one naive encoder
+  ACHIEVED and 5,152 is a capacity, and numbers on two bases do not compare. The test
+  meant to police these figures had encoded the same error, and now derives every one
+  of them from the shipped fence.
 - **Homoglyphs**, for the same reason one level up: preserving the characters is what
   makes a path openable, and preserving them admits look-alikes.
 - **`U+0020`.** Paths legitimately contain spaces, so runs of them remain a low-rate
