@@ -926,8 +926,32 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
    * transparent is what produced the false positives above, and `src/` contains no budget in that
    * shape. Stated rather than guarded, because the honest fix is a type checker.
    */
-  const resultLeaves = (n: ts.Node): ts.Identifier[] | null => {
-    if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n)) return resultLeaves(n.expression);
+  // Wrappers that change no VALUE, stripped in ONE place because two readers disagreeing about
+  // which ones exist is how a shape reaches neither the folder nor the loud guard. `as const` is
+  // the only spelling a readonly tuple budget comes in. `satisfies` was invisible: it reached no
+  // branch in either function, so `= 4096 satisfies number` returned null from `resultLeaves` and
+  // was skipped IN SILENCE - past the guard whose whole purpose is that nothing is skipped in
+  // silence. `Object.freeze`/`Object.seal` RETURN their argument, so a budget behind either is the
+  // budget; they are the only calls treated as transparent, and by contract rather than by guess -
+  // the general rule that a call is opaque still holds for every other callee. Unwrapping does not
+  // widen what RESOLVES: an object literal behind any of them still reaches no folding case and
+  // still goes RED.
+  const unwrap = (n: ts.Node): ts.Node => {
+    if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isSatisfiesExpression(n))
+      return unwrap(n.expression);
+    if (
+      ts.isCallExpression(n) &&
+      n.arguments.length === 1 &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === 'Object' &&
+      (n.expression.name.text === 'freeze' || n.expression.name.text === 'seal')
+    )
+      return unwrap(n.arguments[0]);
+    return n;
+  };
+  const resultLeaves = (n0: ts.Node): ts.Identifier[] | null => {
+    const n = unwrap(n0);
     if (ts.isNumericLiteral(n)) return [];
     if (ts.isIdentifier(n)) return [n];
     if (ts.isCallExpression(n) || ts.isNewExpression(n)) return null;
@@ -946,12 +970,8 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   };
 
   /** `4096`, `A + 2 * B`, `(A)`, `[80, 95] as const` - the only shapes this evaluates. */
-  const evaluate = (n: ts.Node, syms: Record<string, number>): number | number[] | null => {
-    if (ts.isParenthesizedExpression(n)) return evaluate(n.expression, syms);
-    // `as const` is the only spelling a readonly tuple budget comes in, so an `as` left unwrapped
-    // here makes every one of them unevaluable. Unwrapping does NOT widen what resolves: an object
-    // literal behind `as const` reaches no case below and still goes RED, which is pinned.
-    if (ts.isAsExpression(n)) return evaluate(n.expression, syms);
+  const evaluate = (n0: ts.Node, syms: Record<string, number>): number | number[] | null => {
+    const n = unwrap(n0);
     if (ts.isNumericLiteral(n)) return Number(n.text);
     if (KNOWN(syms, n)) return syms[(n as ts.Identifier).text] as number;
     // A TUPLE is a budget with more than one number in it, not a shape to look away from. The
@@ -976,6 +996,15 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     }
     return null;
   };
+  // Declared at MODULE scope, which is the only place a name is visible to a LATER declaration in
+  // the same file. A parameter default is not: two functions may each take a `max`, and letting one
+  // resolve the other is the intra-file spelling of the cross-module collision the driver below
+  // now refuses.
+  const moduleScope = (d: ts.Node): boolean =>
+    ts.isVariableDeclaration(d) &&
+    ts.isVariableDeclarationList(d.parent) &&
+    ts.isVariableStatement(d.parent.parent) &&
+    ts.isSourceFile(d.parent.parent.parent);
   const budgetsIn = (
     sf: ts.SourceFile,
     syms: Record<string, number> = {},
@@ -983,6 +1012,9 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     const nodes = walk(sf);
     assertWalked(sf.fileName, nodes);
     const out: { name: string; value: number | number[] }[] = [];
+    // Names this file introduces, as it introduces them. Seeded FROM `syms` and never written back
+    // into it - resolution is per file, and this is the local half of that.
+    const scope: Record<string, number> = { ...syms };
     for (const d of nodes) {
       // WHERE a budget can be declared: an IMMUTABLE declaration, in any of its forms. A class static and a
       // defaulted parameter were both measured shipping unpinned under a test titled "EVERY declared
@@ -1004,19 +1036,27 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       // mutable class property are all deliberately OUT, for one reason rather than three: a binding
       // that can change is not a budget, and treating an ordinary counter as one gives its author
       // advice they cannot act on. That was measured once on `let joinAttempts = 0`.
-      if (!(constVar || readonlyProp || ts.isParameter(d) || ts.isEnumMember(d))) continue;
-      if (!d.initializer || !ts.isIdentifier(d.name)) continue;
-      const init = d.initializer;
-      // A bare ALIAS of a constant this table already knows introduces no NEW number, so it is not
-      // a budget - it is a second name for one, and the number itself is pinned where it is
-      // declared. Widening the sweep to every module made this load-bearing: `safeScalar(v, max =
-      // MAX_SCALAR_CHARS)` and `boundedOrMarker(v, max = MAX_STRUCTURED_SCALAR_CHARS)` are two
-      // defaulted parameters that share the NAME `max` and carry DIFFERENT values, so pinning them
-      // by name is not merely noisy, it is incoherent - one silently overwrote the other in a
-      // name-keyed table. Note the asymmetry this REMOVES: an alias of an unknown symbol was
-      // already skipped (its leaves are not KNOWN), so only aliases of PINNED constants were being
-      // pinned a second time, which is the one case that needs it least.
-      if (ts.isIdentifier(init) && KNOWN(syms, init)) continue;
+      // A `static get MAX_X() { return 4096; }` is exactly as immutable as a `static readonly`,
+      // and was invisible: it carries no `initializer`, so it reached the loud guard no more than
+      // it reached the folder. Its single returned expression IS its initializer. A getter that
+      // computes rather than returns is not a declared budget - unless it holds a numeric literal
+      // anyway, which is a budget in a shape this cannot pin and must therefore be loud.
+      const getAcc = ts.isGetAccessorDeclaration(d) ? d : undefined;
+      const only =
+        getAcc?.body?.statements.length === 1 ? getAcc.body.statements[0] : undefined;
+      const returned =
+        only !== undefined && ts.isReturnStatement(only) ? only.expression : undefined;
+      if (getAcc !== undefined && returned === undefined) {
+        assert.ok(
+          getAcc.body === undefined || walk(getAcc.body).filter(ts.isNumericLiteral).length === 0,
+          `${getAcc.name.getText(sf)}: an accessor holds a number in a body this matcher cannot ` +
+            'evaluate. Give the budget its own `const` and return that, or drop the literal',
+        );
+        continue;
+      }
+      if (!(constVar || readonlyProp || ts.isParameter(d) || ts.isEnumMember(d) || getAcc)) continue;
+      const init = getAcc !== undefined ? returned : d.initializer;
+      if (init === undefined) continue;
       const leaves = resultLeaves(init);
       const literals = walk(init).filter(ts.isNumericLiteral);
       // Could this hold a budget? Either it carries a numeric literal, or every name in it is one
@@ -1026,19 +1066,47 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       const couldHold =
         leaves !== null &&
         (literals.length > 0 || leaves.length > 0) &&
-        leaves.every((l) => KNOWN(syms, l));
+        leaves.every((l) => KNOWN(scope, l));
       if (!couldHold) continue;
-      const value = evaluate(init, syms);
+      // A binding PATTERN is not a name a name-keyed sweep can pin, and it was skipped without a
+      // word. Gated on `couldHold`, so unpacking anything that is not a budget stays silent.
+      const nm = ts.isIdentifier(d.name) ? d.name : undefined;
+      if (nm === undefined)
+        assert.fail(
+          `${d.name.getText(sf)}: a budget is declared through a binding pattern, which this ` +
+            'name-keyed sweep cannot pin. Give it its own named `const`',
+        );
+      // A bare ALIAS of a constant this table already knows introduces no NEW number, so it is not
+      // a budget - it is a second name for one, and the number itself is pinned where it is
+      // declared. Widening the sweep to every module made this load-bearing: `safeScalar(v, max =
+      // MAX_SCALAR_CHARS)` and `boundedOrMarker(v, max = MAX_STRUCTURED_SCALAR_CHARS)` are two
+      // defaulted parameters that share the NAME `max` and carry DIFFERENT values, so pinning them
+      // by name is not merely noisy, it is incoherent - one silently overwrote the other in a
+      // name-keyed table. Note the asymmetry this REMOVES: an alias of an unknown symbol was
+      // already skipped (its leaves are not KNOWN), so only aliases of PINNED constants were being
+      // pinned a second time, which is the one case that needs it least.
+      if (ts.isIdentifier(init) && KNOWN(scope, init)) {
+        // Not PINNED - but it must still RESOLVE, and that is the half the first cut of this skip
+        // got wrong. Keeping the alias out of the table meant `const BASE = MAX_COUNTER_CHARS;`
+        // followed by `const MAX_E_CHARS = BASE * 2048;` had a leaf the table did not know, failed
+        // `leaves.every(KNOWN)`, and was skipped IN SILENCE: two hops laundered a real budget out
+        // of a sweep whose title promises every one of them. The skip was mine, and so was the
+        // hole it opened.
+        if (moduleScope(d)) scope[nm.text] = scope[init.text];
+        continue;
+      }
+      const value = evaluate(init, scope);
       // A shape this cannot evaluate must go RED, never be skipped: silent misses are how this
       // instrument was wrong four times. There is no character class left to widen - if this fires,
       // the initializer genuinely holds a number in a shape `evaluate` does not implement.
       assert.ok(
         value !== null,
-        `${d.name.text}: initializer holds a budget in a shape this matcher cannot evaluate ` +
+        `${nm.text}: initializer holds a budget in a shape this matcher cannot evaluate ` +
           `(${init.getText(sf)}). Extend \`evaluate\`, or give the budget its own \`const\` as a ` +
           'sum or product of integers - do not leave it unpinned.',
       );
-      out.push({ name: d.name.text, value: value as number | number[] });
+      out.push({ name: nm.text, value: value as number | number[] });
+      if (typeof value === 'number' && moduleScope(d)) scope[nm.text] = value;
     }
     // NAME COLLISION is a silent-wrong in a name-keyed sweep, and sweeping every module rather than
     // `server.ts` alone is what made it reachable: two immutable declarations of one name in
@@ -1208,15 +1276,60 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   ])
     assert.deepEqual(budgetsIn(parse(probe), { RENDER_LIMIT: 8 }), [], `must stay silent: ${probe.trim()}`);
   // A budget written as a SUM references constants declared across these modules, so those are the
-  // symbols it resolves against.
-  const syms: Record<string, number> = {};
-  for (const mod of Object.values(MODULES))
-    for (const [k, v] of Object.entries(mod)) if (typeof v === 'number') syms[k] = v;
-  // Seeded in TWO passes. `render_fence.ts` argues for expressing a budget as a sum rather than a
-  // literal, and a sum over a constant declared in the SAME module resolved against nothing -
-  // the exact style this file advocates was the style it could not see.
-  for (const { sf } of SOURCES())
-    for (const b of budgetsIn(sf, syms)) if (typeof b.value === 'number') syms[b.name] = b.value;
+  // symbols it resolves against - resolved PER FILE, the way the compiler resolves a name, rather
+  // than against one flat union of every module.
+  //
+  // That union was a silent-wrong, and a large one. Two modules declaring one name both wrote
+  // `syms[name]`; the last file swept won, and the file that lost had its budgets folded against a
+  // number FROM ANOTHER MODULE. Measured on a planted pair - `PROBE_UNIT` 512 in `client.ts` and
+  // 0.25 in `server.ts`, each pinned as an author adding a constant would - a module-private
+  // `MAX_COUNTER_CHARS` read 32 here while the module actually held 65536. A 2048x widening under a
+  // green suite, in the arm that reads SOURCE and so has no runtime export to be checked against.
+  // The collision guard inside `budgetsIn` cannot reach it by construction: that guard is per file,
+  // and this collision is BETWEEN files.
+  const byFile = new Map(SOURCES().map(({ file, sf }) => [file, sf]));
+  // Only NAMED VALUE imports from a sibling module in this package. A name a file did not declare
+  // is resolvable in it exactly when the file actually imports it; `import type` carries no number,
+  // and a package or `node:` specifier has no table here.
+  const importsOf = (sf: ts.SourceFile): { from: string; local: string; exported: string }[] => {
+    const out: { from: string; local: string; exported: string }[] = [];
+    for (const st of sf.statements) {
+      if (!ts.isImportDeclaration(st) || st.importClause === undefined) continue;
+      if (st.importClause.isTypeOnly || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+      const spec = st.moduleSpecifier.text;
+      if (!spec.startsWith('./') || !spec.endsWith('.js')) continue;
+      const nb = st.importClause.namedBindings;
+      if (nb === undefined || !ts.isNamedImports(nb)) continue;
+      const from = spec.slice('./'.length, -'.js'.length) + '.ts';
+      for (const el of nb.elements)
+        if (!el.isTypeOnly)
+          out.push({ from, local: el.name.text, exported: (el.propertyName ?? el.name).text });
+    }
+    return out;
+  };
+  const own: Record<string, Record<string, number>> = {};
+  for (const { file } of SOURCES()) own[file] = {};
+  for (const [file, mod] of Object.entries(MODULES))
+    for (const [k, v] of Object.entries(mod)) if (typeof v === 'number') (own[file] ??= {})[k] = v;
+  // What one file can see: what it imports, then what it declares - declarations last, because a
+  // local binding is what the compiler resolves a name to.
+  const visible = (file: string): Record<string, number> => {
+    const t: Record<string, number> = {};
+    const sf = byFile.get(file);
+    if (sf !== undefined)
+      for (const im of importsOf(sf)) {
+        const v = own[im.from]?.[im.exported];
+        if (typeof v === 'number') t[im.local] = v;
+      }
+    return { ...t, ...own[file] };
+  };
+  // Seeded in TWO passes over each file. `render_fence.ts` argues for expressing a budget as a sum
+  // rather than a literal, and a sum over a constant declared in the SAME module resolved against
+  // nothing - the exact style this file advocates was the style it could not see.
+  for (let pass = 0; pass < 2; pass++)
+    for (const { file, sf } of SOURCES())
+      for (const b of budgetsIn(sf, visible(file)))
+        if (typeof b.value === 'number') own[file][b.name] = b.value;
 
   // EVERY module, read from SOURCE, unioned with its numeric EXPORTS.
   //
@@ -1234,7 +1347,7 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   // `16 * 1024 * 1024` wrongly is caught against the number the module actually holds.
   let total = 0;
   for (const { file, sf } of SOURCES()) {
-    const found = budgetsIn(sf, syms);
+    const found = budgetsIn(sf, visible(file));
     total += found.length;
     const exported = exportedNums[file] ?? {};
     for (const f of found)
