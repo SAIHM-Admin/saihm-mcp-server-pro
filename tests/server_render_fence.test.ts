@@ -846,7 +846,7 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   // as one that appears or vanishes. The per-name assertions above are kept rather than folded in:
   // they carry the reasoning for their particular values, and this test deliberately carries none,
   // so that it never becomes the place a value gets justified.
-  const PINNED: Record<string, Record<string, number | number[]>> = {
+  const PINNED: Record<string, Record<string, number | number[] | bigint>> = {
     'render_fence.ts': {
       MAX_SCALAR_CHARS: 64,
       ABBREV_CHARS: 16,
@@ -860,6 +860,12 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     },
     'client.ts': {
       MAX_ERROR_CODE_CHARS: 64,
+      // A BIGINT, and the first one this sweep could see. It shipped unpinned through nine review
+      // rounds because every literal test in the matcher named `isNumericLiteral`: a declared wire
+      // ceiling, in no table and in no `found` result. Stated as the literal it evaluates to rather
+      // than as `(1n << 64n) - 1n`, because a pin that repeats the expression cannot catch an edit
+      // to the expression.
+      MAX_SEQ: 18446744073709551615n,
       MAX_SHARED_ANNOUNCEMENTS: 256,
       MAX_ANNOUNCEMENT_FIELD_CHARS: 64,
       MAX_ANNOUNCEMENT_TOTAL_CHARS: 32 * 1024,
@@ -988,7 +994,7 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   // And a budget is decided by what its initializer IS: an expression whose value leaves are all
   // numeric literals or constants this table already knows. Anything else is a runtime computation
   // and is correctly none of this sweep's business.
-  const KNOWN = (syms: Record<string, number>, n: ts.Node): boolean =>
+  const KNOWN = (syms: Record<string, number | bigint>, n: ts.Node): boolean =>
     ts.isIdentifier(n) && Object.prototype.hasOwnProperty.call(syms, n.text);
   /**
    * Identifiers that can contribute to the VALUE, or `null` when the value comes out of a call and
@@ -1031,7 +1037,7 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   };
   const resultLeaves = (n0: ts.Node): ts.Identifier[] | null => {
     const n = unwrap(n0);
-    if (ts.isNumericLiteral(n)) return [];
+    if (ts.isNumericLiteral(n) || ts.isBigIntLiteral(n)) return [];
     if (ts.isIdentifier(n)) return [n];
     if (ts.isCallExpression(n) || ts.isNewExpression(n)) return null;
     const kids: ts.Node[] = ts.isConditionalExpression(n)
@@ -1049,10 +1055,19 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   };
 
   /** `4096`, `A + 2 * B`, `(A)`, `[80, 95] as const` - the only shapes this evaluates. */
-  const evaluate = (n0: ts.Node, syms: Record<string, number>): number | number[] | null => {
+  const evaluate = (
+    n0: ts.Node,
+    syms: Record<string, number | bigint>,
+  ): number | number[] | bigint | null => {
     const n = unwrap(n0);
     if (ts.isNumericLiteral(n)) return Number(n.text);
-    if (KNOWN(syms, n)) return syms[(n as ts.Identifier).text] as number;
+    // A BIGINT budget was invisible, and one shipped unpinned: `MAX_SEQ = (1n << 64n) - 1n` is a
+    // declared wire ceiling that no arm of this sweep could see, because every literal test named
+    // `isNumericLiteral` and every fold ran in `number`. It is not representable in `number` either
+    // - 2^64-1 is past `MAX_SAFE_INTEGER` - so folding it there would have pinned a rounded value,
+    // which is worse than missing it. `text` carries the trailing `n`.
+    if (ts.isBigIntLiteral(n)) return BigInt(n.text.slice(0, -1));
+    if (KNOWN(syms, n)) return syms[(n as ts.Identifier).text] as number | bigint;
     // A TUPLE is a budget with more than one number in it, not a shape to look away from. The
     // previous cut sent every array literal to the loud guard, which reads as rigour and in fact
     // meant the ONE tuple budget in `src/` could not be swept at all - it was reached for the first
@@ -1067,6 +1082,16 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     if (ts.isBinaryExpression(n)) {
       const l = evaluate(n.left, syms);
       const r = evaluate(n.right, syms);
+      // Bigint arithmetic is kept SEPARATE rather than coerced: mixing the two throws at runtime in
+      // JavaScript and rounds if either side is converted, so a mixed expression is not a shape this
+      // folds - it falls through to the loud guard below.
+      if (typeof l === 'bigint' && typeof r === 'bigint') {
+        if (n.operatorToken.kind === ts.SyntaxKind.PlusToken) return l + r;
+        if (n.operatorToken.kind === ts.SyntaxKind.MinusToken) return l - r;
+        if (n.operatorToken.kind === ts.SyntaxKind.AsteriskToken) return l * r;
+        if (n.operatorToken.kind === ts.SyntaxKind.LessThanLessThanToken) return l << r;
+        return null;
+      }
       // Arithmetic is SCALAR-only. JavaScript's answer to `[80, 95] + 1` is a STRING, so folding it
       // would invent a value and pin the invention.
       if (typeof l !== 'number' || typeof r !== 'number') return null;
@@ -1084,16 +1109,47 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     ts.isVariableDeclarationList(d.parent) &&
     ts.isVariableStatement(d.parent.parent) &&
     ts.isSourceFile(d.parent.parent.parent);
+  /**
+   * Names this file ever ASSIGNS to, by any spelling: `x = 1`, `x += 1`, `x++`, `--x`.
+   *
+   * `let` is a keyword, not a measurement. The sweep excluded every `let` on the argument that a
+   * mutable binding is not a budget, which is true of `let joinAttempts = 0` and false of a ceiling
+   * that simply was not spelled `const` - and the exclusion was ASYMMETRIC, because the runtime arm
+   * picks an `export let` up as an ordinary number while a module-private one was visible to no arm
+   * at all. Reassignment is the property the argument was actually about, and it is decidable here.
+   */
+  const reassignedIn = (sf: ts.SourceFile): Set<string> => {
+    const names = new Set<string>();
+    for (const n of walk(sf)) {
+      if (
+        ts.isBinaryExpression(n) &&
+        ts.isIdentifier(n.left) &&
+        (n.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
+          (n.operatorToken.kind >= ts.SyntaxKind.FirstCompoundAssignment &&
+            n.operatorToken.kind <= ts.SyntaxKind.LastCompoundAssignment))
+      )
+        names.add(n.left.text);
+      if (
+        (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+        ts.isIdentifier(n.operand) &&
+        (n.operator === ts.SyntaxKind.PlusPlusToken ||
+          n.operator === ts.SyntaxKind.MinusMinusToken)
+      )
+        names.add(n.operand.text);
+    }
+    return names;
+  };
   const budgetsIn = (
     sf: ts.SourceFile,
-    syms: Record<string, number> = {},
-  ): { name: string; value: number | number[] }[] => {
+    syms: Record<string, number | bigint> = {},
+  ): { name: string; value: number | number[] | bigint }[] => {
     const nodes = walk(sf);
     assertWalked(sf.fileName, nodes);
-    const out: { name: string; value: number | number[] }[] = [];
+    const out: { name: string; value: number | number[] | bigint }[] = [];
     // Names this file introduces, as it introduces them. Seeded FROM `syms` and never written back
     // into it - resolution is per file, and this is the local half of that.
-    const scope: Record<string, number> = { ...syms };
+    const scope: Record<string, number | bigint> = { ...syms };
+    const reassigned = reassignedIn(sf);
     for (const d of nodes) {
       // WHERE a budget can be declared: an IMMUTABLE declaration, in any of its forms. A class static and a
       // defaulted parameter were both measured shipping unpinned under a test titled "EVERY declared
@@ -1106,6 +1162,38 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
         d.parent !== undefined &&
         ts.isVariableDeclarationList(d.parent) &&
         (d.parent.flags & ts.NodeFlags.Const) !== 0;
+      // A module-scope `let` is still NOT a budget - the paragraph above argues that and it stands -
+      // but it has to RESOLVE, and leaving it unresolvable was the same two-hop laundering the alias
+      // branch below already closed for `const`. `let BASE = 1024;` followed by
+      // `const MAX_X = BASE * 64;` left `BASE` unknown, so `MAX_X` failed `leaves.every(KNOWN)` and
+      // was skipped IN SILENCE: 65536 shipped unpinned under a test titled EVERY declared budget.
+      // Closing it for `const` and not for `let` is this round's pattern - last round's fix applied
+      // to one arm - so the fix is symmetry, not a second special case.
+      //
+      // Why resolving is safe where EMITTING would not be: a mutable binding can be reassigned, so
+      // its value is not a promise this sweep can pin; but a `const` DERIVED from it is fixed at the
+      // value the binding held at module init, which is what the initializer here gives.
+      if (
+        ts.isVariableDeclaration(d) &&
+        d.parent !== undefined &&
+        ts.isVariableDeclarationList(d.parent) &&
+        !constVar &&
+        moduleScope(d)
+      ) {
+        if (ts.isIdentifier(d.name) && d.initializer !== undefined) {
+          const mv = evaluate(d.initializer, scope);
+          if (typeof mv === 'number' || typeof mv === 'bigint') {
+            scope[d.name.text] = mv;
+            // ...and if nothing in the file ever ASSIGNS to it, it is a `const` in all but keyword,
+            // so it is emitted and must be pinned like one. This is the half that closes the
+            // asymmetry: an `export let` was already pinned through the runtime arm, so a
+            // module-private one being invisible meant the sweep's answer depended on whether the
+            // author had exported the number rather than on what the number was.
+            if (!reassigned.has(d.name.text)) out.push({ name: d.name.text, value: mv });
+          }
+        }
+        continue;
+      }
       const readonlyProp =
         ts.isPropertyDeclaration(d) &&
         (d.modifiers ?? []).some(
@@ -1137,7 +1225,49 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       const init = getAcc !== undefined ? returned : d.initializer;
       if (init === undefined) continue;
       const leaves = resultLeaves(init);
-      const literals = walk(init).filter(ts.isNumericLiteral);
+      const literals = walk(init).filter((x) => ts.isNumericLiteral(x) || ts.isBigIntLiteral(x));
+      // A CALL in the value path was a SILENT skip, and the docblock three paragraphs up calls that
+      // opaque on purpose - correctly, for `const mins = n / 60`, where flagging was a measured
+      // false positive. But `const MAX_X = Number(process.env.X ?? 65536);` is a stated limit whose
+      // number nothing pins, and it took the same silent exit.
+      //
+      // The rule is therefore NARROW, and each clause pays for itself against this tree: MODULE
+      // SCOPE and `const`, because every budget here is declared that way and parameters/properties
+      // are where the opaque computations live; NOT function-valued, because `walk` descends into a
+      // body and every arrow-function constant in `src/` carries a numeric literal somewhere inside
+      // it - the unscoped rule went red on seven of them; and carrying a literal AT ALL, because
+      // `Symbol('saihm.pathBearingMessage')` is a call with no number and none of our business.
+      // Measured against `src/` as it stands, this fires on nothing.
+      const fnValued =
+        ts.isArrowFunction(init) || ts.isFunctionExpression(init) || ts.isClassExpression(init);
+      // ...and what the rule fires ON, which took three tries because this file's OWN fixtures
+      // rejected the first two. "Carries a literal" fires on `const __L = "x".length > 0` - a
+      // COMPARISON, whose literal can never be a budget because the value is a boolean. "Contains a
+      // call" fires on `announcements.slice(0, RENDER_LIMIT)`, the position argument the docblock
+      // above already names as none of our business, and "cannot fold" fires on `process.argv[2]`,
+      // an INDEX. Each was a real false positive with no exit from the advice it gave, which is the
+      // failure mode this sweep is on record for.
+      //
+      // What actually separates `Number(process.env.X ?? 65536)` from all three is not the call: it
+      // is the DEFAULT. A literal on the right of `??` or `||` is the value the constant TAKES when
+      // the environment does not supply one - a stated limit, in the sweep's own words, and the one
+      // shape here where "give it its own `const`" is advice an author can act on. A position, an
+      // index and a comparison have no such reading.
+      const defaulted = walk(init).some(
+        (x) =>
+          ts.isBinaryExpression(x) &&
+          (x.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+            x.operatorToken.kind === ts.SyntaxKind.BarBarToken) &&
+          typeof evaluate(x.right, scope) === 'number',
+      );
+      if (leaves === null && constVar && moduleScope(d) && !fnValued && defaulted)
+        assert.ok(
+          false,
+          `${ts.isIdentifier(d.name) ? d.name.text : d.name.getText(sf)}: a module-scope constant ` +
+            `takes its value from a call with a DEFAULT this sweep cannot pin ` +
+            `(${init.getText(sf)}). Give the default its own \`const\` and pin it there - a ` +
+            'budget that is only stated inside an expression is not a declared budget.',
+        );
       // Could this hold a budget? Either it carries a numeric literal, or every name in it is one
       // this table already knows. `{ path: MAX_PATH_FIELD_CHARS }` has no digit and is still a
       // budget; `announcements.slice(0, RENDER_LIMIT)` has a digit and a name that is NOT a budget,
@@ -1184,8 +1314,9 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
           `(${init.getText(sf)}). Extend \`evaluate\`, or give the budget its own \`const\` as a ` +
           'sum or product of integers - do not leave it unpinned.',
       );
-      out.push({ name: nm.text, value: value as number | number[] });
-      if (typeof value === 'number' && moduleScope(d)) scope[nm.text] = value;
+      out.push({ name: nm.text, value: value as number | number[] | bigint });
+      if ((typeof value === 'number' || typeof value === 'bigint') && moduleScope(d))
+        scope[nm.text] = value;
     }
     // NAME COLLISION is a silent-wrong in a name-keyed sweep, and sweeping every module rather than
     // `server.ts` alone is what made it reachable: two immutable declarations of one name in
@@ -1295,6 +1426,45 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   assert.deepEqual(budgetsIn(parse('\nconst __L = "x".length > 0, __M = 65536;\n')), [
     { name: '__M', value: 65536 },
   ]);
+  // A CALL in the value path used to take the same silent exit as the boolean above. It is LOUD
+  // now, and the two fixtures are kept adjacent because the second is what bounds the first: the
+  // rule must fire on a stated limit and stay quiet on a comparison, and only the pair shows that.
+  assert.throws(
+    () => budgetsIn(parse('\nconst __N = Number(process.env.X ?? 65536);\n')),
+    /DEFAULT this sweep cannot pin/,
+    'a module-scope constant whose number is a stated default must be LOUD, not skipped',
+  );
+  assert.deepEqual(budgetsIn(parse("\nconst __N2 = Symbol('x');\n")), []);
+  // The three shapes that BOUND the rule above, kept beside the one that trips it so a later
+  // widening has to answer all four at once: an INDEX, a POSITION argument, and a comparison
+  // (asserted a few lines up). None is a budget; each defeated an earlier cut of the condition.
+  assert.deepEqual(budgetsIn(parse('\nconst __N3 = process.argv[2];\n')), []);
+  assert.deepEqual(
+    budgetsIn(parse('\nconst __N4 = announcements.slice(0, RENDER_LIMIT);\n')),
+    [],
+  );
+  // A `let` hop laundered a budget out of this sweep entirely: not a budget itself, but a name a
+  // `const` can be built on, so it has to RESOLVE without being EMITTED. Both halves asserted -
+  // `__BASE` must not appear in the result, and `__O` must.
+  assert.deepEqual(budgetsIn(parse('\nlet __BASE = 1024;\nconst __O = __BASE * 64;\n')), [
+    { name: '__BASE', value: 1024 },
+    { name: '__O', value: 65536 },
+  ]);
+  // ...and the counter this exclusion was written for stays OUT, because it is assigned to. Both
+  // spellings, since `+=` and `++` are different nodes and an earlier cut of a different guard in
+  // this file matched one and missed the other.
+  assert.deepEqual(budgetsIn(parse('\nlet __C = 0;\n__C += 1;\n')), []);
+  assert.deepEqual(budgetsIn(parse('\nlet __D = 0;\n__D++;\n')), []);
+  // A `let` that is only READ is a budget, and the hop through it is what used to launder one out
+  // of this sweep in silence.
+  assert.deepEqual(budgetsIn(parse('\nlet __E = 4096;\nconsole.log(__E);\n')), [
+    { name: '__E', value: 4096 },
+  ]);
+  // A BIGINT budget was invisible to every arm. 2^64-1 is past `MAX_SAFE_INTEGER`, so the value is
+  // asserted as a bigint rather than folded into a `number` that would silently round.
+  assert.deepEqual(budgetsIn(parse('\nconst __P = (1n << 64n) - 1n;\n')), [
+    { name: '__P', value: 18446744073709551615n },
+  ]);
   // A sum over a symbol the table LACKS is SKIPPED, and that is the correct answer rather than a
   // weakening. With no symbol table, `__UNSEEDED + 256` is indistinguishable from `n + 256` - the
   // runtime computation whose flagging was a measured false positive. What protects the real case,
@@ -1392,19 +1562,19 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     }
     return out;
   };
-  const own: Record<string, Record<string, number>> = {};
+  const own: Record<string, Record<string, number | bigint>> = {};
   for (const { file } of SOURCES()) own[file] = {};
   for (const [file, mod] of Object.entries(MODULES))
     for (const [k, v] of Object.entries(mod)) if (typeof v === 'number') (own[file] ??= {})[k] = v;
   // What one file can see: what it imports, then what it declares - declarations last, because a
   // local binding is what the compiler resolves a name to.
-  const visible = (file: string): Record<string, number> => {
-    const t: Record<string, number> = {};
+  const visible = (file: string): Record<string, number | bigint> => {
+    const t: Record<string, number | bigint> = {};
     const sf = byFile.get(file);
     if (sf !== undefined)
       for (const im of importsOf(sf)) {
         const v = own[im.from]?.[im.exported];
-        if (typeof v === 'number') t[im.local] = v;
+        if (typeof v === 'number' || typeof v === 'bigint') t[im.local] = v;
       }
     return { ...t, ...own[file] };
   };
@@ -1414,7 +1584,8 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
   for (let pass = 0; pass < 2; pass++)
     for (const { file, sf } of SOURCES())
       for (const b of budgetsIn(sf, visible(file)))
-        if (typeof b.value === 'number') own[file][b.name] = b.value;
+        if (typeof b.value === 'number' || typeof b.value === 'bigint')
+          own[file][b.name] = b.value;
 
   // EVERY module, read from SOURCE, unioned with its numeric EXPORTS.
   //
@@ -1443,9 +1614,9 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
           `${file}: ${f.name} reads ${f.value} from source but ${exported[f.name]} at runtime — ` +
             'the budget matcher folded the initializer wrongly, or the module is stale',
         );
-    const live: Record<string, number | number[]> = { ...exported };
+    const live: Record<string, number | number[] | bigint> = { ...exported };
     for (const f of found) live[f.name] = f.value;
-    const want = PINNED[file] as Record<string, number | number[]>;
+    const want = PINNED[file] as Record<string, number | number[] | bigint>;
     assert.deepEqual(
       Object.keys(live).sort(),
       Object.keys(want).sort(),
@@ -3183,33 +3354,73 @@ test('the RESIDUAL channel is disclosed, and the disclosure is checked against m
     [capBytes(0, 95), capBytes(0, 96), capBytes(0, 128)],
     'the disclosed TAG capacities are not the measured ones',
   );
-  // THE COMPARISON THAT SURVIVED: everything removed, as one alphabet at one budget, against the
-  // residual. Swept from the fence rather than assembled out of channels someone remembered.
+  // EVERYTHING REMOVED, swept from the fence rather than assembled out of channels someone
+  // remembered - and INCLUDING the surrogate range. The previous cut of this sweep opened with
+  // `if (cp >= 0xd800 && cp <= 0xdfff) continue;`, which is how a test comes to CONFIRM a sentence
+  // instead of checking it: the paragraph had forgotten the 2048 lone surrogates this fence
+  // removes, and the instrument written to police the paragraph forgot them the same way, so the
+  // two agreed by sharing a blind spot. Skipping the range is right where a sweep needs whole code
+  // points - two sweeps above still do, for that reason - and wrong here, where the question is
+  // what this fence takes out of an attacker's alphabet and a lone surrogate is a code unit an
+  // attacker can write.
   let cb = 0;
   let ca = 0;
+  let cHi = 0;
+  let cLo = 0;
   for (let cp = 0; cp <= 0x10ffff; cp++) {
-    if (cp >= 0xd800 && cp <= 0xdfff) continue;
-    const ch = String.fromCodePoint(cp);
+    const isSur = cp >= 0xd800 && cp <= 0xdfff;
+    const ch = isSur ? String.fromCharCode(cp) : String.fromCodePoint(cp);
     if (safePathField(ch, MAX_PATH_FIELD_CHARS) === ch) continue;
-    if (cp > 0xffff) ca++;
-    else cb++;
+    if (!isSur) {
+      if (cp > 0xffff) ca++;
+      else cb++;
+    } else if (cp < 0xdc00) cHi++;
+    else cLo++;
   }
   const all = figure(
-    /removes is (\d+) code points, (\d+) BMP and (\d+) astral, which is ([\d.]+) bits per unit and (\d+) bytes/,
-    'the capacity of everything it removes',
+    /removes is (\d+) code points, (\d+) BMP, (\d+) astral and (\d+) lone surrogates/,
+    'the split of everything it removes',
   );
   assert.deepEqual(
     all.slice(1).map(Number),
-    [cb + ca, cb, ca, Number(perUnit(cb, ca).toFixed(2)), capBytes(cb, ca)],
+    [cb + ca + cHi + cLo, cb, ca, cHi + cLo],
+    'the disclosed split of the whole scrub is not the measured one',
+  );
+  // The capacity of THAT alphabet is not `perUnit`, and reusing it here would overstate by ~270
+  // bytes. `perUnit` assumes every symbol may follow every other; surrogates break exactly that,
+  // because a high followed by a low is a PAIR - one astral code point, already counted in `ca` -
+  // and not two lone surrogates. The rate is therefore the growth rate of an automaton carrying one
+  // forbidden juxtaposition, computed in exact integers and read off as a ratio of consecutive
+  // terms rather than solved in closed form.
+  const pairAwareRate = (bmp: number, astral: number, hi: number, lo: number): number => {
+    const N: bigint[] = [1n]; // strings of n units NOT ending in a high surrogate
+    const H: bigint[] = [0n]; // ...ending in one, from which a low is forbidden
+    for (let n = 1; n <= 400; n++) {
+      const n1 = N[n - 1] as bigint;
+      const h1 = H[n - 1] as bigint;
+      const n2 = n >= 2 ? (N[n - 2] as bigint) : 0n;
+      const h2 = n >= 2 ? (H[n - 2] as bigint) : 0n;
+      N[n] = BigInt(bmp) * (n1 + h1) + BigInt(lo) * n1 + BigInt(astral) * (n2 + h2);
+      H[n] = BigInt(hi) * (n1 + h1);
+    }
+    const t = (n: number): bigint => (N[n] as bigint) + (H[n] as bigint);
+    return Math.log2(Number((t(400) * 1000000n) / t(399)) / 1000000);
+  };
+  const scrubRate = pairAwareRate(cb, ca, cHi, cLo);
+  const scrubBytes = Math.floor((MAX_PATH_FIELD_CHARS * scrubRate) / 8);
+  const worth = figure(/worth ([\d.]+) bits per unit and (\d+) bytes/, 'the capacity of the whole scrub');
+  assert.deepEqual(
+    worth.slice(1).map(Number),
+    [Number(scrubRate.toFixed(2)), scrubBytes],
     'the disclosed capacity of the whole scrub is not the measured one',
   );
-  // ...and the RANKING the sentence draws from them. This is the claim a reader acts on, so it is
-  // asserted as an inequality rather than left implied by the numbers above.
+  // ...and the RANKING, in the direction it actually runs. Four cuts asserted the opposite: three
+  // against figures computed on the wrong basis, the fourth against the sweep with the skip above.
   assert.ok(
-    capBytes(cb, ca) < bytes,
-    'the residual is no longer larger than EVERYTHING this fence removes - the sentence saying it ' +
-      'is must be rewritten to match, and rewritten from THESE numbers rather than from an encoder ' +
-      'measurement or from three capacities added together',
+    scrubBytes > bytes,
+    'the whole scrub is no longer worth MORE than the residual - the sentence saying it is must be ' +
+      'rewritten from THESE numbers. The margin is about five per cent, so a Unicode data change ' +
+      'can move it legitimately: re-measure before concluding the fence regressed',
   );
 });
 

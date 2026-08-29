@@ -1086,9 +1086,9 @@ function persistCheckoutUrl(fenced: string): string {
   try {
     const dir = process.env.SAIHM_STATE_DIR || pathJoin(homedir(), '.saihm');
     // BOTH `mode` options here apply ONLY ON CREATION — an existing directory or file keeps whatever
-    // permissions it already had, and neither call reports that it did nothing. MEASURED on this
-    // deployment: `~/.saihm` is 0775 owned by a group with a second member, so the 0o700 below is
-    // inert on the path this actually runs against. The mode is still correct to request (it hardens
+    // permissions it already had, and neither call reports that it did nothing. Where `~/.saihm`
+    // already exists - which is the common case, since the rest of the SAIHM toolchain creates it -
+    // the 0o700 below is inert. The mode is still correct to request (it hardens
     // a directory we DO create) and is deliberately not followed by a `chmodSync`: this directory is
     // shared with the rest of the SAIHM toolchain, and silently re-permissioning it would reach well
     // outside this function.

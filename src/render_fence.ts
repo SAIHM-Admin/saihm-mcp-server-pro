@@ -99,14 +99,20 @@ export const BLANK_SYMBOLS = '\u2800\u2d7f\u{16FE4}\u{1D159}\u{13441}\u{13442}';
  *
  * Built once from {@link BLANK_SYMBOLS} rather than written twice.
  *
- * `u` is REQUIRED, and the reason this said so was the wrong one. Measured on the flagless mutant:
- * digit 9 is KEPT. The digit-9 story is real but it is about a five-hex-digit escape written into a
- * BMP-only class, which is how U+1D159 was once spelled and what a fixture caught - the entries are
- * generated from a string now, so that spelling no longer exists to regress to. What dropping `u`
- * does TODAY is worse and quieter: `\p{Cf}` and `\p{Default_Ignorable_Code_Point}` stop being property
- * escapes, so ZWJ and VS17 SURVIVE - which reopens the 2390-byte variation-selector channel this
- * same file calls closed - and 7156 astral code points mangle to `??` where the class matches a
- * surrogate half. All four measured on the mutant, not reasoned from the flag's documentation.
+ * `u` is REQUIRED, and this paragraph has now named the wrong reason twice. The first cut told a
+ * digit-9 story about a five-hex-digit escape written into a BMP-only class - true once, but the
+ * entries are generated from a string now and that spelling no longer exists to regress to. The
+ * second cut replaced it with figures measured on the flagless mutant of the RAW-SPLICED class,
+ * which the same change that wrote them had already replaced with the escaped one below: `digit 9
+ * is KEPT` and `7156 astral code points mangle to ??` are both properties of a shape that does not
+ * ship. A measurement outlives the code it was taken on only if someone re-takes it.
+ * On the mutant of the class AS IT STANDS, two things happen and neither is the old story. First,
+ * `\p{Cf}` and `\p{Default_Ignorable_Code_Point}` stop being property escapes, so ZWJ and VS17
+ * SURVIVE - which reopens the 2390-byte variation-selector channel this same file calls closed.
+ * Second, every `\u{...}` below degrades into its own literal characters, so the class becomes the
+ * sixteen printable ASCII members `0123456789defu{}` and scrubs them out of ordinary paths:
+ * `/home/u9/x` renders `/hom?/??/x`. Digit 9 is destroyed, not kept, and nothing astral is mangled,
+ * because an escaped class contains no surrogate halves. Both measured on the shipped class.
  *
  * ESCAPED, not spliced. Each entry goes in as `\u{...}` because a raw splice into a character class
  * is safe only while every member happens to be inert there: `]` and `\` would throw at module load,
@@ -238,19 +244,26 @@ const BLANK_AND_FORMAT = new RegExp(
  *     symbols at 10.81 bits gives 5534, which is what an earlier cut of this paragraph claimed and
  *     no input can reach.
  *     Restated on the SAME basis - ONE alphabet, ONE budget, bits per UTF-16 unit - EVERYTHING this
- *     fence removes is 4299 code points, 169 BMP and 4130 astral, which is 7.57 bits per unit and
- *     3878 bytes. The residual is larger than the entire scrub, not merely larger than the largest
- *     channel in it.
- *     Three earlier cuts of this sentence each compared on a different basis and each was wrong. The
+ *     fence removes is 6347 code points, 169 BMP, 4130 astral and 2048 lone surrogates. The
+ *     surrogates were absent from the previous cut, and they invert what it concluded: its count of
+ *     4299 came from a sweep that skipped the surrogate range, and so did the test written to police
+ *     it, so the instrument agreed with the sentence by sharing its blind spot.
+ *     That alphabet does not compose freely, which makes the root formula above the wrong instrument
+ *     for it - a high surrogate followed by a low one is a PAIR, already counted among the astral
+ *     entries, so the two cannot be chosen independently. Counted exactly, over the automaton that
+ *     forbids that one juxtaposition, the whole scrub is worth 10.59 bits per unit and 5420 bytes:
+ *     MORE than the 5152 that survives, not less. The margin is about five per cent, so this is
+ *     stated as a measurement and not leaned on as an argument.
+ *     Four earlier cuts of this sentence each compared on a different basis and each was wrong. The
  *     first ranked 5152 against `2048 each`, a figure a naive encoder ACHIEVED rather than a
  *     capacity. The second fixed that and then ADDED three channel capacities - 1681 + 2390 + 867 =
  *     4938 - which is not a quantity any input can carry: three alphabets used together are one
- *     alphabet at one budget, and that sum is larger even than the 3878 the whole scrub is worth.
+ *     alphabet at one budget.
  *     A per-channel figure has no settled alphabet to be computed on either - the TAG channel is 95
  *     printable, or 96 with CANCEL TAG, or the 128 code points this fence actually removes from the
  *     block, which is 1681, 1685 or 1792 bytes, and the sentence ranking them never said which.
- *     What survives all three cuts is the comparison above: what leaves against what is removed,
- *     each as one alphabet at one budget. 5152 is itself a LOWER bound on what leaves here: marks, homoglyphs and runs of
+ *     What survives all four cuts is not a ranking but a pair of measurements, each taken over one
+ *     alphabet at one budget and each derived by the test rather than remembered here. 5152 is itself a LOWER bound on what leaves here: marks, homoglyphs and runs of
  *     U+0020 are independent channels and an encoder may use them together.
  *     It is the residual, it is disclosed, and it is not closeable here.
  *   - HOMOGLYPHS, for the same reason one level up: preserving the characters is what makes a path

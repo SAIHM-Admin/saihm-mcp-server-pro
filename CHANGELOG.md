@@ -12,9 +12,9 @@ The class has two halves, BUDGET and CHARACTER SET, and both are closed here.
 
 **A minor rather than a patch**, on two independent legs, either of which is
 sufficient. The first is the rule this project set at 0.3.0: an announced
-identifier that changes value is not a patch. Three configuration errors change
+identifier that changes value is not a patch. Four configuration errors change
 `e.name`, and the compatibility note below asks consumers to adjust code that
-matches on it — one of the three is thrown from the public `SaihmProClient`
+matches on it — one of the four is thrown from the public `SaihmProClient`
 constructor as well as from `bootFromEnv()`. The second leg is the output
 regression disclosed below: three previously raw lines no longer round-trip a path
 containing `[`, `]`, `|`, a non-space whitespace character, or more than
@@ -155,13 +155,25 @@ What cannot be removed, and why it is structural rather than an oversight:
   them is precisely the defect this release exists to fix. The capacity is per UTF-16
   UNIT, because that is what the budget slices: 1,069 of those marks are BMP and 725
   are astral at two units each, giving 10.06 bits per unit — **5,152 bytes at
-  `MAX_PATH_FIELD_CHARS`**. Measured on that same basis, the three channels this fence
-  CLOSES are 1,681 bytes (TAG block), 2,390 (variation selectors) and 867 (the blank
-  symbols): 4,938 together, so the residual is larger than **all three put together**.
-  Two earlier drafts ranked it against "2,048 each" and disagreed with each other —
-  first claiming "larger than all three", then "larger than any two and smaller than
-  all three". Both were wrong the same way: 2,048 is a figure one naive encoder
-  ACHIEVED and 5,152 is a capacity, and numbers on two bases do not compare. The test
+  `MAX_PATH_FIELD_CHARS`**. Compared on that same basis — one alphabet, one
+  budget — everything this fence REMOVES is 6,347 code points: 169 BMP, 4,130 astral
+  and 2,048 lone surrogates. That alphabet does not compose freely — a high surrogate
+  followed by a low one is a PAIR, already counted among the astral entries — so the
+  capacity is counted over an automaton that forbids that one juxtaposition, giving
+  10.59 bits per unit and **5,420 bytes**: slightly MORE than the 5,152 that survives.
+  Four earlier drafts each compared on a different basis and each was wrong. The first
+  ranked 5,152 against "2,048 each", a figure a naive encoder ACHIEVED rather than a
+  capacity. The second ADDED three channel capacities — 1,681 (TAG) + 2,390 (variation
+  selectors) + 867 (blank symbols) = 4,938 — which is not a quantity any input can
+  carry: three alphabets used together are one alphabet at one budget. The third swept
+  every code point but SKIPPED the surrogate range, and reported 4,299 removed and
+  3,878 bytes — under which the residual came out larger; the test written to police
+  that figure carried the same skip, so it confirmed the sentence instead of catching
+  it. A per-channel figure has no settled
+  alphabet to be computed on either — the TAG channel is 95 printable, 96 with CANCEL
+  TAG, or the 128 code points this fence actually removes. 5,152 is itself a LOWER
+  bound: marks, homoglyphs and runs of `U+0020` are independent channels an encoder may
+  use together. The test
   meant to police these figures had encoded the same error, and now derives every one
   of them from the shipped fence.
 - **Homoglyphs**, for the same reason one level up: preserving the characters is what
@@ -319,10 +331,13 @@ marked as such below; two more are breaking without being regressions (the
   field. A whitespace-only `SAIHM_MASTER_SECRET_FILE` is now named as such rather than
   read, where it previously failed with the value invisible in its own message.
 - **A zero-byte self-join identity file is an error instead of an unrecoverable loop.**
-  `ensureSelfJoinIdentityEnv()` treated any existing file as provisioned, set
-  `SAIHM_MASTER_SECRET_FILE` to it itself, and left boot to fail naming a variable the
-  operator had never set — with every retry repeating, because the verb that would fix
-  it is the one looping. It now names the self-join identity file and says what clears
+  `ensureSelfJoinIdentityEnv()` treated any existing file as provisioned and set
+  `SAIHM_MASTER_SECRET_FILE` to it itself, so the empty secret fell through to the
+  guided-onboarding string — `No SAIHM memory yet on this device. Ask me to "Join
+  SAIHM" first (the saihm_join tool) to create your free memory, then try again.` —
+  which named no variable at all and pointed at the very verb that was looping, so
+  every retry repeated. That string is also the one an agent keys on to trigger
+  `saihm_join`, so this replaces a message some callers match on. It now names the self-join identity file and says what clears
   it. It does NOT regenerate: this package writes that file atomically, so an empty one
   came from elsewhere, and minting a fresh identity over it is the silent switch to a
   different identity this section's empty-secret bullet exists to prevent.
@@ -334,6 +349,12 @@ marked as such below; two more are breaking without being regressions (the
   `free-join` fixed sixty lines away in the same module, in the copy nobody
   propagated to. Both verbs now resolve the key through one exported
   `identityKeyFile()`, whose precedence mirrors `bootFromEnv`.
+- **The `join` key line's ordinary-case wording changed.** `Using your existing memory
+  key (<path>).` is now `Using your existing memory key: <path>`, for every returning
+  caller — including an ASCII path the fence leaves untouched. The parenthetical went
+  because a fenced value must not sit inside a delimiter it can itself close; the
+  bullets above disclose only the scrubbing and the null branch. Match the prefix
+  rather than the whole line.
 - **`saihm_forget` tool-result text changes.** The erasure residual naming the local
   cache path moves from `safeField` at 256 to `safePathField` at
   `MAX_PATH_MESSAGE_CHARS`: a non-ASCII cache path renders correctly instead of as
@@ -344,7 +365,10 @@ marked as such below; two more are breaking without being regressions (the
   rendered through the widened path bound rather than cut at 256, so these messages
   get longer and stop mangling non-ASCII. Measured with a 400-character home, one
   such message goes from 257 to 437 characters — measured on `ENAMETOOLONG` from
-  `mkdir` under a 400-character `SAIHM_HOME`, which is the shape the figure names.
+  `mkdir` under a 400-character `SAIHM_HOME`, which is the shape the figure names. The
+  CLI changes identically — its top-level handler renders through the same `failText`
+  — so `free-join` under a 400-character `SAIHM_HOME` goes from 258 to 438 characters
+  on stderr.
 - **Four configuration errors that name a path or URL now throw
   `SaihmConfigError` rather than `Error`.** Three of the four keep a byte-identical
   message — the invalid `SAIHM_ENDPOINT_URL`, the unreadable
@@ -359,9 +383,18 @@ marked as such below; two more are breaking without being regressions (the
   enumerable own properties: `valueKind` (`'path'` or `'url'`), which is how the
   renderer knows which budget to widen to, and `name`, which a plain `Error` carries
   on its prototype instead. Measured: `Object.keys(e)` is `["valueKind","name"]`
-  against `[]` for a plain `Error`. Code matching `/^Error: SAIHM_/` against one of them
-  should match the message or use `instanceof` instead. Other configuration errors
-  still throw plain `Error`. `SaihmEndpointError` has always presented this shape.
+  against `[]` for a plain `Error`. "Byte-identical" is a claim about `e.message`
+  only: what the OPERATOR SEES changes, because these now render through the widened
+  path/URL budget rather than 256. Measured, a long invalid `SAIHM_ENDPOINT_URL` goes
+  from 257 to 2,305 characters and an unreadable long secret file from 257 to 609. Code matching `/^Error: SAIHM_/` against one of them
+  should match the message or `e.name === 'SaihmConfigError'` instead. The class is
+  NOT exported — the barrel does not re-export it and `exports` has only `"."` — so
+  `instanceof` is not available to consumers; `e.name` and the message are. Two further sites are NEW rather than reclassified (the
+  configured-but-empty secret and the zero-byte identity file), and the whitespace-only
+  `SAIHM_MASTER_SECRET_FILE` shape ALSO moves from a plain `Error` to
+  `SaihmConfigError` under a new message — seven construction sites ship in all.
+  Configuration errors naming neither a path nor a URL still throw plain `Error`, as
+  does a malformed `SAIHM_MASTER_SECRET_HEX`. `SaihmEndpointError` has always presented this shape.
 - **Three boot error messages change.** A malformed secret used to be reported
   against `SAIHM_MASTER_SECRET_HEX` whatever its actual source, so a corrupt self-join
   identity file produced `SAIHM_MASTER_SECRET_HEX must be canonical lowercase hex.`
@@ -374,8 +407,8 @@ marked as such below; two more are breaking without being regressions (the
   the secret came from a file. Third, `SAIHM_MASTER_SECRET_HEX (or
   SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars).` is gone from the
   configured-but-empty path, replaced by the two messages in the empty-secret bullet
-  above. Match on `instanceof SaihmConfigError`, or on the variable name, rather than
-  on these strings.
+  above. Match on `e.name === 'SaihmConfigError'`, or on the variable name, rather
+  than on these strings.
 - **Generated types for deep paths change:** `dist/render_fence.d.ts` loses
   `MAX_CHECKOUT_URL_CHARS` and gains `safePathField` plus four constants;
   `dist/client.d.ts` gains `SaihmConfigError`, `markPathBearing`, `isPathBearing` and
