@@ -1653,35 +1653,54 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // The `persist` methods themselves, by DECLARATION. Naming a declaration is not the evasion class
   // - a caller can rename what it calls, but it cannot rename what it declares without this sweep
   // seeing the declaration move.
+  //
+  // METHOD-LIKE, not `isMethodDeclaration`. A class member holding an arrow - `prune = (): void =>
+  // { this.persist(); }` - is a method in every way that matters here and was invisible to a
+  // predicate naming one syntax for it. Measured: planted in `RecallCache` and called unwrapped in
+  // the recall path, the suite stayed 46/46; the byte-identical body written `prune(): void {}`
+  // goes red. That is this test's OWN stated reason for existing, reproduced one declaration form
+  // over. The AST replaced a regex here two rounds ago and the predicate kept the regex's habit of
+  // naming a spelling.
+  const methodLike = (n: ts.Node): { name: ts.Identifier; body: ts.Node } | undefined => {
+    if (ts.isMethodDeclaration(n) && ts.isIdentifier(n.name)) return { name: n.name, body: n };
+    if (
+      ts.isPropertyDeclaration(n) &&
+      ts.isIdentifier(n.name) &&
+      n.initializer !== undefined &&
+      (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))
+    )
+      return { name: n.name, body: n.initializer };
+    return undefined;
+  };
   const persistDecls = new Set(
     clientNodes
-      .filter(
-        (n): n is ts.MethodDeclaration =>
-          ts.isMethodDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'persist',
-      )
-      .map((n) => CHECKER().getSymbolAtLocation(n.name))
+      .flatMap((n) => {
+        const m = methodLike(n);
+        return m !== undefined && m.name.text === 'persist' ? [m.name] : [];
+      })
+      .map((nm) => CHECKER().getSymbolAtLocation(nm))
       .filter((s): s is ts.Symbol => s !== undefined),
   );
   assert.ok(persistDecls.size > 0, 'client.ts declares no persist() at all - this derivation is broken');
-  const reachingDecls = clientNodes.filter(
-    (n): n is ts.MethodDeclaration =>
-      ts.isMethodDeclaration(n) &&
-      ts.isIdentifier(n.name) &&
-      n.name.text !== 'persist' &&
-      walk(n).some((d) => {
-        const s = calleeSymbol(d);
-        return s !== undefined && persistDecls.has(s);
-      }),
-  );
-  const reaching = reachingDecls.map((n) => (n.name as ts.Identifier).text);
+  const reachingDecls = clientNodes.flatMap((n) => {
+    const m = methodLike(n);
+    if (m === undefined || m.name.text === 'persist') return [];
+    return walk(m.body).some((d) => {
+      const s = calleeSymbol(d);
+      return s !== undefined && persistDecls.has(s);
+    })
+      ? [m]
+      : [];
+  });
+  const reaching = reachingDecls.map((m) => m.name.text);
   // The SYMBOLS of those methods, which is what the call sweep below matches on. `const rc =
   // this.recallCache; rc.replaceAll(...)` was measured hiding an unwrapped persist-reaching call
   // from a sweep keyed on the dotted name `this.recallCache.replaceAll`, with the suite at 43/0.
   // A receiver can be renamed as easily as a callee; a method's declaration cannot.
   const SWEPT = new Set(
     reachingDecls
-      .filter((n) => !EXCLUDED.includes((n.name as ts.Identifier).text))
-      .map((n) => CHECKER().getSymbolAtLocation(n.name))
+      .filter((m) => !EXCLUDED.includes(m.name.text))
+      .map((m) => CHECKER().getSymbolAtLocation(m.name))
       .filter((s): s is ts.Symbol => s !== undefined),
   );
   assert.deepEqual(
@@ -1698,8 +1717,8 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // membership is remembered while its reason is not.
   const EXCLUDED_SYMS = new Set(
     reachingDecls
-      .filter((n) => EXCLUDED.includes((n.name as ts.Identifier).text))
-      .map((n) => CHECKER().getSymbolAtLocation(n.name))
+      .filter((m) => EXCLUDED.includes(m.name.text))
+      .map((m) => CHECKER().getSymbolAtLocation(m.name))
       .filter((sy): sy is ts.Symbol => sy !== undefined),
   );
   assert.equal(
@@ -1714,14 +1733,45 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // every filesystem mutation under `src/`, keyed by the function performing it. A new one is a
   // line in this table, and that line is where someone says why a write outside `persist()` is not
   // an unwrapped persist-reaching call wearing different clothes.
-  const FS_CALLS = [
-    'writeFileSync', 'appendFileSync', 'renameSync', 'unlinkSync', 'rmSync', 'rmdirSync',
-    'mkdirSync', 'openSync', 'copyFileSync', 'truncateSync', 'chmodSync', 'createWriteStream',
-  ];
+  // BOTH HALVES of the API, and resolved against the IMPORT rather than matched by bare name.
+  // This listed twelve `*Sync` names and `createWriteStream`, so `node:fs/promises` was not covered
+  // at all - and this list IS the backstop for a write that names no method, so a hole in it is a
+  // hole in the only instrument watching that class. Measured: an unwrapped `async flush()` doing
+  // `await writeFile(this.path, ...)` left the suite at 46/46; the same function with
+  // `writeFileSync` goes red.
+  //
+  // The promise API's names are ordinary words - `write`, `open`, `rename` - so matching them as
+  // bare identifiers claimed `process.stdout.write` and a local named `r`. What makes a call an fs
+  // mutation is not its spelling but WHERE THE FUNCTION CAME FROM, so the names are taken from each
+  // file's own `node:fs` imports. That also follows `import { writeFile as wf }`, which a bare-name
+  // list cannot.
+  const MUTATORS = new Set([
+    'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'rename', 'renameSync',
+    'unlink', 'unlinkSync', 'rm', 'rmSync', 'rmdir', 'rmdirSync', 'mkdir', 'mkdirSync',
+    'open', 'openSync', 'copyFile', 'copyFileSync', 'cp', 'truncate', 'truncateSync',
+    'chmod', 'chmodSync', 'createWriteStream', 'write', 'writev',
+  ]);
+  const FS_SPECIFIERS = ['node:fs', 'node:fs/promises', 'fs', 'fs/promises'];
+  /** local name -> imported name, for every value imported from an fs module in this file. */
+  const fsBindings = (sf: ts.SourceFile): Map<string, string> => {
+    const out = new Map<string, string>();
+    for (const st of sf.statements) {
+      if (!ts.isImportDeclaration(st) || st.importClause === undefined) continue;
+      if (st.importClause.isTypeOnly || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+      if (!FS_SPECIFIERS.includes(st.moduleSpecifier.text)) continue;
+      const nb = st.importClause.namedBindings;
+      if (nb === undefined || !ts.isNamedImports(nb)) continue;
+      for (const el of nb.elements)
+        if (!el.isTypeOnly) out.set(el.name.text, (el.propertyName ?? el.name).text);
+    }
+    return out;
+  };
+  /** The nearest named function, method or variable that lexically holds this call. */
   const enclosing = (n: ts.Node): string => {
     for (let p: ts.Node | undefined = n.parent; p !== undefined; p = p.parent) {
       if (
-        (ts.isMethodDeclaration(p) || ts.isFunctionDeclaration(p) || ts.isVariableDeclaration(p)) &&
+        (ts.isMethodDeclaration(p) || ts.isFunctionDeclaration(p) || ts.isVariableDeclaration(p) ||
+          ts.isPropertyDeclaration(p)) &&
         p.name !== undefined &&
         ts.isIdentifier(p.name)
       )
@@ -1730,21 +1780,26 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     return '<module scope>';
   };
   const fsWrites: Record<string, number> = {};
-  for (const { file, sf } of SOURCES())
+  for (const { file, sf } of SOURCES()) {
+    const fsLocal = fsBindings(sf);
     for (const n of walk(sf)) {
       if (!ts.isCallExpression(n)) continue;
       const t = calleeTarget(n);
-      const nm = ts.isIdentifier(t)
-        ? t.text
-        : ts.isPropertyAccessExpression(t)
-          ? t.name.text
-          : ts.isStringLiteralLike(t)
-            ? t.text
-            : '';
-      if (!FS_CALLS.includes(nm)) continue;
+      const local = ts.isIdentifier(t) ? t.text : '';
+      const imported = fsLocal.get(local);
+      if (imported === undefined || !MUTATORS.has(imported)) continue;
       const k = `${file}:${enclosing(n)}`;
       fsWrites[k] = (fsWrites[k] ?? 0) + 1;
     }
+  }
+  // Proved able to see the promise API, not only the one the tree happens to use: the binding map
+  // is asserted against a source that imports it under an alias.
+  const probeFs = fsBindings(
+    parse("\nimport { writeFile as wf, readFile } from 'node:fs/promises';\n"),
+  );
+  assert.equal(probeFs.get('wf'), 'writeFile', 'the fs binding map does not follow an import alias');
+  assert.equal(probeFs.get('readFile'), 'readFile', 'the fs binding map missed a plain import');
+  assert.equal(probeFs.get('writeFile'), undefined, 'the fs binding map keyed on the wrong name');
   assert.ok(Object.keys(fsWrites).length > 0, 'the filesystem-write finder found nothing - it is broken, not `src/`');
   assert.deepEqual(
     fsWrites,
@@ -2742,19 +2797,56 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // someone has to say why iterating an object into a rendered string is not this file's defect
   // wearing a shape the sweep above is blind to.
   //
-  // Both of today's are seq-state parsing in `client.ts`, over cellIds, reaching no renderer.
-  const ANON: Record<string, number> = { 'client.ts': 2 };
+  // Today's five are all in `client.ts` and none reaches a renderer: two `Object.entries` parsing
+  // seq state over cellIds, and three `Map` iterations over the recall cache's own entries.
+  // KEYED ON THE ENUMERATION, not on the receiver. This required the base to be the identifier
+  // `Object`, so two spellings walked through and rendered a caller-chosen path raw, newlines
+  // intact, into a tool result: `Reflect.ownKeys(s)` - a different receiver for the same operation -
+  // and `const { entries } = Object;` then `entries(s)`, which has no receiver at all. Both green,
+  // the first also green across the full 273. That destructuring is the EXACT spelling this file's
+  // preamble cites as why the fence reader moved off names; the lesson was applied there, not here.
+  //
+  // So the receiver is not consulted at all. That claims `map.keys()` alongside `Object.keys(x)` -
+  // three of the five in the tree are exactly that. They cost a line each in the table below, which
+  // is the price of a predicate with no gate in it, and cheaper than the gate.
+  const ENUMERATORS = [
+    'entries', 'values', 'keys', 'ownKeys',
+    'getOwnPropertyNames', 'getOwnPropertySymbols', 'getOwnPropertyDescriptors',
+  ];
+  const ANON: Record<string, number> = { 'client.ts': 5 };
+  // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
+  // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
+  // measured green, which is this round's whole lesson landing on the fix for this round's finding.
+  // A rename is not a different function, so the question is what the name was bound FROM.
+  const enumeratorOf = (n: ts.CallExpression): string => {
+    const t = calleeTarget(n);
+    const spelled = ts.isIdentifier(t)
+      ? t.text
+      : ts.isPropertyAccessExpression(t)
+        ? t.name.text
+        : ts.isStringLiteralLike(t)
+          ? t.text
+          : '';
+    if (ENUMERATORS.includes(spelled)) return spelled;
+    const d = symbolOf(t)?.declarations?.[0];
+    if (d === undefined) return '';
+    // `const { entries: pairs } = Object` - the property is the function, the binding is a rename.
+    if (ts.isBindingElement(d)) {
+      const pn = d.propertyName ?? d.name;
+      const text = ts.isIdentifier(pn) || ts.isStringLiteralLike(pn) ? pn.text : '';
+      if (ENUMERATORS.includes(text)) return text;
+    }
+    // `const g = Object.entries` - the same move without the destructuring.
+    if (ts.isVariableDeclaration(d) && d.initializer !== undefined) {
+      const init = d.initializer;
+      if (ts.isPropertyAccessExpression(init) && ENUMERATORS.includes(init.name.text))
+        return init.name.text;
+    }
+    return '';
+  };
   const anonIn = (sf: ts.SourceFile): ts.Node[] =>
     walk(sf).filter(
-      (n) =>
-        ts.isForInStatement(n) ||
-        (ts.isCallExpression(n) &&
-          ts.isPropertyAccessExpression(n.expression) &&
-          ts.isIdentifier(n.expression.expression) &&
-          n.expression.expression.text === 'Object' &&
-          ['entries', 'values', 'keys', 'getOwnPropertyNames', 'getOwnPropertySymbols'].includes(
-            n.expression.name.text,
-          )),
+      (n) => ts.isForInStatement(n) || (ts.isCallExpression(n) && enumeratorOf(n) !== ''),
     );
   // Proved able to FIND before it is trusted to report a count, on both primitives and on a shape
   // it must NOT claim.
@@ -2762,6 +2854,8 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     ['entries', 'for (const [k, v] of Object.entries(s)) void k;', 1],
     ['keys', 'const x = Object.keys(s);', 1],
     ['for-in', 'for (const k in s) void k;', 1],
+    ['Reflect', 'const x = Reflect.ownKeys(s);', 1],
+    ['destructured', 'const { entries } = Object;\nconst x = entries(s);', 1],
     ['a named read', 'const x = s.keyPath;', 0],
   ] as const)
     assert.equal(anonIn(parse(src)).length, want, `the anonymous-read finder is wrong on: ${shape}`);
@@ -3138,6 +3232,39 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
     const nodes = walk(sf);
     assertWalked(file, nodes);
     for (const n of nodes) {
+      // CONCATENATION as well as interpolation. This read only template expressions, so
+      // `'Using your existing memory key (' + keyPath + ').'` - same wrapping, same value, one
+      // syntax over - was invisible and green. That is the class the OCCURRENCE sweep already
+      // records as a measured prior evasion: closed there, left open here.
+      if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+        // Read only from the TOP of a `+` chain, so a three-part concatenation is read once.
+        if (
+          ts.isBinaryExpression(n.parent) &&
+          n.parent.operatorToken.kind === ts.SyntaxKind.PlusToken
+        )
+          continue;
+        const parts: ts.Expression[] = [];
+        const flatten = (e: ts.Expression): void => {
+          if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+            flatten(e.left);
+            flatten(e.right);
+          } else parts.push(e);
+        };
+        flatten(n);
+        parts.forEach((part, i) => {
+          if (!walk(part).some((d) => fenceOf(d) !== null || seedOf(d) !== null)) return;
+          const prev = i > 0 ? parts[i - 1] : undefined;
+          const next = parts[i + 1];
+          const open = prev !== undefined && ts.isStringLiteralLike(prev) ? prev.text.slice(-1) : '';
+          const close = next !== undefined && ts.isStringLiteralLike(next) ? next.text.slice(0, 1) : '';
+          if (open !== '' && PAIRS[open] === close)
+            found.push(
+              `${file}:${sf.getLineAndCharacterOfPosition(part.getStart(sf)).line + 1} ` +
+                `${open}...${close} around ${part.getText(sf)}`,
+            );
+        });
+        continue;
+      }
       if (!ts.isTemplateExpression(n)) continue;
       n.templateSpans.forEach((sp, i) => {
         // A span CARRIES a fenced value when it calls a fence, or names one of the caller-chosen
