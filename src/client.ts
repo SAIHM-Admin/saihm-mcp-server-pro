@@ -1523,8 +1523,23 @@ class SeqState {
    *  pin with a second, equivocating envelope's hash -- which would hand the endpoint the very
    *  substitution this pin exists to detect. */
   observe(cellId: string, seq: bigint, commitmentHash?: string): void {
-    // Recorded whether or not the mark ADVANCES. A re-read at the seq we already hold still tells us
-    // where the endpoint is, which is the whole question the discovery gate asks.
+    // Recorded whether or not the mark ADVANCES, and the two reasons are different. `admit` refuses
+    // `seq === held` as well as `seq < held` (`acceptSeq` accepts strictly greater), so "did the mark
+    // advance" is the wrong question here: a re-read AT the seq we hold is a real observation of the
+    // endpoint's position, which is the whole question the discovery gate asks.
+    //
+    // BELOW the mark is the case that would NOT be, and it cannot arrive. A response under the floor
+    // is what a REPLAYED older envelope looks like, and AEAD cannot tell the difference -- it proves
+    // the envelope is genuinely ours at that seq, never that it is the CURRENT one. Recording one
+    // would satisfy the gate, the next write would skip the live read and go out at `mark + 1`, and
+    // against an endpoint further along that is a second envelope at a seq already committed.
+    //
+    // THE COUPLING THAT MAKES THIS UNCONDITIONAL RECORD SOUND, named because it lives in another
+    // method and a future edit could break it silently: both call sites already guarantee
+    // `seq >= held`. `openRow` throws `stale_cell` on `env.seq < knownSeq` BEFORE it reaches here,
+    // and `remember` observes only after the endpoint accepted a write at `next()`, which is
+    // `current + 1`. Weaken the read-path rollback guard and this line stops being safe -- the test
+    // named for a replayed envelope below the mark is the one that says so.
     this.observedLive.add(cellId);
     if (this.hwm.admit(this.agentIdHashHex, cellId, seq)) {
       this.cellIds.add(cellId);

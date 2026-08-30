@@ -1903,3 +1903,90 @@ test('server.ts: an unreadable mark file does not report the guard as still pers
     await new Promise<void>((r) => mock.server.close(() => r()));
   }
 });
+
+test('server.ts: a replayed envelope below the mark is REFUSED, which is what lets `observe` record unconditionally', async () => {
+  // `observe` records the cell as seen-live for every envelope that reaches it, without asking
+  // whether the mark advanced. That is correct in the case it was written for - `admit` refuses
+  // `seq === held` as well as `seq < held`, and a re-read AT the held seq IS a real observation of
+  // where the endpoint is - but it is only SAFE because the case that would break it never arrives.
+  //
+  // A response below the floor is what a REPLAYED older envelope looks like, and AEAD cannot tell
+  // the difference: it proves the envelope is genuinely ours at that seq, never that it is the
+  // CURRENT one. If one were recorded, the discovery gate in `remember` would be satisfied, the next
+  // write would skip the live read and go out at `mark + 1`, and against an endpoint further along
+  // that is a second envelope at a seq already committed.
+  //
+  // It never arrives because `openRow` throws `stale_cell` on `env.seq < knownSeq` before reaching
+  // `observe`, and the only other call site observes after a write at `next()`. THIS TEST PINS THAT
+  // COUPLING, which is otherwise an argument spanning two methods and nothing enforces: weaken the
+  // read-path rollback guard and a replay reaches `observe`, and the assertion below about the live
+  // read still happening is what fails.
+  //
+  // The mark is 5, the recall replays 2, and the endpoint's real head is 9. The replay must be
+  // refused, and the write that follows must still go out at 10 rather than 6 - the gate having
+  // looked, because nothing told it that it already had. Phase 1 exists only to obtain this
+  // identity's real mark file rather than derive its name here.
+  const me = deriveIdentity(fromHex(MASTER_HEX));
+  const seal = (cellId: string, seq: bigint): unknown => ({
+    found: true,
+    wire: encodeEnvelope(
+      sealCell({
+        plaintext: utf8(`row ${cellId} at ${seq}`),
+        kek: me.kek,
+        mldsaSecretKey: me.mldsaSecretKey,
+        mldsaPubKey: me.mldsaPubKey,
+        agentIdHash: me.agentIdHash,
+        cellId,
+        seq,
+        tier: 'PRO',
+      }),
+    ),
+  });
+  const head = seal('replay', 9n) as { wire: unknown };
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-replay-'));
+  const mock = startMock({
+    recallAll: [seal('replay', 2n)], // the REPLAY, served to a full recall
+    recallOneWire: head.wire, // the endpoint's real head, served to the discovery read
+  });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const first = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(first);
+      await callText(first, 3, 'saihm_remember', { content: 'a', cellId: 'replay' });
+    } finally {
+      first.proc.kill();
+    }
+    const files = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(files.length, 1, 'premise: this identity persisted a mark file');
+    writeFileSync(pathJoin(home, files[0]!), JSON.stringify({ replay: { seq: '5' } }));
+    const second = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(second);
+      const rc = await callText(second, 3, 'saihm_recall', {});
+      assert.equal(rc.isError, true, 'a replay below the mark must be refused, not opened');
+      assert.match(
+        rc.text,
+        /stale_cell/,
+        'the read-path rollback guard is what keeps a replay away from `observe`',
+      );
+      const r = await callText(second, 4, 'saihm_remember', { content: 'b', cellId: 'replay' });
+      assert.equal(r.isError, false);
+      assert.match(
+        r.text,
+        /seq=10/,
+        'a refused replay leaves the cell unobserved, so the live read must still happen',
+      );
+      assert.doesNotMatch(
+        r.text,
+        /seq=6(?![0-9])/,
+        'writing at mark+1 on the strength of a replay is the equivocation this gate exists to stop',
+      );
+    } finally {
+      second.proc.kill();
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
