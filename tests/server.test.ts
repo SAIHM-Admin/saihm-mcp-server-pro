@@ -1026,6 +1026,9 @@ test('server.ts: an UNREADABLE mark file is never overwritten with this session\
       assert.equal(w.isError, false, 'a path WE chose must never fail a write the endpoint accepted');
       const st = await callText(d3, 4, 'saihm_status', {});
       assert.match(st.text, /seq-state=unreadable\(EACCES\)/, 'the degradation must be answerable, not silent');
+      // The memory-only BRANCH, pinned here because its sibling below proves the other one. This
+      // clause used to be unconditional, so it was true here and false there.
+      assert.match(st.text, /rollback-guard=memory-only-this-run/, 'persistence really has stopped here');
     } finally {
       d3.proc.kill();
     }
@@ -1035,6 +1038,126 @@ test('server.ts: an UNREADABLE mark file is never overwritten with this session\
       seeded2,
       'the default arm destroyed two marks it never read - this is the compaction, not a merge',
     );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: a mark that cannot be a real seq is dropped, not admitted', async () => {
+  // The two parses in SeqState checked the SHAPE of a persisted mark and not its size, while the
+  // identical parse 700 lines up in this same client bounds its input before `BigInt` - the one-arm
+  // shape this release keeps finding. Two things got through.
+  //
+  // OVER THE CEILING is the one that matters, and it is a definition rather than a bound: `MAX_SEQ`
+  // is the wire uint64 ceiling and `decodeEnvelope` parses seq as u64, so a mark above it cannot
+  // have come from a valid envelope. It is not a mark that is too big; it is not a mark. Admitting
+  // one BRICKS that cell permanently and silently - `next()` returns MAX_SEQ+1 and every write is
+  // refused as `seq_exhausted`, with nothing anywhere naming a number in a local file as the cause.
+  // This is reachable without an attacker: the README now tells people these files are safe to copy
+  // between machines, so a mangled copy is a supported workflow away.
+  //
+  // THE SECOND CASE DOES NOT ISOLATE THE LENGTH CAP, and saying so is the point. `MAX_SEQ` is 20
+  // digits and leading zeros are refused, so every value longer than `MAX_COUNTER_CHARS` is already
+  // over the ceiling: no input exists that the cap rejects and the ceiling accepts. Deleting the cap
+  // leaves this test GREEN - measured - because the cap bounds the WORK of the `BigInt` conversion
+  // and not the outcome. It is asserted here as what it actually is: an absurd digit run is dropped.
+  // Chasing that surviving mutant with a cleverer input would be chasing something unreachable.
+  //
+  // THE POSITIVE CONTROL IS LOAD-BEARING. `good` must come back at 3, because a load that failed
+  // outright - or a file never read at all - would drop the two bad marks too and pass this test
+  // while proving nothing about the parse.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-mark-'));
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const d1 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d1);
+      await callText(d1, 3, 'saihm_remember', { content: 'seed', cellId: 'seed' });
+    } finally {
+      d1.proc.kill();
+    }
+    const f = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(f.length, 1, `expected one mark file, got: ${readdirSync(home).join()}`);
+    writeFileSync(
+      pathJoin(home, f[0]!),
+      JSON.stringify({
+        over_ceiling: { seq: '18446744073709551616' }, // 2^64 — one past the u64 ceiling, 20 chars
+        too_long: { seq: '9'.repeat(64) }, // past MAX_COUNTER_CHARS, a different arm
+        good: { seq: '3' }, // the control
+      }),
+      { mode: 0o600 },
+    );
+    const d2 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d2);
+      const ctl = await callText(d2, 3, 'saihm_remember', { content: 'x', cellId: 'good' });
+      assert.equal(ctl.isError, false);
+      assert.match(ctl.text, /seq=4/, 'positive control: the file was not loaded, so the drops below prove nothing');
+
+      const over = await callText(d2, 4, 'saihm_remember', { content: 'y', cellId: 'over_ceiling' });
+      assert.equal(over.isError, false, 'an impossible mark bricked the cell it named');
+      assert.match(over.text, /seq=1/, 'the impossible mark was admitted rather than dropped');
+
+      const long = await callText(d2, 5, 'saihm_remember', { content: 'z', cellId: 'too_long' });
+      assert.equal(long.isError, false, 'an over-long mark bricked the cell it named');
+      assert.match(long.text, /seq=1/, 'an absurd digit run was admitted rather than dropped');
+    } finally {
+      d2.proc.kill();
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: an UNPARSEABLE mark file is a degradation persistence SURVIVES', async () => {
+  // The status line appended `rollback-guard=memory-only-this-run` whenever a reason was set, and a
+  // reason is set for three different events that do not share an answer. `unreadable` and
+  // `unwritable` really do stop persistence. `unparseable` does not: the file could not be read as
+  // JSON so this run starts with no marks, and the very next write rebuilds it.
+  //
+  // MEASURED before the fix: after an unparseable file, `{cellA:{seq:5}}` was on disk and the line
+  // still said memory-only. That is a false statement in a security line - and a warning that is
+  // sometimes false is one a reader learns to skip, which costs precisely the cases where it is
+  // true. The renderer states that concern in its own words directly above this line.
+  //
+  // Both clauses are now pinned: this test owns `persisting`, the unreadable test above owns
+  // `memory-only-this-run`. One of them alone would pass against an unconditional clause.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-unparse-'));
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const d1 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d1);
+      await callText(d1, 3, 'saihm_remember', { content: 'seed', cellId: 'seed' });
+    } finally {
+      d1.proc.kill();
+    }
+    const f = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(f.length, 1, `expected one mark file, got: ${readdirSync(home).join()}`);
+    const marks = pathJoin(home, f[0]!);
+    writeFileSync(marks, '{this is not json', { mode: 0o600 });
+    const d2 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d2);
+      const w = await callText(d2, 3, 'saihm_remember', { content: 'a', cellId: 'after_corruption' });
+      assert.equal(w.isError, false);
+      const st = await callText(d2, 4, 'saihm_status', {});
+      assert.match(st.text, /seq-state=unparseable/, 'losing the file once is still worth reporting');
+      assert.match(
+        st.text,
+        /rollback-guard=persisting/,
+        'the run was called memory-only while its marks were reaching disk',
+      );
+    } finally {
+      d2.proc.kill();
+    }
+    // The claim, on disk. Without this the status text could be saying anything.
+    const after = JSON.parse(readFileSync(marks, 'utf8')) as Record<string, { seq: string }>;
+    assert.equal(after['after_corruption']?.seq, '1', 'the file was not rebuilt, so `persisting` is the false one');
   } finally {
     rmSync(home, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));

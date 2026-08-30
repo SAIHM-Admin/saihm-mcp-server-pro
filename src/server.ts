@@ -684,6 +684,11 @@ server.registerTool(
       const custody = boundedOrMarker(d.custody);
       const snapshotEpoch = boundedOrMarker(d.snapshotEpoch);
       const seqStateDegraded = client.seqStateDegraded;
+      // Read alongside the reason, not inferred from it. `unparseable` means this run STARTED with
+      // no marks and the next write rebuilds the file; `unreadable`/`unwritable` mean nothing more
+      // is written at all. Both set the reason; only the second is memory-only, and the line used to
+      // assert the second for both.
+      const seqStatePersisting = client.seqStatePersisting;
       return ok(
         // Every remaining interpolated value is endpoint-chosen, and the `\n  ` here is OURS — which
         // is exactly why a raw field carrying its own newline could mint a further line in this block.
@@ -709,7 +714,7 @@ server.registerTool(
           // other field, on its own line so it reads as a report rather than a suffix on `epoch`.
           (seqStateDegraded === null
             ? ''
-            : `\n  seq-state=${labelSafe(safeScalar(seqStateDegraded))}  rollback-guard=memory-only-this-run`),
+            : `\n  seq-state=${labelSafe(safeScalar(seqStateDegraded))}  rollback-guard=${seqStatePersisting ? 'persisting' : 'memory-only-this-run'}`),
         {
           agentIdHash,
           tier,

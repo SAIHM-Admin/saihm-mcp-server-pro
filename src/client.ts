@@ -1065,6 +1065,51 @@ class SeqState {
     return this.degradedReason;
   }
 
+  /**
+   * Are marks still reaching disk? NOT the negation of `degraded`, and that is the whole point.
+   *
+   * `unparseable` is a degradation persistence SURVIVES: the file could not be read as JSON, so this
+   * run started with no marks, but the very next write rebuilds it. MEASURED: after an unparseable
+   * file, the mark reached disk and `degraded` still said `unparseable`. `unreadable` and
+   * `unwritable` are the opposite - `path` is given up on and nothing more is written.
+   */
+  get persisting(): boolean {
+    return this.path !== undefined;
+  }
+
+  /**
+   * A persisted mark, or `null` if the entry is not one.
+   *
+   * ONE function, called from both `load` and `flushMarks`, because those carried copies of this
+   * parse and the copies had already drifted from the one at `parseDecimalBig` - same parse, same
+   * file, 700 lines apart, and only that one bounded its input before handing it to `BigInt`.
+   * Duplicating a guard is how one copy comes to lack it; this release fixed `share` for exactly
+   * that, and these two sites are the same shape.
+   *
+   * Two rejections, and only ONE of them can change an outcome. `MAX_SEQ` is the wire uint64
+   * ceiling - 20 digits - and the regex above forbids leading zeros, so every value the
+   * `MAX_COUNTER_CHARS` cap rejects is necessarily above the ceiling too. The cap therefore bounds
+   * WORK, not results: it stops `BigInt` from converting a megabyte of digits before the ceiling
+   * refuses them. Stated because a mutation that deletes the cap SURVIVES, and a surviving mutant
+   * with no explanation beside it reads as a hole in the tests rather than as subsumption. It is
+   * kept as defence-in-depth behind a guard that IS pinned, and matching `parseDecimalBig`, which
+   * bounds the identical parse the same way.
+   *
+   * The ceiling is not a bound but a definition. A seq above it cannot
+   * have come from a valid envelope, because `decodeEnvelope` parses seq as u64 - so it is not a
+   * mark that is too big, it is not a mark. Admitting one is worse than dropping it, and silently:
+   * `next()` returns MAX_SEQ+1, every subsequent write to that cell is refused as `seq_exhausted`,
+   * and nothing anywhere says the cause is a number in a local file. Dropping it costs one re-seed
+   * from the live envelope, which is the state a cold client already occupies.
+   */
+  private static parseMark(v: unknown): bigint | null {
+    const t = typeof v === 'string' ? v : (v as { seq?: unknown })?.seq;
+    if (typeof t !== 'string' || t.length > MAX_COUNTER_CHARS) return null;
+    if (!/^(?:0|[1-9][0-9]*)$/.test(t)) return null;
+    const n = BigInt(t);
+    return n > MAX_SEQ ? null : n;
+  }
+
   private load(): void {
     let raw: string;
     try {
@@ -1098,9 +1143,9 @@ class SeqState {
       // one. Refusing to load it would regress every existing agent's whole sequence state to zero
       // -- a far worse outcome than an unpinned first read, which is the state a cold start is in
       // anyway. `{seq, commitmentHash}` is the current form.
-      const seqText = typeof v === 'string' ? v : (v as { seq?: unknown })?.seq;
-      if (typeof seqText !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(seqText)) continue;
-      if (this.hwm.admit(this.agentIdHashHex, cellId, BigInt(seqText))) this.cellIds.add(cellId);
+      const seq = SeqState.parseMark(v);
+      if (seq === null) continue;
+      if (this.hwm.admit(this.agentIdHashHex, cellId, seq)) this.cellIds.add(cellId);
       // A commitment found in the file is READ PAST, deliberately, and this is the whole of the
       // decision recorded at the top of `persist`. A pinned commitment is only sound while one
       // writer owns the mark. Two sessions of the same identity - two Claude Code windows, a
@@ -1256,8 +1301,11 @@ class SeqState {
     // either discarded by the digit test below or becomes a decimal seq string this file wrote.
     for (const [cellId, v] of Object.entries(onDisk)) {
       if (cellId === '__proto__' || cellId === 'constructor' || cellId === 'prototype') continue;
-      const t = typeof v === 'string' ? v : (v as { seq?: unknown })?.seq;
-      if (typeof t === 'string' && /^(?:0|[1-9][0-9]*)$/.test(t)) obj[cellId] = { seq: t };
+      const seq = SeqState.parseMark(v);
+      // Written back in canonical decimal rather than echoed. Every accepted form already IS
+      // canonical (the regex refuses leading zeros), so this normalises nothing today and cannot
+      // widen what is written if the accepted set ever grows.
+      if (seq !== null) obj[cellId] = { seq: seq.toString(10) };
     }
     for (const cellId of this.cellIds) {
       const c = this.hwm.current(this.agentIdHashHex, cellId);
@@ -1788,6 +1836,17 @@ export class SaihmProClient {
    */
   get seqStateDegraded(): string | null {
     return this.seq.degraded;
+  }
+
+  /**
+   * True while sequence marks are still reaching disk. Read WITH `seqStateDegraded`, never inferred
+   * from it: a degradation is not the same event as persistence stopping, and reporting a run as
+   * memory-only while its marks are demonstrably on disk is a false statement in a security line.
+   * A warning that is sometimes false is one a reader learns to skip, which costs the cases where it
+   * is true - the concern the status renderer states in its own words directly above that line.
+   */
+  get seqStatePersisting(): boolean {
+    return this.seq.persisting;
   }
 
   /** This client's PUBLIC identity record (hex) to publish so others can share TO this agent. */
