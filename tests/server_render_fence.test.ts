@@ -375,9 +375,23 @@ const parse = (text: string): ts.SourceFile =>
 // `=` and is applied ON TOP of a fence rather than instead of one; `failText` composes a message out
 // of the others. A name appearing here that is not in one of those groups is the question this pin
 // exists to ask.
-const RENDER_SITES_PIN = 24;
-// Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. Three, and the
-// bar for a fourth is a sentence explaining why a delimiter, a label or a newline cannot reach it.
+// Per FILE. A whole-tree total cannot express "client.ts stopped being examined", which is the
+// omission this pin was rewritten to catch; see the sweep for why a matched-only count could not.
+const RENDER_SITES_PIN: Record<string, number> = {
+  // 1: the SAIHM_MASTER_SECRET_FILE mode advisory. This file's renders otherwise go back to the MCP
+  // host as tool results, which THIS sweep does not reach - it is keyed on `ok`/`std*.write` and
+  // client.ts calls neither. The 1 is pinned so that scope stays a stated fact rather than an
+  // impression: were it to fall to 0, the sweep would examine nothing here and still pass.
+  'client.ts': 1,
+  'index.ts': 0,
+  // 0 by design - the fences themselves render nothing; they return values their callers render.
+  'render_fence.ts': 0,
+  // 18 `ok(...)` + 6 `stdout.write` + 2 `stderr.write`.
+  'server.ts': 26,
+};
+// Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. The bar for an
+// entry is a sentence explaining why a delimiter, a label or a newline cannot reach it - no count is
+// stated here, because the one that was stated said "three" through four separate edits to the table.
 // Provenance is the whole test: "the endpoint sends it" disqualifies an entry no matter how
 // well-formed the value usually is.
 const RENDER_ALLOWED_TABLE: Record<string, string> = {
@@ -388,8 +402,6 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
   'server.ts:PACKAGE_VERSION':
     "read from this package's own package.json at a path derived from import.meta.url - our file, " +
     'not a value any caller or endpoint supplies',
-  'server.ts:\' \' + fenced':
-    'the parameter of `checkoutUrlBlock`, and this analysis cannot bind a composer\'s parameter to the arguments its callers pass. VERIFIED BY READING both call sites (the `join` and `upgrade` verbs): each passes the local `fenced`, which is `safeField(url, MAX_URL_FIELD_CHARS)`. Re-check this entry if a third caller appears',
   'server.ts:`SAIHM Session\\n agent=${labelSafe(shortScalar(agentIdHash))':
     'the status line. Every span VERIFIED fenced by reading: agent/tier/custody are labelSafe(shortScalar|safeScalar), shards/sharing are numbers-or-marker, bfsi is a number or the marker, and R/M/epoch are labelSafe(safeScalar). Reported only because the predicate does not reduce `??` and numeric unions inside a template span',
   'server.ts:`SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=$':
@@ -418,6 +430,18 @@ const SCALAR_FENCES = [
 const isFenceCall = (d: ts.Node): boolean => {
   const dd = calleeDecl(d);
   return dd !== undefined && SCALAR_FENCES.some((f) => dd === declOf('render_fence.ts', f));
+};
+// `failText` is not a SCALAR fence - it takes an `unknown` throwable and composes a MESSAGE out of
+// the five above - but it is APPLIED the same way: its argument is arbitrary and the call is what
+// contains it. Kept out of `SCALAR_FENCES` deliberately, because that list also scopes the
+// delimiter, budget and occurrence sweeps, where a message composer is the wrong unit and would
+// exempt everything it touches. This list answers only the ACCEPT-side question in `fencedValue`.
+// The property is proven, not asserted: the `failText` tests below cover an endpoint-chosen
+// code+message, a plain Error, a non-Error throw and both SaihmConfigError budgets, each `!mints`.
+const MESSAGE_FENCES = ['failText'];
+const isMessageFenceCall = (d: ts.Node): boolean => {
+  const dd = calleeDecl(d);
+  return dd !== undefined && MESSAGE_FENCES.some((f) => dd === declOf('render_fence.ts', f));
 };
 
 const walk = (n: ts.Node, out: ts.Node[] = []): ts.Node[] => {
@@ -557,7 +581,8 @@ const isFenceNode = (d: ts.Node): boolean =>
  *
  * One predicate, two polarities of safety. Containment reused where APPLICATION is required.
  */
-const isAppliedFence = (d: ts.Node): boolean => fenceOf(d) !== null || isFenceCall(d);
+const isAppliedFence = (d: ts.Node): boolean =>
+  fenceOf(d) !== null || isFenceCall(d) || isMessageFenceCall(d);
 // One hop for the whole expression AND one hop for every identifier inside it, so `' ' + fenced`
 // and `[a, fenced].join(' ')` are recognised as carrying the fence their binding holds. Hopping only
 // the outermost expression left every composed form looking unfenced.
@@ -2493,6 +2518,87 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   );
 });
 
+test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by a module tally', () => {
+  // THE ONE-ARM CLASS, structurally. This package writes tmp-then-rename in FOUR places:
+  // `SeqState.persist`, `RecallCache.persist`, the self-join identity writer, and
+  // `persistCheckoutUrl` - near-identical blocks holding the sequence state, cell plaintext, THE
+  // MASTER SECRET, and the checkout URL. Two have a behavioural test that a failed rename leaves no
+  // residue; the identity writer's failure mode needs a filesystem no test can reliably contrive.
+  // So the property is checked HERE, at each arm's own site - not by asserting the four look alike,
+  // which is the containment answer to an application question.
+  //
+  // Keyed on the ARGUMENT IDENTITY, not on a name or a count. The census two tests up counts
+  // `unlinkSync` call sites by name and aggregates them over the module, so it is placement-blind:
+  // `unlinkSync(tmp + '.NEVER-EXISTS')` keeps the count and neutralises the cleanup, and moving this
+  // arm's call into that arm keeps the total. Both were measured GREEN against it. Resolving the
+  // SYMBOL of the identifier `renameSync` was handed and demanding the SAME symbol back from
+  // `unlinkSync` inside the catch is a question neither evasion can answer.
+  const fsOrigin = (id: ts.Node): boolean => {
+    const sym = CHECKER().getSymbolAtLocation(id);
+    for (const d of sym?.declarations ?? []) {
+      const imp = ts.isImportSpecifier(d) ? d.parent.parent.parent : undefined;
+      if (imp && ts.isStringLiteral(imp.moduleSpecifier) && /^(node:)?fs$/.test(imp.moduleSpecifier.text))
+        return true;
+    }
+    return false;
+  };
+  const isFsCall = (n: ts.Node, name: string): n is ts.CallExpression =>
+    ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name &&
+    fsOrigin(n.expression);
+  const perFile: Record<string, number> = {};
+  for (const { file, sf } of SOURCES()) {
+    perFile[file] = 0;
+    for (const n of walk(sf)) {
+      if (!isFsCall(n, 'renameSync')) continue;
+      const line = sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+      perFile[file]++;
+      const tmpArg = n.arguments[0];
+      assert.ok(
+        tmpArg !== undefined && ts.isIdentifier(tmpArg),
+        `${file}:${line}: renameSync's source is not a plain identifier, so this test cannot bind ` +
+          'the tmp it would have to unlink. Name it before renaming it',
+      );
+      const tmpSym = CHECKER().getSymbolAtLocation(tmpArg as ts.Identifier);
+      // The nearest enclosing try whose catch can see the failure.
+      let t: ts.Node | undefined = n;
+      while (t !== undefined && !(ts.isTryStatement(t) && t.catchClause !== undefined)) t = t.parent;
+      assert.ok(
+        t !== undefined,
+        `${file}:${line}: renameSync is not inside a try with a catch. A rename that throws here ` +
+          'leaves the tmp - holding the whole secret it was about to become - on disk permanently',
+      );
+      const unlinksSame = walk((t as ts.TryStatement).catchClause as ts.Node).some(
+        (u) =>
+          isFsCall(u, 'unlinkSync') &&
+          u.arguments.length === 1 &&
+          ts.isIdentifier(u.arguments[0]) &&
+          CHECKER().getSymbolAtLocation(u.arguments[0] as ts.Identifier) === tmpSym,
+      );
+      assert.ok(
+        unlinksSame,
+        `${file}:${line}: the catch around this rename does not unlink \`${tmpArg.getText(sf)}\` ` +
+          'ITSELF. An unlink of any other expression - a suffixed name, a different arm\'s tmp - ' +
+          'satisfies the call-site census and still leaves this secret on disk',
+      );
+    }
+  }
+  // Per FILE and pinned. FOUR, not three: this pin's first run found `persistCheckoutUrl` in
+  // server.ts, which the round-18 audit and the note that corrected it BOTH recorded as a third arm
+  // when it is a fourth. It already had the property - it was never counted, which is the difference
+  // a placement-keyed instrument makes over a module-wide tally.
+  //
+  // Three of the four also carry a behavioural test that a failed rename leaves no residue. The
+  // fourth does not, and deliberately: what it writes is the checkout URL, which the same command
+  // has already printed to the operator's terminal in full, so a tmp copy of it beside the real file
+  // discloses nothing that was not just rendered. A FIFTH arm is a decision - it needs this
+  // property, and either a behavioural test or a reason like that one.
+  assert.deepEqual(
+    perFile,
+    { 'client.ts': 3, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1 },
+    'a tmp-then-rename arm was added, removed, or moved between modules',
+  );
+});
+
 test('the error budgets are PINNED, not merely self-consistent', () => {
   // Both assertions that bound these values compute their ceiling FROM the constants, so widening one
   // keeps the suite green — a mutation pass took MAX_ERROR_MESSAGE_CHARS from 256 to 900 and
@@ -4076,6 +4182,49 @@ test('EVERY value interpolated into rendered text is FENCED, or written down her
     ['hexOrMarker', 'scopeOrMarker', 'epochOrMarker'].some(
       (f) => calleeDecl(e) === declOf('render_fence.ts', f),
     );
+  // Every call to `fn` anywhere in the swept sources. Built by walking rather than by asking the
+  // checker for references, so it sees exactly the files this sweep is pinned over and no others.
+  const callsTo = (fn: ts.Node): ts.CallExpression[] => {
+    const out: ts.CallExpression[] = [];
+    for (const { sf } of SOURCES())
+      for (const n of walk(sf))
+        if (ts.isCallExpression(n) && calleeDecl(n) === fn) out.push(n);
+    return out;
+  };
+  /**
+   * Is every value that can arrive in this PARAMETER fenced?
+   *
+   * Answered by enumerating call sites, and every way that enumeration can be incomplete returns
+   * FALSE rather than an assumption. An EXPORTED function has callers outside `src/`, which this
+   * sweep cannot see; a SPREAD argument destroys the positional binding; a parameter with NO call
+   * sites has nothing to prove it from. Each of those is a value whose provenance is unknown, and
+   * unknown provenance is the thing this file refuses - so it is reported, not accepted.
+   */
+  const paramArgsFenced = (id: ts.Identifier, depth: number): boolean => {
+    if (depth > 8) return false;
+    const sym = CHECKER().getSymbolAtLocation(id);
+    const decl = sym?.declarations?.length === 1 ? sym.declarations[0] : undefined;
+    if (decl === undefined || !ts.isParameter(decl)) return false;
+    // A rest parameter collects an unknown number of arguments at unknown positions.
+    if (decl.dotDotDotToken !== undefined) return false;
+    const fn = decl.parent;
+    if (!ts.isFunctionDeclaration(fn) && !ts.isArrowFunction(fn) && !ts.isFunctionExpression(fn))
+      return false;
+    const mods = ts.canHaveModifiers(fn) ? ts.getModifiers(fn) : undefined;
+    if (mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return false;
+    const idx = fn.parameters.indexOf(decl);
+    if (idx < 0) return false;
+    const calls = callsTo(fn);
+    if (calls.length === 0) return false;
+    return calls.every((call) => {
+      // A spread ANYWHERE at or before this position makes the index meaningless.
+      if (call.arguments.some((a, i) => i <= idx && ts.isSpreadElement(a))) return false;
+      const arg = call.arguments[idx];
+      if (arg === undefined)
+        return decl.initializer !== undefined && fencedValue(decl.initializer, depth + 1);
+      return fencedValue(arg, depth + 1);
+    });
+  };
   const fencedValue = (n: ts.Expression, depth = 0): boolean => {
     if (depth > 8) return false;
     const e = unwrapExpr(n);
@@ -4104,7 +4253,15 @@ test('EVERY value interpolated into rendered text is FENCED, or written down her
       return e.templateSpans.every((sp) => fencedValue(sp.expression, depth + 1));
     if (ts.isIdentifier(e)) {
       const h = hopExpr(e);
-      return h !== e && fencedValue(h, depth + 1);
+      if (h !== e) return fencedValue(h, depth + 1);
+      // A PARAMETER of a local composer binds to the ARGUMENTS its callers pass. This sweep follows
+      // a composer's RETURNS and never looked at its arguments, so `'  ' + fenced` inside
+      // `checkoutUrlBlock` was unprovable here and carried an allowance whose stated reason was
+      // "VERIFIED BY READING both call sites ... re-check this entry if a third caller appears".
+      // That sentence is a promise no test could keep: the allowance is keyed on the CALLEE's own
+      // text, so it holds for any number of callers and a third one passing a raw endpoint value
+      // was measured GREEN. Binding the parameter makes the re-check happen on every run.
+      return paramArgsFenced(e, depth + 1);
     }
     // A NUMBER or BOOLEAN by type carries no delimiter, label or newline whatever its provenance.
     const tf = CHECKER().getTypeAtLocation(e).getFlags();
@@ -4121,20 +4278,44 @@ test('EVERY value interpolated into rendered text is FENCED, or written down her
     return false;
   };
   const found: string[] = [];
-  let renderSites = 0;
+  // PER FILE, not one total. A single scalar cannot separate "server.ts gained a site and client.ts
+  // lost one" from "nothing changed", and client.ts contributes exactly 1 - small enough that its
+  // going to zero vanishes inside a 27. The sweep finds entries by NAME, so the file that stops
+  // matching is precisely the file that stops being checked, and that is what must go red.
+  const renderSites: Record<string, number> = {};
+  // Every `.write(` this sweep did NOT recognise as a render stream. This is the failure the old pin
+  // could not express: `renderSites++` ran AFTER the `continue`, so a write the predicate missed was
+  // never a fall it counted - it was a site that, to the pin, did not exist. The count moved only
+  // when a MATCHED site changed, so an omission could not turn it red. Anything landing here is
+  // either a new render surface to sweep or a non-render write owed a sentence.
+  const unsweptWrites: string[] = [];
   for (const { file, sf } of SOURCES()) {
+    renderSites[file] ??= 0;
     for (const n of walk(sf)) {
       if (!ts.isCallExpression(n)) continue;
       const callee = n.expression;
       const isOk = ts.isIdentifier(callee) && callee.text === 'ok';
-      const isWrite =
-        ts.isPropertyAccessExpression(callee) &&
-        callee.name.text === 'write' &&
-        callee.expression.getText(sf).endsWith('stdout');
-      if (!isOk && !isWrite) continue;
+      const isWriteCall = ts.isPropertyAccessExpression(callee) && callee.name.text === 'write';
+      // stderr as well as stdout. Three shipped sites wrote to it - the CLI's unrecognized-argument
+      // message, the `main().catch` handler, and the client's mode advisory - and each renders
+      // caller- or endpoint-reachable text to the same operator terminal stdout renders to. All
+      // three were fenced by their authors' care rather than by this sweep, which is exactly the
+      // property this file exists to stop relying on.
+      const stream = isWriteCall ? callee.expression.getText(sf) : '';
+      const isStd = /(?:^|\.)std(?:out|err)$/.test(stream);
+      if (isWriteCall && !isStd) {
+        unsweptWrites.push(`${file}:${stream}.write   (line ${
+          sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
+        })`);
+        continue;
+      }
+      if (!isOk && !isWriteCall) continue;
+      // BEFORE the argument test, not after. A zero-argument call renders nothing, but it is still
+      // an entry point the predicate MATCHED, and counting only those that carried an argument made
+      // the pin describe this sweep's appetite rather than the file's surface.
+      renderSites[file]++;
       const arg = n.arguments[0];
       if (arg === undefined) continue;
-      renderSites++;
       // `[...].join(sep)` is the shape most of these take; the array's elements are the parts.
       let parts: ts.Expression[] = [arg];
       const a = unwrapExpr(arg);
@@ -4280,11 +4461,19 @@ test('EVERY value interpolated into rendered text is FENCED, or written down her
       }
     }
   }
-  assert.equal(
+  assert.deepEqual(
+    unsweptWrites,
+    [],
+    'a `.write(` call reaches a stream this sweep does not recognise, so nothing checks what it ' +
+      'renders. Either add the stream to the predicate, or record here why it is not a surface an ' +
+      'operator reads:\n' + unsweptWrites.join('\n'),
+  );
+  assert.deepEqual(
     renderSites,
     RENDER_SITES_PIN,
-    'the number of render entry points changed. This sweep finds them by NAME (`ok`, `stdout.write`), ' +
-      'so a rename empties it silently - which is why the count is pinned rather than trusted',
+    'the render entry points changed. This sweep finds them by NAME (`ok`, `std{out,err}.write`), ' +
+      'so a rename empties it silently - which is why the count is pinned PER FILE rather than ' +
+      'trusted, and why a file falling to zero is a failure rather than a quiet pass',
   );
   assert.deepEqual(
     found,
@@ -4345,6 +4534,13 @@ test('the render-helper export set is PINNED, so a sixth fence cannot join unnot
   // The fences among them, restated so the two lists cannot drift apart silently.
   for (const f of SCALAR_FENCES)
     assert.ok(exported.includes(f), `SCALAR_FENCES names ${f}, which render_fence.ts does not export`);
+  for (const f of MESSAGE_FENCES)
+    assert.ok(exported.includes(f), `MESSAGE_FENCES names ${f}, which render_fence.ts does not export`);
+  // The two lists are DISJOINT by construction. A name in both would be accepted by `fencedValue`
+  // for one reason and scoped into the delimiter and budget sweeps for another, and the second is
+  // the membership this file spent three rounds learning not to grant a composer.
+  for (const f of MESSAGE_FENCES)
+    assert.ok(!SCALAR_FENCES.includes(f), `${f} is in both fence lists; a composer is not a scalar fence`);
 });
 
 test('a fenced value is never rendered INSIDE a delimiter it could close', () => {

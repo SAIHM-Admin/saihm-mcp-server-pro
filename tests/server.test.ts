@@ -25,6 +25,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -795,6 +796,15 @@ test('server.ts: a failed cache persist leaves no plaintext behind in its tmp fi
   const dir = mkdtempSync(pathJoin(tmpdir(), 'saihm-tmpres-'));
   const cachePath = pathJoin(dir, 'recall.json');
   mkdirSync(cachePath); // the cache path IS a directory => renameSync(tmp, cachePath) throws
+  // POSITIVE CONTROL, snapshotted before anything runs. `deepEqual(strays, [])` alone cannot tell
+  // "cleanup worked" from "persist never ran": both leave the directory empty, and the loop above it
+  // has an empty body in the second case, so the whole test passes on a code path it never reached.
+  // Two mutations that stop the tmp EVER being created were measured green against it.
+  //
+  // A directory's mtime moves when an entry is created in it AND again when one is unlinked, so it
+  // survives the cleanup this test exists to check - which the tmp file itself, by design, does not.
+  // Measured: 200/200 create+unlink cycles moved it, and a no-op left it exactly equal.
+  const dirBefore = statSync(dir, { bigint: true }).mtimeNs;
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   const d = startServer(mock.base() + '/mcp', [], { SAIHM_RECALL_CACHE_PATH: cachePath });
@@ -810,7 +820,52 @@ test('server.ts: a failed cache persist leaves no plaintext behind in its tmp fi
         `stray tmp ${f} still holds cell plaintext`,
       );
     }
+    assert.notEqual(
+      statSync(dir, { bigint: true }).mtimeNs,
+      dirBefore,
+      'positive control: nothing was ever created in this directory, so the persist under test ' +
+        'never ran and the empty `strays` below proves nothing. Fix the setup, not this assertion',
+    );
     assert.deepEqual(strays, [], 'a failed persist must clean up after itself');
+  } finally {
+    d.proc.kill();
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: a failed SEQ-STATE persist leaves no state behind in its tmp file', async () => {
+  // The SECOND of three byte-identical tmp-then-rename arms in this client, and until now the only
+  // thing covering it was a STRUCTURAL census that counts `unlinkSync` call sites by name across the
+  // whole module. That census is placement-blind: `unlinkSync(tmp + '.NEVER-EXISTS')` neutralises
+  // the cleanup with the count intact, and deleting this arm's call while adding a second one to the
+  // cache arm keeps the total at four. Both were measured GREEN. A count is not a behaviour.
+  //
+  // What the tmp holds here is not cell plaintext but this agent's whole sequence state - every
+  // cellId it has written, its high-water seq, and the commitment pinned at that seq. That is the
+  // record the equivocation guard reads, so a copy of it left lying beside the file the operator was
+  // told to check is a durable, unswept disclosure of which cells this identity holds.
+  //
+  // Reached by SETTING `SAIHM_SEQ_STATE_PATH`, which has no default - so in a stock install this arm
+  // never runs at all and this test is the only thing that exercises it.
+  const dir = mkdtempSync(pathJoin(tmpdir(), 'saihm-seqres-'));
+  const seqPath = pathJoin(dir, 'seq.json');
+  mkdirSync(seqPath); // the seq path IS a directory => renameSync(tmp, seqPath) throws
+  const dirBefore = statSync(dir, { bigint: true }).mtimeNs;
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp', [], { SAIHM_SEQ_STATE_PATH: seqPath });
+  try {
+    await handshake(d);
+    await callText(d, 3, 'saihm_remember', { content: 'SEQ-STATE-MUST-NOT-SURVIVE-A-FAILED-PERSIST' });
+    const strays = readdirSync(dir).filter((f) => f.startsWith('seq.json.tmp.'));
+    assert.notEqual(
+      statSync(dir, { bigint: true }).mtimeNs,
+      dirBefore,
+      'positive control: nothing was ever created in this directory, so the persist under test ' +
+        'never ran and the empty `strays` below proves nothing. Fix the setup, not this assertion',
+    );
+    assert.deepEqual(strays, [], 'a failed seq-state persist must clean up after itself');
   } finally {
     d.proc.kill();
     rmSync(dir, { recursive: true, force: true });
