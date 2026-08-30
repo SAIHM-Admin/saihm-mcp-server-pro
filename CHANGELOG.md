@@ -385,9 +385,9 @@ Making the rollback guard survive a restart changed the meaning of a test the re
 of the client was written against. `remember` decided whether to re-read a cell's
 live sequence by asking whether it held a mark for it, and while marks lived only
 in memory, "we hold a mark" and "we have seen this cell live in this run" were the
-same set. Persisting them split those sets, and the following five items are what
-fell into the gap. Four are fixed here; the fifth is a documentation correction in
-`README.md`.
+same set. Persisting them split those sets, and what follows is what fell into the
+gap: the fixes in this release, and after them one documentation correction in
+`README.md` that closes the same gap in prose.
 
 - **A mark that is BEHIND the endpoint is no longer trusted.** `remember` now
   re-reads a cell's live sequence on the first touch of that cell in a process,
@@ -400,9 +400,12 @@ fell into the gap. Four are fixed here; the fifth is a documentation correction 
   detect, produced locally, out of a defence. The persisted mark keeps its whole
   security value: it is a FLOOR, and a replayed older envelope still cannot drag a
   client backwards. What it no longer does is stand in for the live read. **Cost:
-  one extra recall per updated cell per process** — the behaviour before marks
-  persisted. A cell already at the uint64 ceiling is exempt, because nothing the
-  endpoint can serve could raise it and the outcome is `seq_exhausted` either way.
+  at most one extra recall per updated cell per process** — the behaviour before
+  marks persisted, and discharged by any recall that already opened the cell,
+  since opening a row IS a live observation. A session that recalls before it
+  writes pays nothing. A cell already at the uint64 ceiling is exempt, because
+  nothing the endpoint can serve could raise it and the outcome is
+  `seq_exhausted` either way.
 - **A marks failure after an accepted write now says the cell was stored.** It
   reached the operator as a bare filesystem error out of `saihm_remember`, which
   reads as a failed write — and the repair for a failed write is to send it again,
