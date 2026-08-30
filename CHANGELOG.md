@@ -2,7 +2,7 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] — 2026-08-30
 
 Closes a defect class rather than its instances: a caller-actionable value — a
 filesystem path, or a URL the operator has to go and open — rendered under a fence
@@ -895,6 +895,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.5.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.0
 [0.4.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.4.1
 [0.4.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.4.0
 [0.3.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.3.0
@@ -909,4 +910,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.5.0...HEAD
