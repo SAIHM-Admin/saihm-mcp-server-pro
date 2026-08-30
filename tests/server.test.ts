@@ -1896,7 +1896,11 @@ test('server.ts: an unreadable mark file does not report the guard as still pers
       /rollback-guard=memory-only-this-run/,
       'a file the next write cannot get past must not be reported as still persisting',
     );
-    assert.doesNotMatch(st.text, /rollback-guard=persisting/);
+    assert.doesNotMatch(
+      st.text,
+      /rollback-guard=persisting/,
+      'one ternary renders one arm today, so this is the control for a renderer that ever emits the healthy token ALONGSIDE the degraded one -- which the positive assertion above would pass',
+    );
   } finally {
     d.proc.kill();
     rmSync(home, { recursive: true, force: true });
