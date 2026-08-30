@@ -1831,6 +1831,10 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
       // raised there would replace the error being reported. What it must not do is LOSE the marks,
       // and it does not: the pending flag survives and `flushMarks` writes every cellId this process
       // holds, so the next persisting operation carries them out with its own.
+      // This write is also what proves the batch UNWOUND. `withBatch` restores the batching flag on
+      // the throw path as well as the success path, and if it did not, every later `persist` would
+      // note a pending flush inside a batch that never ends and no marks file would exist at all -
+      // so the assertion below fails on the file's absence rather than on its contents.
       const w = await callText(d, 4, 'saihm_remember', { content: 'the next operation' });
       assert.equal(w.isError, false);
       d.proc.kill();

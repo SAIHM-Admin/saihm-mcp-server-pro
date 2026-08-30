@@ -1228,6 +1228,12 @@ class SeqState {
    * caller advances a single mark and already costs a single write. Forgetting to wrap a future loop
    * costs the OLD behaviour - slower, never wrong - which is the failure direction to choose when a
    * guard has to be applied by its caller rather than called.
+   *
+   * SYNCHRONOUS BODIES ONLY, and unenforced because the failure is benign in the same direction. An
+   * `async` body returns a promise, the batch closes before the awaited work runs, and the marks
+   * that work observes persist one at a time - the pre-batch cost, with nothing lost. Stated so the
+   * next author does not read this as `await`-aware and build something on that, not guarded,
+   * because a throw would turn a slow path into a broken one.
    */
   withBatch<T>(fn: () => T): T {
     const outer = this.batching;
@@ -3100,6 +3106,16 @@ export class SaihmProClient {
   }
 
   /**
+   * `openRecallRowsUnbatched` under ONE marks write instead of one per row - see
+   * {@link SeqState.withBatch}. Every caller goes through here; the inner name exists so the batch
+   * cannot be bypassed by accident, and the docblock below stays with the logic it describes rather
+   * than with this delegation.
+   */
+  private openRecallRows(rows: unknown[]) {
+    return this.seq.withBatch(() => this.openRecallRowsUnbatched(rows));
+  }
+
+  /**
    * Open + attribute + de-duplicate a recall row set (full recall-all OR a delta `added` list),
    * splitting it into this agent's OWN opened cells and the endpoint's SHARE ANNOUNCEMENTS.
    *
@@ -3114,11 +3130,6 @@ export class SaihmProClient {
    * and are handled under weaker rules — see the comment at the `row.shared` branch. The two streams
    * never share a key: a shared cellId may equal one this agent owns, and both must survive.
    */
-  private openRecallRows(rows: unknown[]) {
-    // ONE marks write for the whole response instead of one per row - see `SeqState.withBatch`.
-    return this.seq.withBatch(() => this.openRecallRowsUnbatched(rows));
-  }
-
   private openRecallRowsUnbatched(rows: unknown[]): {
     cells: RecalledCell[];
     announcements: SharedAnnouncement[];

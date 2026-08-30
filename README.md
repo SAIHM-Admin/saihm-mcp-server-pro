@@ -105,8 +105,9 @@ things to say.
 Ask your SAIHM-connected assistant for the briefing:
 
 > Recall my SAIHM memories and write a short briefing I can paste into another
-> assistant. Facts and preferences only, no preamble. Leave out anything I wouldn't
-> want sitting in someone else's chat history.
+> assistant. Facts and preferences only, no preamble. Leave out every secret — no
+> keys, passwords, tokens or account numbers — and nothing about other people.
+> List what you left out, by description, so I can see what you dropped.
 
 Paste what you get back above your first question over there.
 
@@ -118,10 +119,10 @@ Paste that into your SAIHM-connected assistant and say **"Remember this."**
 
 One thing to know before you paste. A briefing leaves your machine as ordinary
 text and lives in that assistant's chat history under that company's terms — it is
-no longer encrypted, and SAIHM's guarantees stop at your machine's edge. That is
-why the first prompt asks it to leave things out; decide what travels. Connecting a
-browser assistant directly would need a different kind of connection than SAIHM
-offers today.
+no longer encrypted, and SAIHM's guarantees stop at your machine's edge. Read the
+briefing before you paste it; the prompt asks for the list of omissions so you can
+check what travelled, not take it on trust. Connecting a browser assistant directly
+would need a different kind of connection than SAIHM offers today.
 
 ## Your memories follow your key
 
