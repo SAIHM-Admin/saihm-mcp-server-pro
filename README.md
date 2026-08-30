@@ -163,7 +163,7 @@ accepts.
 | Tools appear but every call fails | `SAIHM_ENDPOINT_URL` unreachable |
 | "no identity" | Setup hasn't run on this machine yet |
 | A different memory than you expected | This machine has its own key rather than yours |
-| `status` mentions `seq-state` | A small local safeguard file couldn't be read. Your memories are unaffected. The same line ends `rollback-guard=persisting` (it has already repaired itself) or `memory-only-this-run` (it will try again next restart) |
+| `status` mentions `seq-state` | A small local safeguard file couldn't be read or written. Your memories are unaffected. The same line ends `rollback-guard=persisting` (it has already repaired itself) or `memory-only-this-run` (it will try again next restart) |
 
 ## How it works
 

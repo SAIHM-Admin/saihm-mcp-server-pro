@@ -1859,3 +1859,47 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
     }
   }
 });
+
+test('server.ts: an unreadable mark file does not report the guard as still persisting', async () => {
+  // `persisting` is not the negation of `degraded`, and the case that split them was `unparseable`:
+  // a file that could not be READ AS JSON leaves nothing to load, but the very next write rebuilds
+  // it, so persistence survives. `unreadable` was documented as the opposite and did not behave like
+  // it. `load` records the failure and returns with `path` still set, and nothing gives that path up
+  // until a WRITE is attempted - so in the window before the first write, `saihm_status` reported
+  // `rollback-guard=persisting` over a file the next write cannot get past.
+  //
+  // That window is the one an operator looks at. `saihm_status` performs no write, so checking
+  // straight after a restart is exactly how someone would confirm the safeguard is intact, and the
+  // answer was a reassurance that the next write would disprove.
+  //
+  // A DIRECTORY at the path, not a mode-000 file: `chmod` proves nothing when the suite runs as
+  // root, and EISDIR is deterministic for every user. It is also the harder arm - EISDIR is in the
+  // benign set `flushMarks` reads past, so this file is NOT one that fails closed at the read; it
+  // fails later, at the rename onto a directory. The claim being tested is that the report is
+  // honest in the window, not that the read is what refuses.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-persisting-'));
+  const seqDir = pathJoin(home, 'is-a-directory.json');
+  mkdirSync(seqDir);
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp', [], {
+    SAIHM_HOME: home,
+    SAIHM_SEQ_STATE_PATH: seqDir,
+  });
+  try {
+    await handshake(d);
+    const st = await callText(d, 3, 'saihm_status', {});
+    assert.equal(st.isError, false, 'status is read-only and must survive an unreadable mark file');
+    assert.match(st.text, /seq-state=unreadable\(EISDIR\)/, 'premise: the load read failed');
+    assert.match(
+      st.text,
+      /rollback-guard=memory-only-this-run/,
+      'a file the next write cannot get past must not be reported as still persisting',
+    );
+    assert.doesNotMatch(st.text, /rollback-guard=persisting/);
+  } finally {
+    d.proc.kill();
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});

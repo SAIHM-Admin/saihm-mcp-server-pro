@@ -1053,6 +1053,13 @@ class SeqState {
   private degradedReason: string | null = null;
 
   /**
+   * Did the READ at construction fail for a reason other than the file being absent? See
+   * {@link persisting}, which is the only reader - this is not a second degradation, it is the
+   * knowledge that the first write will not survive, available before that write is attempted.
+   */
+  private loadReadFailed = false;
+
+  /**
    * Did the OPERATOR name this file, or did we choose it?
    *
    * The distinction decides what a failed write means, and the two answers are genuinely different
@@ -1093,7 +1100,19 @@ class SeqState {
    * `unwritable` are the opposite - `path` is given up on and nothing more is written.
    */
   get persisting(): boolean {
-    return this.path !== undefined;
+    if (this.path === undefined) return false;
+    // A READ that failed at load is not a state persistence survives either, even though `path` is
+    // still set and no write has been attempted yet. `saihm_status` performs no write, so this is
+    // the window an operator actually looks at, and reporting `persisting` in it tells them the
+    // safeguard is intact when the very next write is what disproves it.
+    //
+    // The coupling that makes this sound, named because a future edit could break it silently:
+    // every code that reaches here also fails the WRITE. `flushMarks` fails closed on EACCES, EPERM
+    // and EIO, so those never reach disk; its benign set is exactly ENOENT, EISDIR and ENOTDIR, and
+    // ENOENT does not get here at all while the other two fail later anyway - EISDIR at the rename
+    // onto a directory, ENOTDIR at the `mkdirSync`. If a code is ever added to that benign set which
+    // a write can survive, this getter stops being true and has to be derived rather than flagged.
+    return !this.loadReadFailed;
   }
 
   /**
@@ -1139,8 +1158,10 @@ class SeqState {
       // that path AEAD-authenticates the seq before trusting it. Anything ELSE — a permission
       // failure, a directory where the file should be — is a read we could not perform, and
       // reporting it as "first run" is how a guard disarms without anyone noticing.
-      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT')
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
         this.degradedReason = `unreadable(${(e as NodeJS.ErrnoException)?.code ?? 'unknown'})`;
+        this.loadReadFailed = true;
+      }
       return;
     }
     let parsed: unknown;

@@ -423,6 +423,14 @@ fell into the gap. Four are fixed here; the fifth is a documentation correction 
   performed n whole-file rewrites of a file that is itself O(n) — quadratic, on the
   first operation this package recommends anyone run.
 
+- **An unreadable marks file no longer reports the guard as still persisting.**
+  `saihm_status` performs no write, so checking it straight after a restart is how
+  someone confirms the safeguard is intact — and in that window a file the next
+  write cannot get past was reported as `rollback-guard=persisting`. `persisting`
+  and `degraded` are deliberately not each other's negation, because an unparseable
+  file IS a state persistence survives; an unreadable one is not, and it was being
+  reported as though it were.
+
 `README.md`'s configuration table and troubleshooting row for
 `SAIHM_SEQ_STATE_PATH` described the DEFAULT location's behaviour under the
 variable that overrides it. A location you set is yours: if it cannot be written,
