@@ -3033,40 +3033,32 @@ export class SaihmProClient {
         `cannot share unknown cell '${grant.cellId}'`,
       );
     }
-    let envelope;
-    try {
-      envelope = decodeEnvelope(own.wire);
-    } catch {
-      throw new SaihmEndpointError(
-        502,
-        'malformed_envelope',
-        `endpoint returned a malformed envelope for cell '${grant.cellId}'`,
-      );
-    }
-    if (!ctEqual(envelope.agentIdHash, this.identity.agentIdHash)) {
-      throw new SaihmEndpointError(
-        502,
-        'foreign_envelope',
-        'endpoint returned an envelope bound to a different agent',
-      );
-    }
-    if (envelope.cellId !== grant.cellId) {
-      throw new SaihmEndpointError(
-        502,
-        'cell_mismatch',
-        `endpoint returned cell '${envelope.cellId}' for requested '${grant.cellId}'`,
-      );
-    }
-    // Rollback parity with the read path: if we already know a newer seq for this cell, refuse to
-    // re-wrap a stale version the endpoint may have replayed (the grantee would otherwise read it).
-    const knownSeq = this.seq.current(grant.cellId);
-    if (knownSeq !== undefined && envelope.seq < knownSeq) {
-      throw new SaihmEndpointError(
-        502,
-        'stale_cell',
-        `endpoint returned a rolled-back envelope for cell '${grant.cellId}' (seq ${envelope.seq} < ${knownSeq})`,
-      );
-    }
+    // ONE authority for what a served envelope must satisfy, and it is the read path's. This block
+    // used to re-implement a SUBSET of `openRow` inline - structural decode, agentIdHash, cellId,
+    // and `seq <` - and the two checks it left out are the two that decide this case: the AEAD open
+    // that authenticates the envelope, and the equal-seq commitment comparison.
+    //
+    // A seq legitimately REPEATS. `remember` advances the mark only after the endpoint accepts the
+    // write, so a committed write whose response was lost leaves the mark unadvanced and the next
+    // write reuses that seq - measured, and the reason the commitment pin exists at all. Both
+    // envelopes at that seq are genuinely signed by this identity, so `seq <` is false for BOTH and
+    // the endpoint could hand `share` whichever it preferred. The superseded one was then re-wrapped
+    // to the GRANTEE, who has no pin, no history, and no way to know they are reading a version the
+    // sharer replaced. The caller saw nothing either: `share` returned success.
+    //
+    // That is why this is not a duplicate-code cleanup. A guard copied into a second site is a guard
+    // that can be missing from one of them; a guard CALLED cannot be. The read path grew the
+    // commitment check and this copy did not, and nothing existed to notice.
+    //
+    // Side effects are intended, not tolerated: `openRow` observes the seq and pins the commitment
+    // exactly as a read would, so sharing a cell this session has not read establishes the same pin
+    // a read would have. It also tightens two error paths - an undecryptable envelope now surfaces
+    // as a typed `undecryptable` here rather than as whatever `shareCell` threw on the unwrap.
+    this.openRow(grant.cellId, own.wire);
+    // The SAME bytes `openRow` just authenticated. `decodeEnvelope` is a pure function of `own.wire`,
+    // so this is that envelope and not a second opinion; it is re-derived only because `openRow`
+    // returns the plaintext and `shareCell` needs the envelope.
+    const envelope = decodeEnvelope(own.wire);
     // Caller-supplied grant inputs: surface a malformed record / pinned hash as a TYPED error rather
     // than leaking client-pro's raw WireFormatError / hex Error past this client's error contract.
     // (shareCell's KeySubstitutionError below is intentionally distinct — it is a security signal.)

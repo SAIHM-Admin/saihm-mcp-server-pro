@@ -31,6 +31,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WireEnvelope } from '@saihm/client-pro';
+import { deriveIdentity, encodeIdentityRecord, toHex } from '@saihm/client-pro';
 import { SaihmProClient, SaihmEndpointError } from '../src/client.js';
 
 interface Rig {
@@ -43,11 +44,14 @@ interface Rig {
   serve: (index: number) => void;
   /** Serve the next recall wearing this `publicMeta.commitmentHash`; `null` restores the real one. */
   forgeCommitment: (hex: string | null) => void;
+  /** Every `saihm_share` the endpoint received — a re-wrap that reached the wire is a leak. */
+  shared: unknown[];
   done: () => Promise<void>;
 }
 
 async function rig(seqStatePath: string): Promise<Rig> {
   const versions: WireEnvelope[] = [];
+  const shared: unknown[] = [];
   let lose = false;
   let index = -1;
   let forged: string | null = null;
@@ -95,6 +99,11 @@ async function rig(seqStatePath: string): Promise<Rig> {
         );
         return;
       }
+      if (method === 'saihm_share') {
+        shared.push(params);
+        send({ cellId: 'X', sharer: 'aa'.repeat(16), recipient: 'bb'.repeat(16) });
+        return;
+      }
       send({ error: 'unused' });
     })();
   });
@@ -108,6 +117,7 @@ async function rig(seqStatePath: string): Promise<Rig> {
       { tier: 'PRO', seqStatePath },
     ),
     versions,
+    shared,
     loseNextResponse: () => (lose = true),
     serve: (i) => (index = i),
     forgeCommitment: (hex) => (forged = hex),
@@ -182,6 +192,65 @@ describe('PC-SEQ-COMMITMENT: two envelopes at one seq are distinguishable', () =
           return true;
         },
         'the endpoint served a different envelope at an already-observed seq and it was accepted',
+      );
+    } finally {
+      await r.done();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('SHARE refuses the equivocating envelope too, and does not re-wrap it to the grantee', async () => {
+    // The sibling of the case above, on the path where the consequence lands on SOMEONE ELSE.
+    // `share` re-wraps the DEK of whatever envelope the endpoint returns and grants it away. It used
+    // to validate that envelope with a LOCAL COPY of part of the read path - structural decode,
+    // agentIdHash, cellId, `seq <` - and the copy never grew the commitment check that the read path
+    // grew. At equal seq, `seq <` is false for BOTH envelopes, so the endpoint chose which version
+    // the grantee received, the sharer was told it succeeded, and the grantee has no pin, no history
+    // and no way to tell. A guard duplicated is a guard that can be missing from one copy.
+    //
+    // The assertion that matters is `r.shared.length === 0`. Rejecting is not enough on its own: a
+    // re-wrap that reached the wire before the throw would already have handed the endpoint a
+    // grantee-openable copy of the superseded cell, and the exception would be cosmetic.
+    const dir = mkdtempSync(join(tmpdir(), 'saihm-seq-'));
+    const r = await rig(join(dir, 'seq.json'));
+    const grantee = deriveIdentity(new Uint8Array(32).fill(9));
+    const to = {
+      recipientRecord: encodeIdentityRecord(grantee.identityRecord),
+      recipientPinnedAgentIdHashHex: toHex(grantee.agentIdHash),
+    };
+    try {
+      await r.client.remember('v1', { cellId: 'X' });
+      r.loseNextResponse();
+      await assert.rejects(
+        r.client.remember('v2 — committed, response lost', { cellId: 'X' }),
+        'setup: the lost response must surface as a failure, or the mark would advance',
+      );
+      await r.client.remember('v3 — reuses the seq', { cellId: 'X' });
+      const seqs = r.versions.map((w) => String((w as unknown as { seq: unknown }).seq));
+      assert.deepEqual(seqs, ['1', '2', '2'], 'setup: the lost response must cause a seq reuse');
+
+      // POSITIVE CONTROL, and it is doing two jobs. It proves this rig can complete a share at all -
+      // without it, a throw below would be indistinguishable from `share` being broken outright -
+      // and it is what ESTABLISHES the pin at seq 2, since a share on a cell with no pin has nothing
+      // to compare against and would pass whatever the endpoint served.
+      r.serve(2); // the version this client last wrote
+      await r.client.share({ cellId: 'X', ...to });
+      assert.equal(r.shared.length, 1, 'positive control: an honest share must reach the endpoint');
+
+      r.serve(1); // the OTHER envelope at that same seq
+      await assert.rejects(
+        r.client.share({ cellId: 'X', ...to }),
+        (e: unknown) => {
+          assert.ok(e instanceof SaihmEndpointError, `wrong error type: ${String(e)}`);
+          assert.equal(e.code, 'stale_cell');
+          return true;
+        },
+        'share accepted a different envelope at an already-observed seq and re-wrapped it out',
+      );
+      assert.equal(
+        r.shared.length,
+        1,
+        'the superseded envelope was re-wrapped to the grantee before the throw - the throw is cosmetic',
       );
     } finally {
       await r.done();

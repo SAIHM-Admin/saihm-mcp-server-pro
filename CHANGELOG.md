@@ -328,6 +328,42 @@ than restarting the count. Both are asserted against a real sealed envelope, sin
 against a mock that serves no envelope and enforces no monotonicity the write
 succeeds either way and the assertion proves nothing.
 
+### `share` now applies the same guard the read path does
+
+`share` re-wraps the data-encryption key of whatever envelope the endpoint returns
+and grants it to someone else. It validated that envelope with a local copy of
+part of the read path — a structural decode, the agent binding, the cell id, and
+`seq <` — and that copy never grew the commitment check the read path grew. So the
+whole equivocation guard was absent from the one path whose output goes to a third
+party.
+
+The gap is reachable by an ordinary sequence, not a contrived one. A sequence
+number legitimately repeats: a write the endpoint commits but whose response is
+lost leaves the high-water mark unadvanced, and the next write reuses that number.
+Both envelopes at that number are genuinely signed by the same identity, so
+`seq <` is false for both and the endpoint could hand `share` whichever it
+preferred. The superseded version was then re-wrapped to the grantee — who holds no
+pin, no history, and no way to tell — while the sharer was told the share
+succeeded.
+
+`share` now routes the returned envelope through the same `openRow` the read path
+uses, rather than through a partial reimplementation of it. The change is
+subtractive: a duplicated guard is deleted and the canonical one is called. A guard
+copied into a second site can be missing from one of them; a guard called cannot
+be.
+
+What the endpoint could do here was always bounded, and is stated so the fix is not
+read as larger than it is: it could not forge an envelope, because the re-wrap
+unwraps with the sharer's own key-encryption key and a forged wrapping does not
+open. The exposure was replay of the sharer's own superseded versions.
+
+Two error paths tighten as a consequence. An envelope this identity cannot open now
+raises `undecryptable` from `share` rather than whatever the re-wrap threw, and an
+envelope that differs from the pinned commitment at an already-observed sequence
+raises `stale_cell` where `share` previously succeeded. `share` also observes and
+pins exactly as a read does, so sharing a cell this session has not read
+establishes the same pin a read would have.
+
 ### Compatibility
 
 The tool LIST does not change, and neither does the public API of `index.js`. SIXTEEN
