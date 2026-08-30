@@ -960,6 +960,87 @@ test('server.ts: a venue with the KEY but no marks re-seeds from the live envelo
   }
 });
 
+test('server.ts: an UNREADABLE mark file is never overwritten with this session\'s cells', async () => {
+  // The merge added for concurrent processes reads the file back before rewriting it, and that read
+  // shared one catch with the JSON parse under the comment "absent or unreadable - either way this
+  // process's own view is the whole of what we know". False for the second half. ABSENT means there
+  // is nothing to merge; UNREADABLE means marks may be sitting there intact and unseen, and writing
+  // anyway replaces every one of them with the handful this session happened to touch.
+  //
+  // MEASURED before the guard: a mode-000 file holding two marks, in a WRITABLE directory, came back
+  // holding one - this session's. That is B4's silent compaction, arriving through the single branch
+  // the merge does not cover, and `saihm_status` reported `unreadable(EACCES)` the whole time. A
+  // guard that reports a read failure and then performs the write is reporting its own damage.
+  //
+  // BOTH ARMS, because the correct answer differs and the difference is the S1 policy split: a path
+  // the OPERATOR named must fail loudly, a path we DEFAULTED must degrade. What neither may do is
+  // destroy the file. That last clause is the one assertion both arms share.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-unread-'));
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    // ARM 1 - EXPLICIT path. Named by the operator, so an unreadable file is their configuration
+    // error and surfaces as one.
+    const explicit = pathJoin(home, 'named-by-operator.json');
+    const seeded = JSON.stringify({ old_a: { seq: '7' }, old_b: { seq: '9' } });
+    writeFileSync(explicit, seeded, { mode: 0o600 });
+    chmodSync(explicit, 0o000);
+    const d1 = startServer(mock.base() + '/mcp', [], {
+      SAIHM_HOME: home,
+      SAIHM_SEQ_STATE_PATH: explicit,
+    });
+    try {
+      await handshake(d1);
+      const r = await callText(d1, 3, 'saihm_remember', { content: 'a', cellId: 'fresh' });
+      assert.equal(r.isError, true, 'an operator-named path that cannot be read must not fail silently');
+    } finally {
+      d1.proc.kill();
+    }
+    chmodSync(explicit, 0o600);
+    assert.equal(
+      readFileSync(explicit, 'utf8'),
+      seeded,
+      'the explicit arm overwrote a file it had just failed to read',
+    );
+
+    // ARM 2 - DEFAULT path. Discovered the way a real one comes to exist: let the server create it,
+    // then seed it with marks this next session will never touch. Constructing the name by hand
+    // would test my arithmetic on the identity hash rather than the behaviour.
+    const d2 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d2);
+      await callText(d2, 3, 'saihm_remember', { content: 'seed', cellId: 'seeded_cell' });
+    } finally {
+      d2.proc.kill();
+    }
+    const marks = readdirSync(home).filter((f) => /^seq\.[0-9a-f]{16}\.json$/.test(f));
+    assert.equal(marks.length, 1, `expected one identity-scoped mark file, got: ${readdirSync(home).join()}`);
+    const defaulted = pathJoin(home, marks[0]!);
+    const seeded2 = JSON.stringify({ untouched_a: { seq: '4' }, untouched_b: { seq: '6' } });
+    writeFileSync(defaulted, seeded2, { mode: 0o600 });
+    chmodSync(defaulted, 0o000);
+    const d3 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d3);
+      const w = await callText(d3, 3, 'saihm_remember', { content: 'b', cellId: 'different_cell' });
+      assert.equal(w.isError, false, 'a path WE chose must never fail a write the endpoint accepted');
+      const st = await callText(d3, 4, 'saihm_status', {});
+      assert.match(st.text, /seq-state=unreadable\(EACCES\)/, 'the degradation must be answerable, not silent');
+    } finally {
+      d3.proc.kill();
+    }
+    chmodSync(defaulted, 0o600);
+    assert.equal(
+      readFileSync(defaulted, 'utf8'),
+      seeded2,
+      'the default arm destroyed two marks it never read - this is the compaction, not a merge',
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
 test('server.ts: two servers on one home MERGE their marks instead of clobbering', async () => {
   // B11. The file is rewritten whole with no lock, and one identity routinely sits behind several
   // processes - two editor windows, a terminal beside them, the same person at home and at work.

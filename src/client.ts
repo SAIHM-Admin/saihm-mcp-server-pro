@@ -1116,6 +1116,16 @@ class SeqState {
   private static tmpCounter = 0;
 
   /**
+   * Marks a failure that came from READING the file we were about to merge, not from writing it.
+   *
+   * `persist` labels the degradation from where its catch sits, and that catch sits on the write. So
+   * a file whose own mode is 000, in a perfectly writable directory, reported `unwritable(EACCES)` -
+   * measured - and sent the operator to check the wrong thing. Naming the failure from the catch
+   * site rather than from the failure is the same defect this release is named for, one level down.
+   */
+  private static readonly READ_FAILED = Symbol('saihm.seqReadFailed');
+
+  /**
    * SEQ ONLY, never the commitment. See the note in `load`: a persisted commitment is sound only
    * while a single writer owns the mark, and two sessions of one identity legitimately collide at a
    * seq. The high-water mark carries no such hazard - it moves in one direction, so a mark seen
@@ -1139,7 +1149,15 @@ class SeqState {
       // unwritable a millisecond later, and a failing syscall per write costs more than the
       // guarantee is worth. A restart re-attempts.
       this.path = undefined;
-      this.degradedReason = `unwritable(${(e as NodeJS.ErrnoException)?.code ?? 'unknown'})`;
+      // WHAT failed, not where it was caught. A read failure and a write failure send an operator to
+      // different files with different fixes, and only one of them is the directory.
+      let how = 'unwritable';
+      try {
+        if (typeof e === 'object' && e !== null && SeqState.READ_FAILED in e) how = 'unreadable';
+      } catch {
+        /* same proxy reasoning as the tag site; fall back to the write label */
+      }
+      this.degradedReason = `${how}(${(e as NodeJS.ErrnoException)?.code ?? 'unknown'})`;
     }
   }
 
@@ -1166,11 +1184,71 @@ class SeqState {
     // AEAD-authenticated path - so the worst case degrades to the state a cold client already
     // occupies. That is the strongest claim available without a lock file, and it is stated rather
     // than dressed up as atomicity.
+    //
+    // THE READ AND THE PARSE ARE SEPARATE FAILURES and were one. `absent or unreadable - either way
+    // this process's own view is the whole of what we know` was false for the second half: absent
+    // means there is nothing to merge, UNREADABLE means marks may be sitting there perfectly intact
+    // and we cannot see them. Swallowing both wrote this session's cells over a file we never read.
+    // MEASURED before this guard: a mode-000 file holding `{old_a:7, old_b:9}` in a WRITABLE
+    // directory came back as `{fresh_cell:1}` - two anti-rollback marks destroyed, silently, while
+    // `degraded` dutifully reported `unreadable(EACCES)`. Reporting a read failure and then
+    // performing the write is a guard reporting its own damage. That is B4's compaction arriving
+    // through the one branch the merge does not cover.
     let onDisk: Record<string, unknown> = {};
+    let diskRaw: string | undefined;
     try {
-      onDisk = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-    } catch {
-      /* absent or unreadable - either way this process's own view is the whole of what we know */
+      diskRaw = readFileSync(path, 'utf-8');
+    } catch (e) {
+      // THE BENIGN SET IS "THERE ARE NO MARKS OF OURS HERE TO LOSE", not "the read succeeded".
+      // ENOENT - nothing at this path. EISDIR - a directory, which is not a marks file. ENOTDIR - a
+      // component is not a directory, so our file cannot exist. None of the three can be hiding
+      // marks, so writing over them destroys nothing, which is the entire property this guard
+      // defends. EACCES, EPERM and EIO are the opposite case: the file may be sitting there intact
+      // and unreadable, and those FAIL CLOSED.
+      //
+      // BOTH EXCEPTIONS ARE THERE BECAUSE OMITTING THEM BROKE SOMETHING MEASURABLE, and each is
+      // pinned by a sibling test rather than by argument.
+      //
+      // EISDIR: the test proving a failed rename leaves no tmp behind arranges its failure by making
+      // the path a DIRECTORY. Without this, the read refused first, no tmp was ever created, and the
+      // rename guard was never exercised. Its own positive control caught it - "nothing was created
+      // in this directory, so the empty strays below prove nothing" - which is what a control is for.
+      // A guard that makes an existing test vacuous has narrowed the code under test, not hardened it.
+      //
+      // ENOTDIR: this read sits AHEAD of the `mkdirSync` below, so without this exception an
+      // unmakeable directory was reported as `ENOTDIR ... open '<dir>/seq.json'` - an `open` naming
+      // the FILE - where the operator needs `mkdir` naming the DIRECTORY they have to go and fix.
+      // Letting it fall through is what keeps that diagnosis with the syscall that owns it. Pinned
+      // by the test that asserts Node names the directory; drop `ENOTDIR` here and that test fails.
+      // Reordering the two calls also fixes it, and was tried - but no test can tell the orderings
+      // apart once this exception exists, so the exception is the guard and the order is not.
+      //
+      // Failing closed here means THROWING, handed to `persist`, whose policy already splits an
+      // operator-named path (throw - their configuration, their problem to see) from a defaulted one
+      // (degrade to memory, never break an accepted write). Deciding it here would duplicate that
+      // split, which is the defect `share` was fixed for one commit earlier.
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOENT' && code !== 'EISDIR' && code !== 'ENOTDIR') {
+        // Guarded like `markPathBearing`, and for its stated reason: a fence on the failure path
+        // that can itself throw is not a fence. Nothing reaching here today is a proxy - these are
+        // Node fs errors - but the tag is best-effort and the original error is rethrown either way.
+        try {
+          if (typeof e === 'object' && e !== null)
+            Object.defineProperty(e, SeqState.READ_FAILED, { value: true, enumerable: false });
+        } catch {
+          /* frozen, sealed, or a hostile trap - the throw below is what matters */
+        }
+        throw e;
+      }
+    }
+    if (diskRaw !== undefined) {
+      try {
+        onDisk = JSON.parse(diskRaw) as Record<string, unknown>;
+      } catch {
+        // Present but UNPARSEABLE is genuinely different from unreadable: there are no marks to
+        // preserve, so rewriting loses nothing that could ever have been read back. Not merged, not
+        // thrown - and distinguished from the read failure above rather than sharing its catch.
+      }
     }
     // Read without naming properties, deliberately: this is the shape written by a DIFFERENT
     // process, possibly an older build, so the readable shapes are exactly the two `load` accepts and
@@ -1187,16 +1265,15 @@ class SeqState {
       const prior = obj[cellId];
       if (prior === undefined || BigInt(prior.seq) < c) obj[cellId] = { seq: c.toString(10) };
     }
-    // `mode` applies ONLY when the directory is CREATED — an existing one keeps its own
-    // permissions, so this hardens the path we make and never re-permissions a shared one.
-    // Pinned rather than left to the umask, matching the identity writer above: under a
-    // umask of 0 the default is 0777, and this directory holds cell plaintext at rest.
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     // The counter is load-bearing, not decoration. `wx` REFUSES an existing path, and pid+ms alone
     // repeats whenever two marks advance inside one millisecond - which `recall` does routinely,
     // observing a row per cell. That collision used to throw out of `remember`; it would now trip
     // the degradation above and quietly stop persisting for the rest of the run, so the failure
     // would have MOVED rather than gone.
+    // `mode` applies ONLY when the directory is CREATED - an existing one keeps its own permissions,
+    // so this hardens the path we make and never re-permissions a shared one. Pinned rather than
+    // left to the umask: under a umask of 0 the default is 0777.
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const tmp = `${path}.tmp.${process.pid}.${Date.now()}.${SeqState.tmpCounter++}`;
     writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600, flag: 'wx' });
     try {

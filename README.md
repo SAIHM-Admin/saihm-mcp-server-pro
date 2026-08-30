@@ -163,6 +163,7 @@ accepts.
 | Tools appear but every call fails | `SAIHM_ENDPOINT_URL` unreachable |
 | "no identity" | Setup hasn't run on this machine yet |
 | A different memory than you expected | This machine has its own key rather than yours |
+| `status` mentions `seq-state` | A small local file can't be read or written. Your memories are fine; a safeguard is running in memory only until the next restart |
 
 ## How it works
 

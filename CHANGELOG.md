@@ -307,6 +307,19 @@ one commit earlier was armed for nobody across a restart.
   rewritten whole with no lock, and one identity routinely sits behind several
   processes; a plain write dropped every mark the other process owned and handed
   back the sequence space the file exists to defend.
+- **A file that cannot be READ is never overwritten.** The merge reads the file back
+  before rewriting it, and that read shared a catch with the JSON parse. Absent and
+  unreadable are not the same event: absent means there is nothing to merge, while
+  unreadable means marks may be sitting there intact and unseen. Measured, a
+  mode-600-turned-000 file holding two marks — in a writable directory — came back
+  holding one, this session's. The read now fails closed, so an operator-named path
+  raises the error and a defaulted one degrades to memory, and in neither case is the
+  file touched. Absent, a directory, or a path whose parent is not a directory stay
+  benign: none of them can be hiding marks. A present-but-unparseable file also stays
+  benign, since there is nothing in it to preserve.
+- **The degradation names what failed, not where it was caught.** A file that could
+  not be read reported `unwritable`, sending an operator to check directory
+  permissions for a file whose own mode was the problem.
 - **A damaged or hand-edited file no longer resets the count to zero silently** —
   unreadable and unparseable states are distinguished from "not there yet", and
   `__proto__`, `constructor` and `prototype` keys are skipped.
@@ -357,12 +370,14 @@ read as larger than it is: it could not forge an envelope, because the re-wrap
 unwraps with the sharer's own key-encryption key and a forged wrapping does not
 open. The exposure was replay of the sharer's own superseded versions.
 
-Two error paths tighten as a consequence. An envelope this identity cannot open now
-raises `undecryptable` from `share` rather than whatever the re-wrap threw, and an
+Three error paths tighten as a consequence. An envelope this identity cannot open
+now raises `undecryptable` from `share` rather than whatever the re-wrap threw; an
 envelope that differs from the pinned commitment at an already-observed sequence
-raises `stale_cell` where `share` previously succeeded. `share` also observes and
-pins exactly as a read does, so sharing a cell this session has not read
-establishes the same pin a read would have.
+raises `stale_cell` where `share` previously succeeded; and because `share` now
+observes, a session that only shares can surface a sequence-state write failure
+that previously only `remember` and `recall` could reach. `share` also pins exactly
+as a read does, so sharing a cell this session has not read establishes the same pin
+a read would have.
 
 ### Compatibility
 
