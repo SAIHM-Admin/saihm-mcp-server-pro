@@ -1061,13 +1061,19 @@ if (selfJoinEnabled()) {
           });
 
         await waitForJoinSignal(15_000);
-        if (joinState?.error) {
-          const e = joinState.error;
-          joinState = null;
+        // Read THIS flow's state object, not the module global. Every background WRITE above is
+        // guarded by `joinState === s`; these reads had no matching guard. A third interleaved call
+        // can install a newer flow here — the already-running branch clears `joinState` on error,
+        // which reopens the fresh path — and this call then reported the NEWER flow's state while
+        // its OWN failure went unreported and rendered as pending. Guarding one side of a generation
+        // check and not the other is the one-arm shape this package keeps reproducing.
+        if (s.error) {
+          const e = s.error;
+          if (joinState === s) joinState = null; // clearing unconditionally would kill a NEWER join
           return fail(e);
         }
-        if (joinState?.result) return ok(joinSuccessText(joinState)); // instant already_granted
-        if (joinState?.prompt) return ok(joinPendingText(joinState));
+        if (s.result) return ok(joinSuccessText(s)); // instant already_granted
+        if (s.prompt) return ok(joinPendingText(s));
         return ok('Starting your free activation — ask me to "Join SAIHM" again in a few seconds to get your approval code.');
       } catch (e) {
         joinState = null;

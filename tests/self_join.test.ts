@@ -616,3 +616,69 @@ test('a corrupt self-join identity names the FILE on the join paths too, not a v
   );
   rmSync(home, { recursive: true, force: true });
 });
+
+const JOINSTATE_TAIL_REFS_PIN = 6;
+
+// A generation check guards WRITES and READS, or it guards nothing. Every background callback in the
+// fresh-join flow already wrote under `joinState === s`; the reads after `waitForJoinSignal` did not,
+// and that asymmetry was reachable: the already-running branch CLEARS `joinState` on error, which
+// reopens the fresh path for a third interleaved call, and this flow then reported the NEWER flow's
+// state while its own failure went unreported and rendered as pending.
+//
+// Scoped to the fresh-flow tail deliberately. The already-running branch ABOVE the declaration reads
+// the module global on purpose - it has no `s` in scope and the global is exactly what it means. A
+// sweep over the whole handler flags those fifteen correct reads, which is how a guard earns itself a
+// blanket exemption from the next author.
+test('after the fresh-join flow captures its own state, no read reaches the module global', () => {
+  const sf = ts.createSourceFile(
+    'server.ts',
+    readFileSync(new URL('../src/server.ts', import.meta.url), 'utf-8'),
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TS,
+  );
+  let decl: ts.VariableStatement | undefined;
+  const find = (n: ts.Node): void => {
+    if (ts.isVariableStatement(n) && n.getText(sf).startsWith('const s: JoinState')) decl = n;
+    n.forEachChild(find);
+  };
+  find(sf);
+  // LOUD on an input this cannot evaluate: a rename that hides the declaration must not read as a
+  // clean sweep of zero sites.
+  assert.ok(decl, 'could not locate `const s: JoinState` — the fresh-join flow was renamed or moved');
+
+  const after = decl.end;
+  const bare: string[] = [];
+  let refs = 0;
+  const walk = (n: ts.Node): void => {
+    if (ts.isIdentifier(n) && n.text === 'joinState' && n.pos >= after) {
+      refs++;
+      const p = n.parent;
+      const isGuard =
+        ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken;
+      const isWrite =
+        ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === n;
+      if (!isGuard && !isWrite) bare.push(p.getText(sf).replace(/\s+/g, ' ').slice(0, 70));
+    }
+    n.forEachChild(walk);
+  };
+  walk(decl.parent);
+
+  assert.deepEqual(
+    bare,
+    [],
+    'the fresh-join flow reads the module global `joinState` instead of its own `s`; a newer ' +
+      'interleaved flow makes these reads report the wrong state and swallow this one’s error',
+  );
+  // A RISE means new references were added and wants review. A FALL is guilty until proven innocent:
+  // it reads the same whether a reference was deliberately removed or the walk stopped recognising
+  // one, and the second case silently retires every assertion above.
+  assert.equal(
+    refs,
+    JOINSTATE_TAIL_REFS_PIN,
+    `expected ${JOINSTATE_TAIL_REFS_PIN} \`joinState\` references after the flow captures \`s\`, ` +
+      `found ${refs}. A RISE: confirm each new one is a guard or a write, then raise the pin. A ` +
+      `FALL: do NOT lower the pin until you have confirmed the reference was deleted on purpose ` +
+      `and the walk still recognises the ones that remain.`,
+  );
+});
