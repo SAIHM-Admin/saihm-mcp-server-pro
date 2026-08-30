@@ -542,6 +542,22 @@ const hopExpr = (n: ts.Expression): ts.Expression => {
 };
 const isFenceNode = (d: ts.Node): boolean =>
   fenceOf(d) !== null || seedOf(d) !== null || isFenceCall(d);
+/**
+ * The same question with the SEED clause removed, for predicates where a wrong answer ACCEPTS.
+ *
+ * `seedOf` earns its place in `isFenceNode` because both consumers there - `carriesFence` and
+ * `rendersFenced` - use the answer as an IN-SCOPE FILTER: a false positive only means examining a
+ * value that did not need it, so over-selection is free. `fencedValue` asks the opposite question,
+ * "may this reach a caller unfenced", where a false positive means ACCEPTING. Under that polarity the
+ * seed clause is exactly inverted: SEEDS and SEED_CALLS are the caller-actionable paths this file
+ * exists to contain, so a bare `keyPath`, or anything hopping to `identityKeyFile()`, was read as
+ * ALREADY FENCED. Every seed render in `src/` happens to be fenced for real, so nothing shipped
+ * behind it - but the sweep would have accepted them unfenced, which makes those sites correct by
+ * their author's care rather than by this file.
+ *
+ * One predicate, two polarities of safety. Containment reused where APPLICATION is required.
+ */
+const isAppliedFence = (d: ts.Node): boolean => fenceOf(d) !== null || isFenceCall(d);
 // One hop for the whole expression AND one hop for every identifier inside it, so `' ' + fenced`
 // and `[a, fenced].join(' ')` are recognised as carrying the fence their binding holds. Hopping only
 // the outermost expression left every composed form looking unfenced.
@@ -4063,8 +4079,19 @@ test('EVERY value interpolated into rendered text is FENCED, or written down her
   const fencedValue = (n: ts.Expression, depth = 0): boolean => {
     if (depth > 8) return false;
     const e = unwrapExpr(n);
-    if (ts.isStringLiteralLike(e) || ts.isNumericLiteral(e)) return true;
-    if (isFenceNode(e) || isChecker(e)) return true;
+    // `null` joins the string and numeric literals for the reason the NUMBER/BOOLEAN test below
+    // gives: a compile-time constant carries no delimiter, label or newline whatever its provenance.
+    // It is needed because a fenced value guarded by a null check - `x === null ? null : fence(x)` -
+    // reduces through BOTH conditional arms, and the inert arm was previously carried by the seed
+    // clause this predicate just dropped. Syntactic rather than type-based on purpose: a `string |
+    // null` union must NOT satisfy this, and only the literal keyword can.
+    if (
+      ts.isStringLiteralLike(e) ||
+      ts.isNumericLiteral(e) ||
+      e.kind === ts.SyntaxKind.NullKeyword
+    )
+      return true;
+    if (isAppliedFence(e) || isChecker(e)) return true;
     // `labelSafe` WRAPS a fence rather than being one - it scrubs `=` and nothing else - so it is
     // not in SCALAR_FENCES and the value it protects is its argument.
     if (
