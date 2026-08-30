@@ -711,6 +711,18 @@ export interface SaihmProClientOpts {
   /** Path to persist per-cell seq high-water marks (mode 600). Enables cross-restart cell updates. */
   seqStatePath?: string;
   /**
+   * Persist sequence marks to a DEFAULT path when `seqStatePath` is not given.
+   *
+   * Off unless asked for, and that asymmetry is deliberate. `bootFromEnv` turns it on because the
+   * MCP server is the surface the rollback guard protects and `~/.saihm` is already its home - the
+   * identity key is written there. A caller who constructs this class DIRECTLY gets nothing written
+   * anywhere: a library that touches `$HOME` as a side effect of a constructor is intrusive, it
+   * makes an embedder's tests order-dependent through a file they never named, and it silently
+   * changes what a second client in one process observes. Available to library callers who do want
+   * the guard, by asking for it.
+   */
+  persistSeqState?: boolean;
+  /**
    * Path to persist this agent's opened cells (mode 600), keyed by cellId. When set, `recall`
    * switches to DELTA mode: it sends the cached cellIds to the endpoint and fetches only cells it
    * does not already hold, cutting a session-start recall from O(all cells) to O(new cells). Holds
@@ -810,6 +822,30 @@ export function selfJoinEnabled(): boolean {
 export function defaultIdentityPath(): string {
   const home = process.env.SAIHM_HOME || pathJoin(homedir(), '.saihm');
   return pathJoin(home, 'free-identity.key');
+}
+
+/**
+ * Where the sequence high-water marks live when the operator has not named a file.
+ *
+ * Derived from `defaultIdentityPath()` — the FUNCTION, not a copy of the chain it reads — because
+ * these two files must move together or not at all. Sequence state is IDENTITY-scoped: it records
+ * what one identity has seen. If it relocated while the identity stayed put, the guard would restart
+ * from zero, silently, which is the same disarming a torn read causes.
+ *
+ * Deliberately NOT `SAIHM_STATE_DIR`. That knob exists for state a caller may relocate freely, and
+ * `defaultIdentityPath` already refuses it for the stated reason that honouring it would move an
+ * EXISTING identity file out from under its owner. The same reasoning binds here.
+ *
+ * SCOPED BY IDENTITY, because the on-disk shape is a flat `{cellId: …}` map with no identity in it,
+ * while `load()` stamps every entry it reads with THIS identity's hash. Two identities sharing one
+ * home — reachable today by pointing `SAIHM_MASTER_SECRET_FILE` elsewhere while `SAIHM_HOME` stays
+ * default — would inherit each other's marks, and the higher one would refuse the other's legitimate
+ * reads as `stale_cell` permanently. Unreachable while nothing was persisted by default; naming this
+ * file is what would arm it. The hash is already rendered to the operator's own terminal, so it
+ * discloses nothing to anyone who could not already read the key file beside it.
+ */
+export function defaultSeqStatePath(agentIdHashHex: string): string {
+  return pathJoin(dirname(defaultIdentityPath()), `seq.${agentIdHashHex.slice(0, 16)}.json`);
 }
 
 /**
@@ -973,60 +1009,193 @@ class SeqState {
   // re-read of the cell at its current seq.
   private readonly commitments = new Map<string, string>();
 
+  /**
+   * The file backing these marks, or `undefined` once persistence has been given up on.
+   *
+   * Not `readonly`: a write that fails DEGRADES this to in-memory rather than propagating. `remember`
+   * calls `observe` after the endpoint has already ACCEPTED the write, so throwing here would report
+   * a stored cell as a failed one — the exact outcome `RecallCache` refuses in the same words. The
+   * reason is kept so the degradation is answerable rather than silent.
+   */
+  private path: string | undefined;
+  /**
+   * Why persistence stopped, or `null` while it is working. Surfaced by `saihm_status`.
+   *
+   * A short TOKEN - `unwritable(EACCES)`, `unparseable` - not a sentence. It is rendered through
+   * `safeScalar`, whose budget is `MAX_SCALAR_CHARS`, so a sentence would arrive at the operator cut
+   * off mid-clause and look like a bug in the client rather than a report about their filesystem.
+   * The prose that explains what to do about it belongs in the README, which has room for it.
+   */
+  private degradedReason: string | null = null;
+
+  /**
+   * Did the OPERATOR name this file, or did we choose it?
+   *
+   * The distinction decides what a failed write means, and the two answers are genuinely different
+   * events. A path someone set in their config and cannot be written is a CONFIGURATION ERROR, and
+   * swallowing it hides their mistake behind a security guard that quietly stopped working. A path
+   * we defaulted to and cannot write is OUR problem, and failing `remember` over it would break a
+   * write the endpoint has already accepted - on a read-only or containerised `$HOME` that would
+   * be every write, forever, for a file the operator never asked for.
+   *
+   * Not a split by install age, which is invisible and untestable. A split by whether someone asked.
+   */
+  private readonly pathIsExplicit: boolean;
+
   constructor(
     private readonly agentIdHashHex: string,
-    private readonly path?: string,
+    explicitPath?: string,
+    allowDefault = false,
   ) {
-    if (this.path) this.load();
+    // An explicit path keeps its meaning exactly. Only the DEFAULT is derived and identity-scoped,
+    // and only when the caller asked for a default at all - see `persistSeqState`.
+    this.pathIsExplicit = explicitPath !== undefined;
+    this.path =
+      explicitPath ?? (allowDefault ? defaultSeqStatePath(agentIdHashHex) : undefined);
+    if (this.path !== undefined) this.load();
+  }
+
+  /** `null` when marks are persisting normally; otherwise why they are not. */
+  get degraded(): string | null {
+    return this.degradedReason;
   }
 
   private load(): void {
     let raw: string;
     try {
       raw = readFileSync(this.path!, 'utf-8');
-    } catch {
-      return; // no state yet — first run
+    } catch (e) {
+      // ABSENT is normal and silent: a first run, a new venue, or a file the operator deleted to
+      // reset this device's view. The client re-seeds from the LIVE envelope on first touch, and
+      // that path AEAD-authenticates the seq before trusting it. Anything ELSE — a permission
+      // failure, a directory where the file should be — is a read we could not perform, and
+      // reporting it as "first run" is how a guard disarms without anyone noticing.
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT')
+        this.degradedReason = `unreadable(${(e as NodeJS.ErrnoException)?.code ?? 'unknown'})`;
+      return;
     }
     let obj: Record<string, unknown>;
     try {
       obj = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      return; // corrupt/empty — treat as no state (admit() is monotonic; nothing regresses)
+      // Present but unparseable — a torn write, or another tool's file. Marks start empty, which is
+      // recoverable, but it is NOT the same event as a first run and must not be reported as one.
+      this.degradedReason = 'unparseable';
+      return;
     }
     for (const [cellId, v] of Object.entries(obj)) {
+      // `__proto__` and friends reach an inherited setter rather than becoming data. Refused on the
+      // way IN as well as written out on a null-prototype object, because a key that cannot round
+      // trip is a mark that silently vanishes.
+      if (cellId === '__proto__' || cellId === 'constructor' || cellId === 'prototype') continue;
       // Two accepted shapes. A bare decimal string is the LEGACY form, written before commitments
       // were pinned; it loads with no commitment, so the first envelope observed at that seq pins
       // one. Refusing to load it would regress every existing agent's whole sequence state to zero
       // -- a far worse outcome than an unpinned first read, which is the state a cold start is in
       // anyway. `{seq, commitmentHash}` is the current form.
       const seqText = typeof v === 'string' ? v : (v as { seq?: unknown })?.seq;
-      const hash = typeof v === 'string' ? undefined : (v as { commitmentHash?: unknown })?.commitmentHash;
       if (typeof seqText !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(seqText)) continue;
-      if (this.hwm.admit(this.agentIdHashHex, cellId, BigInt(seqText))) {
-        this.cellIds.add(cellId);
-        if (typeof hash === 'string' && hash.length > 0) this.commitments.set(cellId, hash);
-      }
+      if (this.hwm.admit(this.agentIdHashHex, cellId, BigInt(seqText))) this.cellIds.add(cellId);
+      // A commitment found in the file is READ PAST, deliberately, and this is the whole of the
+      // decision recorded at the top of `persist`. A pinned commitment is only sound while one
+      // writer owns the mark. Two sessions of the same identity - two Claude Code windows, a
+      // laptop and a desktop - can both hold a cell at seq N, both write N+1, and both seal
+      // DIFFERENT content there, because a write whose response was lost leaves the mark
+      // unadvanced and the next write reuses the seq. Restoring one of those pins from disk would
+      // make the other session's honest envelope permanently unreadable. Pins are therefore
+      // established only from envelopes THIS process observed, and they expire with it.
     }
   }
 
+  /** Monotonic within the process, so two writes in one millisecond cannot claim one tmp name. */
+  private static tmpCounter = 0;
+
+  /**
+   * SEQ ONLY, never the commitment. See the note in `load`: a persisted commitment is sound only
+   * while a single writer owns the mark, and two sessions of one identity legitimately collide at a
+   * seq. The high-water mark carries no such hazard - it moves in one direction, so a mark seen
+   * anywhere is a floor everywhere and is safe to carry across every venue an identity is used from.
+   * That asymmetry is the entire reason only half of this state reaches disk.
+   */
   private persist(): void {
-    if (!this.path) return;
-    const obj: Record<string, { seq: string; commitmentHash?: string }> = {};
+    if (this.path === undefined) return;
+    try {
+      this.flushMarks(this.path);
+    } catch (e) {
+      // AN EXPLICIT PATH STILL THROWS. The operator named this file; that it cannot be written is a
+      // fact about their configuration and it is theirs to see, carried up through `markPathBearing`
+      // so the directory Node named survives the message budget whole.
+      if (this.pathIsExplicit) throw e;
+      // A DEFAULTED path never propagates. `observe` runs from `remember` AFTER the endpoint has
+      // accepted the write, so throwing would report a stored cell as a failed one - the outcome
+      // `RecallCache.upsert` refuses in as many words. Marks stay correct in memory; only their
+      // survival across a restart is lost, and a cold client re-seeds from the live envelope anyway.
+      // Given up on for the rest of the run rather than retried: a directory unwritable now is
+      // unwritable a millisecond later, and a failing syscall per write costs more than the
+      // guarantee is worth. A restart re-attempts.
+      this.path = undefined;
+      this.degradedReason = `unwritable(${(e as NodeJS.ErrnoException)?.code ?? 'unknown'})`;
+    }
+  }
+
+  /**
+   * Named `flushMarks`, not `write`: the render sweep recognises render surfaces by `.write(` on a
+   * stream, and `this.write(...)` landed in its list of writes reaching a stream it cannot identify.
+   * That sweep is right to report it, and the cheaper answer is a name rather than an exception
+   * carved into a check that exists to catch exactly the thing an exception would hide.
+   */
+  private flushMarks(path: string): void {
+    // NULL PROTOTYPE. `obj[cellId] = …` on a `{}` sends a cellId of `__proto__` to an inherited
+    // setter: no own property is created, `JSON.stringify` omits it, and that cell's mark vanishes
+    // with no error anywhere. `cellId` is caller-supplied through `RememberOpts` and the schema
+    // admitting it is a bare string.
+    const obj: Record<string, { seq: string }> = Object.create(null) as Record<string, { seq: string }>;
+    // MERGE, do not overwrite. This is a whole-file rewrite with no lock, and one identity can sit
+    // behind several processes - two editor windows, a terminal beside them. Each holds only the
+    // cells IT has touched, so a plain write drops every mark the other owns and hands back the
+    // sequence space this file exists to defend. The per-cell MAXIMUM keeps both views, and a
+    // maximum is the correct merge because the mark is monotonic by construction.
+    //
+    // Read-then-rename is still not atomic: a write landing between them is lost. That is a lost
+    // mark, not a corrupt one - the next touch of that cell re-seeds from the live envelope over the
+    // AEAD-authenticated path - so the worst case degrades to the state a cold client already
+    // occupies. That is the strongest claim available without a lock file, and it is stated rather
+    // than dressed up as atomicity.
+    let onDisk: Record<string, unknown> = {};
+    try {
+      onDisk = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      /* absent or unreadable - either way this process's own view is the whole of what we know */
+    }
+    // Read without naming properties, deliberately: this is the shape written by a DIFFERENT
+    // process, possibly an older build, so the readable shapes are exactly the two `load` accepts and
+    // nothing here may assume a field exists. Nothing read here reaches a renderer - every value is
+    // either discarded by the digit test below or becomes a decimal seq string this file wrote.
+    for (const [cellId, v] of Object.entries(onDisk)) {
+      if (cellId === '__proto__' || cellId === 'constructor' || cellId === 'prototype') continue;
+      const t = typeof v === 'string' ? v : (v as { seq?: unknown })?.seq;
+      if (typeof t === 'string' && /^(?:0|[1-9][0-9]*)$/.test(t)) obj[cellId] = { seq: t };
+    }
     for (const cellId of this.cellIds) {
       const c = this.hwm.current(this.agentIdHashHex, cellId);
       if (c === undefined) continue;
-      const hash = this.commitments.get(cellId);
-      obj[cellId] = hash === undefined ? { seq: c.toString(10) } : { seq: c.toString(10), commitmentHash: hash };
+      const prior = obj[cellId];
+      if (prior === undefined || BigInt(prior.seq) < c) obj[cellId] = { seq: c.toString(10) };
     }
     // `mode` applies ONLY when the directory is CREATED — an existing one keeps its own
     // permissions, so this hardens the path we make and never re-permissions a shared one.
     // Pinned rather than left to the umask, matching the identity writer above: under a
     // umask of 0 the default is 0777, and this directory holds cell plaintext at rest.
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    const tmp = `${this.path}.tmp.${process.pid}.${Date.now()}`;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    // The counter is load-bearing, not decoration. `wx` REFUSES an existing path, and pid+ms alone
+    // repeats whenever two marks advance inside one millisecond - which `recall` does routinely,
+    // observing a row per cell. That collision used to throw out of `remember`; it would now trip
+    // the degradation above and quietly stop persisting for the rest of the run, so the failure
+    // would have MOVED rather than gone.
+    const tmp = `${path}.tmp.${process.pid}.${Date.now()}.${SeqState.tmpCounter++}`;
     writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600, flag: 'wx' });
     try {
-      renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
+      renameSync(tmp, path); // atomic; inherits the tmp file's 0600 mode
     } catch (e) {
       // The tmp already holds the full contents. Nothing in this package sweeps stale tmp files, and
       // no later purge reaches one: `forget()` and a delta recall both rewrite `<path>`, which the tmp
@@ -1266,7 +1435,11 @@ export class SaihmProClient {
     this.tier = opts.tier;
     this.onQuotaNag = opts.onQuotaNag;
     this.discoverySource = opts.discoverySource;
-    this.seq = new SeqState(this.agentIdHashHex, opts.seqStatePath);
+    this.seq = new SeqState(
+      this.agentIdHashHex,
+      opts.seqStatePath,
+      opts.persistSeqState === true,
+    );
     this.recallCache = new RecallCache(opts.recallCachePath);
     this.requestTimeoutMs =
       typeof opts.requestTimeoutMs === 'number' && opts.requestTimeoutMs > 0
@@ -1502,6 +1675,10 @@ export class SaihmProClient {
     const opts: SaihmProClientOpts = {};
     if (optTier) opts.tier = optTier;
     if (optSeqPath) opts.seqStatePath = optSeqPath;
+    // THE SERVER OPTS IN. This is the boot path of the MCP server, where the rollback guard is worth
+    // having across restarts and where `~/.saihm` already holds this identity's key. Constructing
+    // `SaihmProClient` directly does not reach here and writes nothing.
+    opts.persistSeqState = true;
     if (optRecallCachePath) opts.recallCachePath = optRecallCachePath;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
@@ -1517,6 +1694,18 @@ export class SaihmProClient {
   /** This client's public agent identifier (hex) = sha256(ML-DSA pubkey) = the JWT sub. */
   get agentIdHash(): string {
     return this.agentIdHashHex;
+  }
+
+  /**
+   * `null` while sequence marks are persisting; otherwise a short token saying why they are not.
+   *
+   * Reported because the alternative is a security control that stops working without saying so.
+   * When this is non-null the rollback guard still holds for the life of THIS process and no longer
+   * survives a restart, which is a real reduction the operator is entitled to see. It is LOCAL - it
+   * describes this machine's filesystem, never anything the endpoint said.
+   */
+  get seqStateDegraded(): string | null {
+    return this.seq.degraded;
   }
 
   /** This client's PUBLIC identity record (hex) to publish so others can share TO this agent. */

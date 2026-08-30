@@ -642,6 +642,13 @@ server.registerTool(
       activeSharingContracts: z.number().nullable(),
       bfsi: z.number().nullable(),
       snapshotEpoch: z.string(),
+      // LOCAL, and the only field on this schema that is. Everything above is what the endpoint
+      // said; this is what our own filesystem did. Declared rather than merely emitted because the
+      // SDK publishes this schema with `additionalProperties: false`, so an undeclared field fails
+      // OUTPUT VALIDATION and the SDK replaces the whole composed result with an error - the
+      // degradation the note above records. Nullable and always present, so adding it widens the
+      // contract without making any consumer's previously-valid response invalid.
+      seqStateDegraded: z.string().nullable(),
     },
     annotations: {
       title: 'Status',
@@ -676,6 +683,7 @@ server.registerTool(
       const tier = boundedOrMarker(d.tier);
       const custody = boundedOrMarker(d.custody);
       const snapshotEpoch = boundedOrMarker(d.snapshotEpoch);
+      const seqStateDegraded = client.seqStateDegraded;
       return ok(
         // Every remaining interpolated value is endpoint-chosen, and the `\n  ` here is OURS — which
         // is exactly why a raw field carrying its own newline could mint a further line in this block.
@@ -692,7 +700,16 @@ server.registerTool(
           // delimiter that was never opened, and every other field on this line is already a
           // two-space-separated `key=value` pair, so the wrapper bought nothing.
           `R=${labelSafe(safeScalar(d.bfsi_R))}  M=${labelSafe(safeScalar(d.bfsi_M))}  ` +
-          `epoch=${labelSafe(safeScalar(snapshotEpoch))}`,
+          `epoch=${labelSafe(safeScalar(snapshotEpoch))}` +
+          // Only when there IS something to say. A line reading `seq=ok` on every healthy call is
+          // noise that trains the reader to skip the place the warning will appear.
+          // PURE `key=value`, no parenthetical. The lesson recorded on `R`/`M` twenty lines up is
+          // that `)` survives every fence in this module, so a wrapper only offers a delimiter to
+          // close; a pair that was never opened cannot be closed. Same two-space separator as every
+          // other field, on its own line so it reads as a report rather than a suffix on `epoch`.
+          (seqStateDegraded === null
+            ? ''
+            : `\n  seq-state=${labelSafe(safeScalar(seqStateDegraded))}  rollback-guard=memory-only-this-run`),
         {
           agentIdHash,
           tier,
@@ -701,6 +718,7 @@ server.registerTool(
           activeSharingContracts: sharing,
           bfsi,
           snapshotEpoch,
+          seqStateDegraded,
         },
       );
     } catch (e) {

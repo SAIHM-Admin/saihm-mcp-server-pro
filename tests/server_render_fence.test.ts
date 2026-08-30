@@ -416,7 +416,7 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'a static usage block: string literals plus PACKAGE_VERSION, which has its own entry above. No ' +
     'interpolation reaches it from outside the module',
 };
-const SAFESCALAR_SITES_PIN = 23;
+const SAFESCALAR_SITES_PIN = 24; // +1: `saihm_status`'s local seq-state degradation token
 const RENDER_HELPER_EXPORTS: string[] = [
   'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
   'MAX_JOIN_FIELD_CHARS', 'MAX_PATH_FIELD_CHARS', 'MAX_PATH_MESSAGE_CHARS', 'MAX_SCALAR_CHARS',
@@ -1107,6 +1107,11 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       OPAQUE_TOKEN_TTL_MS: 5 * 60_000,
       FREE_ONBOARD_POLL_MS: 5_000,
       MAX_COUNTER_CHARS: 32,
+      // NOT A BUDGET - a per-process tmp-name counter, whose initial value is the only thing there
+      // is to pin. Written down rather than taught around: this sweep's stated doctrine is to pin a
+      // number rather than make the reader look away, and an exemption shaped like "this one is not
+      // really a budget" is the shape every unpinned constant would arrive in.
+      tmpCounter: 0,
       // A TUPLE, and the first constant the widened sweep reached that no arm had ever seen. These
       // are the percentages a user is warned at; a silent edit changes what they are told and when.
       QUOTA_NAG_THRESHOLDS: [80, 95, 100],
@@ -2047,7 +2052,13 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // two write a key file and a checkout URL, neither of which is the seq/cell cache.
   const FS_WRITES: Record<string, number> = {
     'client.ts:ensureSelfJoinIdentityEnv': 4, // writes the self-join key file, not the cache
-    'client.ts:persist': 8, // the two persist() methods themselves, 4 calls each
+    // FOUR EACH, where the pair once summed to EIGHT under one name. The rename that split them was
+    // made for an unrelated reason - a method called `write` collided with the render sweep's stream
+    // predicate - and it incidentally closed the aggregation this census was flagged for: two
+    // same-named methods in one module summed here, so a call MOVED between them left the total
+    // unchanged. Keyed by enclosing function, that move is now visible.
+    'client.ts:flushMarks': 4, // SeqState's writer
+    'client.ts:persist': 4, // RecallCache's writer
     'server.ts:persistCheckoutUrl': 4, // writes the checkout URL, and is already wrapped
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
@@ -3034,6 +3045,12 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       activeSharingContracts: 'NUMERIC GUARD (countOrNull refuses on LENGTH)',
       bfsi: 'NUMERIC GUARD (numOrNull refuses on LENGTH)',
       snapshotEpoch: 'CAPPED HERE (boundedOrMarker)',
+      // The ONLY LOCAL field on this tool, and the only one on any tool that describes this machine
+      // rather than what the endpoint said. A short token this module writes itself
+      // (`unwritable(EACCES)`, `unparseable`) or `null`; the endpoint has no reach to it at all, so
+      // no endpoint budget applies. Bounded anyway on the TEXT side by `safeScalar`, because the
+      // errno inside it comes from Node rather than from a list this file controls.
+      seqStateDegraded: 'CLIENT-ORIGIN: local filesystem state, never endpoint-reachable',
     },
   };
 
@@ -3547,7 +3564,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'entries', 'values', 'keys', 'ownKeys',
     'getOwnPropertyNames', 'getOwnPropertySymbols', 'getOwnPropertyDescriptors',
   ];
-  const ANON: Record<string, number> = { 'client.ts': 5 };
+  // +1 over the five this started with: `SeqState.flushMarks` reads the on-disk mark file written
+  // by a DIFFERENT process, possibly an older build, so it may not assume any field is present. The
+  // two shapes it accepts are the two `load` accepts, and nothing read there reaches a renderer -
+  // every value is either discarded by a digit test or becomes a decimal string this file wrote.
+  const ANON: Record<string, number> = { 'client.ts': 6 };
   // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
   // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
   // measured green, which is this round's whole lesson landing on the fix for this round's finding.
@@ -4558,7 +4579,12 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // predicate that loses sight of a slot reports the same `n-1` as a deleted site, and following the
   // instruction ships the hazard with the suite green. A fall means "prove no predicate narrowed"
   // BEFORE it means "a site went away".
-  const EXAMINED_SPANS_PIN = 75;
+  // 77, raised from 75, and ESTABLISHED as a rise rather than assumed. This pin's own rule is that a
+  // fall is guilty until proven innocent, so the two were separated by measurement: removing the one
+  // new `saihm_status` field returns this count to exactly 75 and drops the safeScalar sweep to 23.
+  // One field, two examined spans - the `labelSafe` wrapper and the `safeScalar` inside it - which is
+  // how every other `label=value` field on that same line already counts.
+  const EXAMINED_SPANS_PIN = 77;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

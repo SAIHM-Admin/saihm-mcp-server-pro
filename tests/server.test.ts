@@ -19,6 +19,7 @@ import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as pathJoin, resolve } from 'node:path';
 import {
+  chmodSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -269,6 +270,11 @@ function startServer(
     // so tools/list stays the canonical eight. Self-join has its own suite.
     SAIHM_SELF_JOIN: '0',
     SAIHM_STATE_DIR: TEST_STATE_DIR,
+    // SAIHM_HOME as well as SAIHM_STATE_DIR. The sequence-state default derives from the
+    // IDENTITY's directory, which is SAIHM_HOME - so a harness isolating only the state dir
+    // writes this identity's marks into the developer's REAL `~/.saihm`, beside their actual
+    // master secret. Measured: 60 stray files from one afternoon of runs.
+    SAIHM_HOME: TEST_STATE_DIR,
     ...extraEnv,
   };
   const proc = spawn(TSX, [SERVER, ...args], {
@@ -830,6 +836,141 @@ test('server.ts: a failed cache persist leaves no plaintext behind in its tmp fi
   } finally {
     d.proc.kill();
     rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: the server DEFAULTS a seq-state path, and marks survive a restart', async () => {
+  // B3. Before this, `SAIHM_SEQ_STATE_PATH` had no default AND is not one of the four variables
+  // `server.json` declares, so a registry-installed operator could not set it by any means and
+  // nothing was ever persisted: the rollback guard was memory-only in every stock install, and the
+  // commitment fix shipped one commit earlier was armed for nobody across a restart.
+  //
+  // Derived from the IDENTITY's directory, not the state directory, and scoped by identity - so two
+  // identities sharing a home cannot inherit each other's marks and refuse each other's reads.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-defhome-'));
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    // EVERY assertion inside this try. The first cut put the disk checks between two try blocks, so
+    // a failing assertion skipped `mock.server.close()` and the runner hung on the open handle
+    // instead of reporting red - found by a mutation whose expected RED arrived as a TIMEOUT. A test
+    // that cannot fail cleanly is a test whose failure gets read as flakiness.
+    const d1 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d1);
+      await callText(d1, 3, 'saihm_remember', { content: 'a', cellId: 'defaulted' });
+    } finally {
+      d1.proc.kill();
+    }
+    const files = readdirSync(home).filter((f) => /^seq\.[0-9a-f]{16}\.json$/.test(f));
+    assert.equal(files.length, 1, `exactly one identity-scoped mark file. got: ${readdirSync(home).join()}`);
+    const marks = JSON.parse(readFileSync(pathJoin(home, files[0]!), 'utf8')) as Record<string, { seq: string }>;
+    assert.equal(marks['defaulted']?.seq, '1', 'the mark reached disk without anyone naming a path');
+    // A SECOND boot, same home, same identity. It must LOAD the mark rather than rediscover it -
+    // which is the whole of what persistence buys and the thing that was not happening.
+    const d2 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d2);
+      const r = await callText(d2, 3, 'saihm_remember', { content: 'b', cellId: 'defaulted' });
+      assert.equal(r.isError, false);
+      assert.match(r.text, /seq=2/, 'the restarted server continued the sequence it had persisted');
+    } finally {
+      d2.proc.kill();
+    }
+    // DELETE AND RECOVER. Each venue's marks are local and disposable: this file is the supported
+    // way to reset one device's view, so a stale mark can never be a permanent brick. Asserted, not
+    // claimed - the recovery path re-seeds from the live envelope over the AEAD-authenticated read.
+    rmSync(pathJoin(home, files[0]!));
+    const d3 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d3);
+      const r = await callText(d3, 3, 'saihm_remember', { content: 'c', cellId: 'defaulted' });
+      assert.equal(r.isError, false, 'deleting the mark file must never brick the cell it described');
+    } finally {
+      d3.proc.kill();
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: two servers on one home MERGE their marks instead of clobbering', async () => {
+  // B11. The file is rewritten whole with no lock, and one identity routinely sits behind several
+  // processes - two editor windows, a terminal beside them, the same person at home and at work.
+  // Each holds only the cells IT has touched, so a plain write drops every mark the other owned and
+  // hands back the sequence space this file exists to defend. A dropped high-water mark is not a
+  // cosmetic loss: it re-opens the replay window the guard is there to close.
+  //
+  // BOTH SERVERS ALIVE AT ONCE, and that is the whole design of this test. A sequential version was
+  // written first and a mutation that DELETED the merge left it green: each server's `load()` had
+  // already read the previous one's file at boot, so the in-memory set held both cells and the merge
+  // never ran. It tested `load`, not the merge, while claiming the merge. Two processes that both
+  // booted against the same empty file is the only shape where the second one's write can drop the
+  // first one's mark - which is the defect.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-merge-'));
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const a = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+  const b = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+  try {
+    await handshake(a);
+    await handshake(b);
+    // A TOOL CALL, not a handshake, and this is the second thing this test got wrong. The client -
+    // and with it the SeqState that reads the mark file - is constructed LAZILY on the first tool
+    // call, deliberately, so `initialize` always succeeds. A handshake therefore loads nothing, and
+    // the earlier cut had B reading the file only when it went to write, which is AFTER A had
+    // written: B's in-memory set held `alpha` and a deleted merge stayed green a second time.
+    // `saihm_status` boots B against the still-absent file without writing anything.
+    assert.equal((await callText(b, 2, 'saihm_status', {})).isError, false, 'boot B before A writes');
+    assert.equal((await callText(a, 3, 'saihm_remember', { content: 'alpha', cellId: 'alpha' })).isError, false);
+    assert.equal((await callText(b, 3, 'saihm_remember', { content: 'beta', cellId: 'beta' })).isError, false);
+    const f = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(f.length, 1, 'one identity, one mark file');
+    const marks = JSON.parse(readFileSync(pathJoin(home, f[0]!), 'utf8')) as Record<string, unknown>;
+    // BOTH. The second server never saw `alpha` and would have written a file without it.
+    assert.deepEqual(
+      Object.keys(marks).sort(),
+      ['alpha', 'beta'],
+      'the second server dropped the first one\'s mark - this is the clobber, not a merge',
+    );
+  } finally {
+    a.proc.kill();
+    b.proc.kill();
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: an unwritable DEFAULT seq path degrades instead of failing the write', async () => {
+  // The counterpart to the explicit-path test below, and the reason the two differ. An EXPLICIT path
+  // is a thing the operator named: if it cannot be written that is a configuration error and it
+  // surfaces. A DEFAULT path is one we chose for them, and failing `remember` over it would report a
+  // cell the endpoint has ALREADY ACCEPTED as a failed write - on a read-only or containerised
+  // `$HOME`, that would be every write, forever, for a file nobody asked for.
+  //
+  // Degrading silently would be its own defect, so `saihm_status` says so.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-rohome-'));
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  chmodSync(home, 0o500); // readable and traversable, not writable
+  const d = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+  try {
+    await handshake(d);
+    const r = await callText(d, 3, 'saihm_remember', { content: 'x', cellId: 'ro' });
+    assert.equal(r.isError, false, 'a stored cell must never be reported as failed over OUR default');
+    const st = await callText(d, 4, 'saihm_status', {});
+    assert.equal(st.isError, false);
+    assert.match(
+      st.text,
+      /seq-state=unwritable\([A-Z]+\)\s+rollback-guard=memory-only-this-run/,
+      `status must SAY the guard degraded, not hide it. got: ${st.text}`,
+    );
+  } finally {
+    d.proc.kill();
+    chmodSync(home, 0o700);
+    rmSync(home, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));
   }
 });

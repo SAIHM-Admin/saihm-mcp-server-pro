@@ -28,6 +28,19 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 
+/**
+ * A throwaway `SAIHM_HOME` for every server this harness spawns.
+ *
+ * The sequence-state default derives from the IDENTITY's directory - `SAIHM_HOME` - and deliberately
+ * not from `SAIHM_STATE_DIR`, because relocating identity-scoped state while the identity stays put
+ * restarts the rollback guard from zero. The consequence for a TEST harness is that isolating only
+ * the state dir is not isolation at all: marks land in the developer's real `~/.saihm`, beside their
+ * actual master secret. Measured at 60 stray files from a single afternoon of runs.
+ */
+const SEQ_ISOLATED_HOME = mkdtempSync(pathJoin(tmpdir(), 'saihm-home-'));
+process.on('exit', () => rmSync(SEQ_ISOLATED_HOME, { recursive: true, force: true }));
+
+
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { fromHex } from '@saihm/client-pro';
 import { SaihmProClient, SaihmEndpointError, type QuotaNag } from '../src/client.js';
@@ -1029,6 +1042,8 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       const env = cliEnv({
         SAIHM_ENDPOINT_URL: m.base + '/mcp',
         SAIHM_MASTER_SECRET_HEX: MASTER70_HEX,
+        // Isolated because the sequence-state default derives from SAIHM_HOME, not SAIHM_STATE_DIR.
+        SAIHM_HOME: SEQ_ISOLATED_HOME,
         SAIHM_TIER: 'FREE',
       });
       const { stdout } = await pexec(tsxBin, [serverPath, 'upgrade', 'PRO'], {
@@ -1050,6 +1065,8 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       const env = cliEnv({
         SAIHM_ENDPOINT_URL: m.base + '/mcp',
         SAIHM_MASTER_SECRET_HEX: MASTER70_HEX,
+        // Isolated because the sequence-state default derives from SAIHM_HOME, not SAIHM_STATE_DIR.
+        SAIHM_HOME: SEQ_ISOLATED_HOME,
         SAIHM_TIER: 'FREE',
       });
       const { stdout } = await pexec(tsxBin, [serverPath, 'upgrade'], {
@@ -1067,6 +1084,8 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       const env = cliEnv({
         SAIHM_ENDPOINT_URL: m.base + '/mcp',
         SAIHM_MASTER_SECRET_HEX: MASTER70_HEX,
+        // Isolated because the sequence-state default derives from SAIHM_HOME, not SAIHM_STATE_DIR.
+        SAIHM_HOME: SEQ_ISOLATED_HOME,
         SAIHM_TIER: 'FREE',
       });
       await assert.rejects(
@@ -1093,6 +1112,8 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       const env = cliEnv({
         SAIHM_ENDPOINT_URL: m.base + '/mcp',
         SAIHM_MASTER_SECRET_HEX: MASTER70_HEX,
+        // Isolated because the sequence-state default derives from SAIHM_HOME, not SAIHM_STATE_DIR.
+        SAIHM_HOME: SEQ_ISOLATED_HOME,
         SAIHM_TIER: 'PRO',
         SAIHM_PAYMENT_METHOD: 'stripe',
       });

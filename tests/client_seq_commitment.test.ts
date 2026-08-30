@@ -27,7 +27,7 @@ import { strict as assert } from 'node:assert';
 import { createServer, type Server } from 'node:http';
 import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WireEnvelope } from '@saihm/client-pro';
@@ -114,6 +114,41 @@ async function rig(seqStatePath: string): Promise<Rig> {
     done: () => new Promise<void>((r) => server.close(() => r())),
   };
 }
+
+describe('PC-SEQ-DEFAULT: constructing this class directly writes NOTHING', () => {
+  it('a library caller who did not ask for persistence gets no file under SAIHM_HOME', async () => {
+    // The MCP server defaults a sequence-state path so the rollback guard survives a restart. That
+    // default is opt-IN and lives on the boot path, not in the constructor, and this is the test that
+    // says so. Putting it in the constructor was measured first: it made `new SaihmProClient(...)`
+    // write into the caller's real `$HOME`, which is intrusive on its own and also makes an
+    // embedder's tests order-dependent through a file they never named - a second client in one
+    // process silently inherited the first one's marks.
+    const home = mkdtempSync(join(tmpdir(), 'saihm-home-'));
+    const prev = process.env.SAIHM_HOME;
+    process.env.SAIHM_HOME = home;
+    const seqDir = mkdtempSync(join(tmpdir(), 'saihm-seq-'));
+    try {
+      const r = await rig(join(seqDir, 'explicit.json'));
+      try {
+        // POSITIVE CONTROL. An EXPLICIT path is honoured, so this rig demonstrably persists when
+        // asked - without it, an empty SAIHM_HOME would prove only that nothing ran.
+        await r.client.remember('x', { cellId: 'a' });
+        assert.ok(
+          readdirSync(seqDir).length > 0,
+          'positive control: the explicit path wrote nothing, so the empty SAIHM_HOME below is vacuous',
+        );
+        assert.deepEqual(readdirSync(home), [], 'a directly-constructed client must not touch $HOME');
+      } finally {
+        await r.done();
+      }
+    } finally {
+      if (prev === undefined) delete process.env.SAIHM_HOME;
+      else process.env.SAIHM_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(seqDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('PC-SEQ-COMMITMENT: two envelopes at one seq are distinguishable', () => {
   it('a second envelope at the SAME seq is refused, even though it is validly signed', async () => {
