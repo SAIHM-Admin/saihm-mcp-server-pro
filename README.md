@@ -96,6 +96,33 @@ the stored copy becomes permanently unreadable — by you, by SAIHM, by anyone
 holding a backup of it. This is how SAIHM answers a GDPR Article 17 erasure
 request, and it is why there is no undo.
 
+## Assistants that only give you a chat box
+
+Some assistants run in a browser and have nowhere to add a tool. Those can't reach
+your memories on their own, so you carry a briefing across. Nothing to install, two
+things to say.
+
+Ask your SAIHM-connected assistant for the briefing:
+
+> Recall my SAIHM memories and write a short briefing I can paste into another
+> assistant. Facts and preferences only, no preamble. Leave out anything I wouldn't
+> want sitting in someone else's chat history.
+
+Paste what you get back above your first question over there.
+
+At the end, bring anything new home:
+
+> Summarise what you learned about me in this conversation as a short list.
+
+Paste that into your SAIHM-connected assistant and say **"Remember this."**
+
+One thing to know before you paste. A briefing leaves your machine as ordinary
+text and lives in that assistant's chat history under that company's terms — it is
+no longer encrypted, and SAIHM's guarantees stop at your machine's edge. That is
+why the first prompt asks it to leave things out; decide what travels. Connecting a
+browser assistant directly would need a different kind of connection than SAIHM
+offers today.
+
 ## Your memories follow your key
 
 Your memory belongs to your key, not to a computer — that's what makes it
