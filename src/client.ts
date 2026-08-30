@@ -1015,6 +1015,25 @@ class SeqState {
   private readonly commitments = new Map<string, string>();
 
   /**
+   * Cells whose LIVE seq this process has actually seen, as opposed to cells we merely hold a mark
+   * for. Populated only by `observe`, whose two call sites are both authenticated observations of
+   * the endpoint's current state; never by `load`, which reads a file.
+   *
+   * The distinction did not exist while marks were in-memory only, because then "we hold a mark"
+   * and "we observed it live" were the same set. Persisting marks split them, and `remember`'s
+   * discovery gate was written against the old equality: `current(cellId) === undefined` meant
+   * never-observed. With a mark on disk it means nothing of the kind, and the gate stopped firing
+   * on exactly the case it exists for -- a mark that is BEHIND the endpoint. That happens on one
+   * machine, with no second writer: `remember` advances the mark only after the endpoint accepts,
+   * so a COMMITTED write whose response was lost leaves the mark one short. Before marks persisted,
+   * a restart cleared it and the next `remember` re-seeded from the live envelope. Now the stale
+   * mark survives the restart, the gate sees it, and the re-seed never happens -- so the client
+   * writes at a seq the endpoint has already committed. That is the equivocating pair `stale_cell`
+   * exists to detect, manufactured locally.
+   */
+  private readonly observedLive = new Set<string>();
+
+  /**
    * The file backing these marks, or `undefined` once persistence has been given up on.
    *
    * Not `readonly`: a write that fails DEGRADES this to in-memory rather than propagating. `remember`
@@ -1124,20 +1143,45 @@ class SeqState {
         this.degradedReason = `unreadable(${(e as NodeJS.ErrnoException)?.code ?? 'unknown'})`;
       return;
     }
-    let obj: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      obj = JSON.parse(raw) as Record<string, unknown>;
+      parsed = JSON.parse(raw);
     } catch {
       // Present but unparseable — a torn write, or another tool's file. Marks start empty, which is
       // recoverable, but it is NOT the same event as a first run and must not be reported as one.
       this.degradedReason = 'unparseable';
       return;
     }
+    // VALID JSON IS NOT A MARKS FILE. `null`, `[]`, `7` and `"x"` all parse, and `Object.entries`
+    // THROWS on the first of them -- from the CONSTRUCTOR, outside the try above, so it does not
+    // degrade: it takes down `getClient()`, and every SAIHM tool then fails with `Cannot convert
+    // undefined or null to object`, which names nothing the operator can act on. `RecallCache.load`
+    // has carried this exact check since it was written; this sibling did not, and a one-line file
+    // containing `null` was the whole distance between the two.
+    //
+    // Its own token, not `unparseable`. The file WAS readable and WAS valid JSON, so an operator
+    // told `unparseable` goes looking for a torn write and finds well-formed content. Handled the
+    // same way, reported as the different thing it is - the split this class already makes between
+    // absent, unreadable and unparseable, one shape further along.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.degradedReason = 'malformed';
+      return;
+    }
+    const obj = parsed as Record<string, unknown>;
     for (const [cellId, v] of Object.entries(obj)) {
-      // `__proto__` and friends reach an inherited setter rather than becoming data. Refused on the
-      // way IN as well as written out on a null-prototype object, because a key that cannot round
-      // trip is a mark that silently vanishes.
-      if (cellId === '__proto__' || cellId === 'constructor' || cellId === 'prototype') continue;
+      // NO `__proto__` SKIP HERE, deliberately, and this is the reverse of what it looks like.
+      // Every consumer of a cellId on this path is prototype-safe already: `hwm` keys a Map,
+      // `commitments` is a Map, `cellIds` is a Set, and `flushMarks` writes onto a NULL-PROTOTYPE
+      // object. `JSON.parse` creates `__proto__` with CreateDataProperty, so it arrives here as an
+      // own property - data - and reaches none of those as a setter.
+      //
+      // Skipping it therefore protected nothing and cost the mark: the write side stored such a key
+      // faithfully and the read side dropped it, so a cell named `__proto__` reset to seq zero on
+      // every restart -- the silent loss the skip claimed to prevent, caused by the skip. `cellId`
+      // is caller-supplied through `RememberOpts`, so a client that names one is not exotic.
+      //
+      // The null prototype in `flushMarks` is what makes this safe, and it is the ONLY thing that
+      // does. If that object ever becomes a plain `{}`, this skip has to come back on both sides.
       // Two accepted shapes. A bare decimal string is the LEGACY form, written before commitments
       // were pinned; it loads with no commitment, so the first envelope observed at that seq pins
       // one. Refusing to load it would regress every existing agent's whole sequence state to zero
@@ -1155,6 +1199,82 @@ class SeqState {
       // make the other session's honest envelope permanently unreadable. Pins are therefore
       // established only from envelopes THIS process observed, and they expire with it.
     }
+  }
+
+  /**
+   * Depth-tracked so a nested `withBatch` does not flush the outer one early, and a flag for whether
+   * anything asked to persist while it was set.
+   */
+  private batching = false;
+  private pendingFlush = false;
+
+  /**
+   * Run `fn` with persistence COALESCED: at most one file write, at the end, however many marks
+   * advance inside.
+   *
+   * `flushMarks` rewrites the WHOLE file - read, parse, merge, stringify, write, rename - and
+   * `observe` called it once per ADVANCING mark. A cold recall observes every cell, so a recall of
+   * n cells performed n whole-file rewrites of a file that is itself O(n): quadratic, on the first
+   * operation this package recommends anyone run. The bound is the claim, and it is read off the
+   * code rather than measured: no timing is quoted here, because a timing describes one fixture on
+   * one filesystem and rots where the shape does not.
+   *
+   * Scoped and synchronous rather than debounced. A microtask or timer would move the flush outside
+   * the call, where a throw on an operator-named path is an UNCAUGHT exception instead of an error
+   * out of the method that caused it - trading a slow write for a dead process. Everything here
+   * still happens inside the caller's frame, so the explicit-path policy in `persist` is unchanged.
+   *
+   * Wrapped around `openRecallRows`, the one place that opens many rows in a loop; every other
+   * caller advances a single mark and already costs a single write. Forgetting to wrap a future loop
+   * costs the OLD behaviour - slower, never wrong - which is the failure direction to choose when a
+   * guard has to be applied by its caller rather than called.
+   */
+  withBatch<T>(fn: () => T): T {
+    const outer = this.batching;
+    this.batching = true;
+    let out: T;
+    try {
+      out = fn();
+    } catch (e) {
+      // NOT FLUSHED HERE, and the marks are not lost by that. `pendingFlush` stays set, and
+      // `flushMarks` writes every cellId this process holds rather than only the newly-advanced one,
+      // so the next persisting operation writes them along with its own.
+      //
+      // The alternative was a best-effort flush in this catch, which is where it started. Two things
+      // ruled it out and only one is about style. A marks-file error raised from here would REPLACE
+      // the error being reported - a `502 malformed_response` arriving as `EACCES` - so it would have
+      // to be swallowed; and a swallowed call plus a marked-rethrow call makes `flushPending` a
+      // method the render-fence sweep cannot classify, since that sweep decides per METHOD whether a
+      // persist-reaching call is wrapped or swallowed. Bending the instrument to fit this shape would
+      // have bought a flush on a path where the endpoint controls whether we ever saw the envelope
+      // in the first place - so the marks it would preserve are ones a hostile endpoint could simply
+      // have withheld. Worth less than the guard.
+      this.batching = outer;
+      throw e;
+    }
+    this.batching = outer;
+    // The body SUCCEEDED, so a persist failure is this call's only failure and propagates exactly as
+    // it would have from the unbatched write it replaced.
+    //
+    // MARKED, and this is the half of the batch that is easy to get wrong. Deferring the write moved
+    // it OUT of the `markPathBearing` wrappers that sit at the two `observe` call sites, so an
+    // operator-named seq path failing during a recall would have reached `failText` unmarked and had
+    // the directory Node named cut to fit the narrow budget - the exact defect the `remember` arm has
+    // a test for. The render-fence sweep found it; no behavioural test here would have.
+    if (!outer) {
+      try {
+        this.flushPending();
+      } catch (e) {
+        throw markPathBearing(e);
+      }
+    }
+    return out;
+  }
+
+  private flushPending(): void {
+    if (!this.pendingFlush) return;
+    this.pendingFlush = false;
+    this.persist();
   }
 
   /** Monotonic within the process, so two writes in one millisecond cannot claim one tmp name. */
@@ -1179,6 +1299,11 @@ class SeqState {
    */
   private persist(): void {
     if (this.path === undefined) return;
+    // Inside a batch this is a NOTE, not a write. See `withBatch`.
+    if (this.batching) {
+      this.pendingFlush = true;
+      return;
+    }
     try {
       this.flushMarks(this.path);
     } catch (e) {
@@ -1288,7 +1413,14 @@ class SeqState {
     }
     if (diskRaw !== undefined) {
       try {
-        onDisk = JSON.parse(diskRaw) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(diskRaw);
+        // Same shape check as `load`, for the same reason and a different reach: here
+        // `Object.entries(null)` throws out of `flushMarks` into `persist`, which on an explicit
+        // path rethrows -- so a file holding `null` would fail every `remember` instead of failing
+        // one constructor. Not merged and not preserved: a non-object holds no marks, so rewriting
+        // it loses nothing that could ever have been read back.
+        if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed))
+          onDisk = parsed as Record<string, unknown>;
       } catch {
         // Present but UNPARSEABLE is genuinely different from unreadable: there are no marks to
         // preserve, so rewriting loses nothing that could ever have been read back. Not merged, not
@@ -1300,7 +1432,8 @@ class SeqState {
     // nothing here may assume a field exists. Nothing read here reaches a renderer - every value is
     // either discarded by the digit test below or becomes a decimal seq string this file wrote.
     for (const [cellId, v] of Object.entries(onDisk)) {
-      if (cellId === '__proto__' || cellId === 'constructor' || cellId === 'prototype') continue;
+      // No prototype skip - see `load`. `onDisk` came from `JSON.parse` (own properties) and `obj`
+      // below has a null prototype, so these keys are data at both ends of this merge.
       const seq = SeqState.parseMark(v);
       // Written back in canonical decimal rather than echoed. Every accepted form already IS
       // canonical (the regex refuses leading zeros), so this normalises nothing today and cannot
@@ -1347,6 +1480,11 @@ class SeqState {
     return this.hwm.current(this.agentIdHashHex, cellId);
   }
 
+  /** Has THIS process observed the endpoint's seq for `cellId`? See {@link observedLive}. */
+  observedLiveThisRun(cellId: string): boolean {
+    return this.observedLive.has(cellId);
+  }
+
   /** The commitment pinned AT the current high-water seq, if one has been observed. */
   currentCommitment(cellId: string): string | undefined {
     return this.commitments.get(cellId);
@@ -1358,6 +1496,9 @@ class SeqState {
    *  pin with a second, equivocating envelope's hash -- which would hand the endpoint the very
    *  substitution this pin exists to detect. */
   observe(cellId: string, seq: bigint, commitmentHash?: string): void {
+    // Recorded whether or not the mark ADVANCES. A re-read at the seq we already hold still tells us
+    // where the endpoint is, which is the whole question the discovery gate asks.
+    this.observedLive.add(cellId);
     if (this.hwm.admit(this.agentIdHashHex, cellId, seq)) {
       this.cellIds.add(cellId);
       if (commitmentHash !== undefined) this.commitments.set(cellId, commitmentHash);
@@ -2686,13 +2827,23 @@ export class SaihmProClient {
     opts: RememberOpts = {},
   ): Promise<RememberResult> {
     const cellId = opts.cellId ?? randomBytes(16).toString('hex');
-    // Updating a provided cellId we have no local high-water for: learn the LIVE server seq first so
+    // Updating a provided cellId THIS PROCESS has not seen live: learn the LIVE server seq first so
     // the write is not guaranteed-rejected as stale. Route the discovered envelope through openRow so
     // its seq is AEAD-AUTHENTICATED (openCell binds seq into the AAD) BEFORE we seed the high-water
     // mark. A structural decode alone is NOT enough: a hostile/buggy endpoint could forge a high seq
     // on an otherwise-valid-looking envelope and poison our monotonic counter — burning the cell's
     // sequence space and, with a persisted seq file, corrupting it across restarts.
-    if (opts.cellId !== undefined && this.seq.current(cellId) === undefined) {
+    // The ceiling is exempt, and exempt provably rather than as an optimisation. A mark AT `MAX_SEQ`
+    // cannot be raised by anything the endpoint could serve: a seq above the u64 ceiling cannot come
+    // from a valid envelope, because `decodeEnvelope` parses it as u64, and `parseMark` refuses one
+    // from disk. So `next()` is `MAX_SEQ + 1` whatever the live read returns, and the outcome is
+    // `seq_exhausted` either way. The round trip would change no result and would be paid on every
+    // attempt against a cell that is permanently unwritable.
+    if (
+      opts.cellId !== undefined &&
+      !this.seq.observedLiveThisRun(cellId) &&
+      this.seq.current(cellId) !== MAX_SEQ
+    ) {
       const existing = await this.recallRawOne(cellId);
       if (existing.found && existing.wire) {
         this.openRow(cellId, existing.wire); // decode + attribute + openCell(authenticates seq) + observe
@@ -2725,6 +2876,19 @@ export class SaihmProClient {
     try {
       this.seq.observe(cellId, seq, toHex(env.publicMeta.commitmentHash));
     } catch (e) {
+      // THE CELL IS STORED. Reaching here means the endpoint accepted the write and the local marks
+      // file could not be updated - and only an OPERATOR-NAMED path throws at all, since a defaulted
+      // one degrades to memory rather than break an accepted write. A bare `EACCES ... open '<path>'`
+      // arriving out of `remember` reads as a failed write, which is the one thing it is not, and the
+      // operator's repair for it -- write it again -- burns a second seq on a cell already holding
+      // the content. Prefixed rather than replaced so the path Node named still reaches them.
+      if (e instanceof Error) {
+        try {
+          e.message = `cell stored; local sequence marks could not be updated: ${e.message}`;
+        } catch {
+          /* frozen or getter-only message: the unprefixed error is still the right one to raise */
+        }
+      }
       throw markPathBearing(e);
     }
     // Delta-cache coherence: a delta recall SKIPS cellIds we already hold, so an in-place UPDATE (or a
@@ -2950,7 +3114,12 @@ export class SaihmProClient {
    * and are handled under weaker rules — see the comment at the `row.shared` branch. The two streams
    * never share a key: a shared cellId may equal one this agent owns, and both must survive.
    */
-  private openRecallRows(rows: unknown[]): {
+  private openRecallRows(rows: unknown[]) {
+    // ONE marks write for the whole response instead of one per row - see `SeqState.withBatch`.
+    return this.seq.withBatch(() => this.openRecallRowsUnbatched(rows));
+  }
+
+  private openRecallRowsUnbatched(rows: unknown[]): {
     cells: RecalledCell[];
     announcements: SharedAnnouncement[];
     announcementsTruncated: boolean;

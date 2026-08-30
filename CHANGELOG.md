@@ -379,6 +379,56 @@ that previously only `remember` and `recall` could reach. `share` also pins exac
 as a read does, so sharing a cell this session has not read establishes the same pin
 a read would have.
 
+### What persisting the marks broke, and what it did not
+
+Making the rollback guard survive a restart changed the meaning of a test the rest
+of the client was written against. `remember` decided whether to re-read a cell's
+live sequence by asking whether it held a mark for it, and while marks lived only
+in memory, "we hold a mark" and "we have seen this cell live in this run" were the
+same set. Persisting them split those sets, and the following five items are what
+fell into the gap. Four are fixed here; the fifth is a documentation correction in
+`README.md`.
+
+- **A mark that is BEHIND the endpoint is no longer trusted.** `remember` now
+  re-reads a cell's live sequence on the first touch of that cell in a process,
+  keyed on what this process has OBSERVED rather than on what is on disk. It does
+  not take a second machine to get a mark that is behind: `remember` advances the
+  mark only after the endpoint ACCEPTS, so a write the endpoint commits whose
+  response is lost leaves the mark one short, and before marks persisted a restart
+  cleared it. Writing at that sequence puts a second envelope where the endpoint
+  already holds one — the equivocation `stale_cell` and the `share` guard exist to
+  detect, produced locally, out of a defence. The persisted mark keeps its whole
+  security value: it is a FLOOR, and a replayed older envelope still cannot drag a
+  client backwards. What it no longer does is stand in for the live read. **Cost:
+  one extra recall per updated cell per process** — the behaviour before marks
+  persisted. A cell already at the uint64 ceiling is exempt, because nothing the
+  endpoint can serve could raise it and the outcome is `seq_exhausted` either way.
+- **A marks failure after an accepted write now says the cell was stored.** It
+  reached the operator as a bare filesystem error out of `saihm_remember`, which
+  reads as a failed write — and the repair for a failed write is to send it again,
+  spending a second sequence number on a cell that already holds the text.
+- **A marks file that is valid JSON but not an object no longer takes every tool
+  down.** `null`, `[]`, `7` and `"x"` all parse; the first threw from the
+  constructor, so every SAIHM tool failed with `Cannot convert undefined or null to
+  object`, naming nothing actionable. Now reported in `saihm_status` as
+  `seq-state=malformed` — its own token, because the file is readable and
+  well-formed and `unparseable` would send someone looking for a torn write.
+- **A cell whose id is `__proto__`, `constructor` or `prototype` keeps its mark.**
+  Those keys were written faithfully and skipped on load, so the mark round-tripped
+  to nothing and the cell reset to sequence zero on every restart — the exact loss
+  the skip was there to prevent. Nothing on that path is prototype-exposed, so the
+  skip cost the mark and bought nothing.
+- **A recall writes the marks file ONCE, not once per cell.** `observe` persisted
+  per advancing mark and the write rewrites the whole file, so a recall of n cells
+  performed n whole-file rewrites of a file that is itself O(n) — quadratic, on the
+  first operation this package recommends anyone run.
+
+`README.md`'s configuration table and troubleshooting row for
+`SAIHM_SEQ_STATE_PATH` described the DEFAULT location's behaviour under the
+variable that overrides it. A location you set is yours: if it cannot be written,
+calls fail and name the path rather than falling back, so a safeguard you asked for
+never goes quiet. Only the default degrades to memory for the session.
+
 ### Compatibility
 
 The tool LIST does not change, and neither does the public API of `index.js`. SIXTEEN

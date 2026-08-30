@@ -1572,6 +1572,15 @@ test('server.ts: an unwritable SEQ STATE path is reported with the path NODE nam
     await handshake(d);
     const r = await callText(d, 3, 'saihm_remember', { content: 'x' });
     assert.equal(r.isError, true, 'an unwritable seq state must surface, not be swallowed');
+    // AND IT SAYS THE CELL WAS STORED. This throw happens in `observe`, which runs only after the
+    // endpoint ACCEPTED the write, so a bare `ENOTDIR ... mkdir '<dir>'` out of `saihm_remember`
+    // reads as a failed write - the one thing it is not. The operator's repair for a failed write is
+    // to send it again, which burns a second sequence number on a cell that already holds the text.
+    assert.match(
+      r.text,
+      /cell stored/,
+      'a marks-file failure after an accepted write must not be reported as a failed write',
+    );
     const m = /mkdir '(.+)'/.exec(r.text);
     assert.ok(m, `Node names the directory it could not make. got: ${r.text}`);
     assert.equal(m![1], dir, 'and the fence is wide enough to keep it whole');
@@ -1579,5 +1588,270 @@ test('server.ts: an unwritable SEQ STATE path is reported with the path NODE nam
     d.proc.kill();
     rmSync(root, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+// ── the five findings an independent reviewer raised against S1's persistence ────────────────────
+
+test('server.ts: a mark BEHIND the endpoint re-seeds instead of writing at a seq already committed', async () => {
+  // The gate in `remember` that learns the live seq before writing was `current(cellId) === undefined`,
+  // and that expression meant "never observed" only while marks lived in memory. Persisting them
+  // made it mean "no mark on disk", which is a different set, and the case it stopped covering is
+  // the one it exists for: a mark that is BEHIND the endpoint.
+  //
+  // No second machine is needed to produce one. `remember` advances the mark only after the endpoint
+  // ACCEPTS, so a write the endpoint commits whose response is lost leaves the mark one short. Before
+  // S1 a restart cleared it and the next write re-seeded from the live envelope; after S1 the short
+  // mark survives the restart and the gate declines to look. The client then writes at a seq the
+  // endpoint already holds an envelope for - two valid envelopes at one (cellId, seq), which is
+  // precisely the equivocation `stale_cell` and the share guard were built to detect. S1 manufactured
+  // it locally, out of a defence.
+  //
+  // Phase 1 exists to obtain this identity's real mark file rather than derive its name here; the
+  // rewrite in between is the lost response, written out.
+  const me = deriveIdentity(fromHex(MASTER_HEX));
+  const wire = encodeEnvelope(
+    sealCell({
+      plaintext: utf8('committed at seq 2, response never arrived'),
+      kek: me.kek,
+      mldsaSecretKey: me.mldsaSecretKey,
+      mldsaPubKey: me.mldsaPubKey,
+      agentIdHash: me.agentIdHash,
+      cellId: 'lostack',
+      seq: 2n,
+      tier: 'PRO',
+    }),
+  );
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-behind-'));
+  const mock = startMock({ recallOneWire: wire });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const first = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(first);
+      await callText(first, 3, 'saihm_remember', { content: 'a', cellId: 'lostack' });
+    } finally {
+      first.proc.kill();
+    }
+    const files = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(files.length, 1, 'premise: this identity persisted a mark file');
+    const marksPath = pathJoin(home, files[0]!);
+    // THE LOST RESPONSE. The endpoint's head is 2; this file claims 1.
+    writeFileSync(marksPath, JSON.stringify({ lostack: { seq: '1' } }));
+    const second = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(second);
+      const r = await callText(second, 3, 'saihm_remember', { content: 'b', cellId: 'lostack' });
+      assert.equal(r.isError, false);
+      // 3, because the live envelope says 2. The number IS the assertion: `isError === false` passes
+      // against this mock either way, since it does not enforce monotonicity - which is exactly why
+      // a client may not rely on the endpoint to refuse a stale write on its behalf.
+      assert.match(
+        r.text,
+        /seq=3/,
+        'a mark behind the endpoint must be re-seeded from the live envelope, not trusted',
+      );
+      assert.doesNotMatch(
+        r.text,
+        /seq=2(?![0-9])/,
+        'writing at 2 puts a second envelope at a sequence the endpoint already committed',
+      );
+    } finally {
+      second.proc.kill();
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: a marks file that is valid JSON but not an object degrades, it does not kill every tool', async () => {
+  // `JSON.parse` succeeding is not the same as the file being a marks file. `null`, `[]`, `7` and
+  // `"x"` all parse, and `Object.entries(null)` THROWS - from a site outside the parse try, inside
+  // the CONSTRUCTOR. Nothing degrades: `getClient()` raises, and every SAIHM tool then fails with
+  // `Cannot convert undefined or null to object`, which names nothing the operator can act on and
+  // does not mention the file. `RecallCache.load` has always carried this check; its sibling did not.
+  //
+  // Reported under its own token. `unparseable` sends someone looking for a torn write; this file is
+  // well-formed, and the two are different events with different explanations.
+  for (const [body, label] of [
+    ['null', 'null'],
+    ['[]', 'an array'],
+  ] as const) {
+    const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-malformed-'));
+    const mock = startMock();
+    await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+    try {
+      const first = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+      try {
+        await handshake(first);
+        await callText(first, 3, 'saihm_remember', { content: 'seed' });
+      } finally {
+        first.proc.kill();
+      }
+      const files = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+      assert.equal(files.length, 1, `premise (${label}): a mark file exists to corrupt`);
+      writeFileSync(pathJoin(home, files[0]!), body);
+      const second = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+      try {
+        await handshake(second);
+        const st = await callText(second, 3, 'saihm_status', {});
+        assert.equal(st.isError, false, `a marks file holding ${label} must not take the tools down`);
+        assert.match(st.text, /seq-state=malformed/, `${label} is reported as what it is`);
+        // And the tool the operator would actually reach for still works.
+        const w = await callText(second, 4, 'saihm_remember', { content: 'after' });
+        assert.equal(w.isError, false, `writes continue over a ${label} marks file`);
+      } finally {
+        second.proc.kill();
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      await new Promise<void>((r) => mock.server.close(() => r()));
+    }
+  }
+});
+
+test("server.ts: a cell named `__proto__` keeps its mark across a restart", async () => {
+  // The load side skipped `__proto__`, `constructor` and `prototype`; the write side stored them
+  // faithfully, onto a null-prototype object. So the mark round-tripped to NOTHING and that cell
+  // silently reset to zero on every restart - the exact loss the skip said it existed to prevent,
+  // caused by the skip. `cellId` is caller-supplied through `RememberOpts` and the schema admits a
+  // bare string, so naming one is not exotic.
+  //
+  // Nothing on this path is prototype-exposed: the high-water store keys a Map, `commitments` is a
+  // Map, `cellIds` is a Set, and the file is written onto `Object.create(null)`. The mock serves NO
+  // live envelope here on purpose - with no cell to re-seed from, the marks FILE is the only thing
+  // that can carry the sequence forward, so the second write's number is a clean read of it.
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-proto-'));
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const first = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(first);
+      const r = await callText(first, 3, 'saihm_remember', { content: 'a', cellId: '__proto__' });
+      assert.equal(r.isError, false);
+      assert.match(r.text, /seq=1/, 'premise: a cell nobody has seen starts at 1');
+    } finally {
+      first.proc.kill();
+    }
+    const files = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(files.length, 1);
+    const onDisk: unknown = JSON.parse(readFileSync(pathJoin(home, files[0]!), 'utf8'));
+    // `getOwnPropertyDescriptor`, not `onDisk['__proto__']`: the point of the test is that this is
+    // an OWN data property and not a prototype reference, so the assertion has to ask that question.
+    const d = Object.getOwnPropertyDescriptor(onDisk as object, '__proto__');
+    assert.ok(d, 'the write side stores this key - it always did');
+    assert.equal((d!.value as { seq?: string })?.seq, '1', 'and stores the mark under it');
+    const second = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(second);
+      const r = await callText(second, 3, 'saihm_remember', { content: 'b', cellId: '__proto__' });
+      assert.equal(r.isError, false);
+      assert.match(r.text, /seq=2/, 'a mark that was written must be a mark that is read back');
+    } finally {
+      second.proc.kill();
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: batching a recall persists EVERY mark, including when a row aborts the loop', async () => {
+  // `observe` used to call `persist` per advancing mark, and `persist` rewrites the WHOLE file. A
+  // cold recall observes every cell, so an n-cell recall performed n whole-file rewrites of a file
+  // that is itself O(n) - quadratic, on the first operation this package tells anyone to run. The
+  // batch collapses that to one write per recall.
+  //
+  // This test does not measure the saving and cannot: a mutation that removes the batching is a
+  // PERFORMANCE change and passes every correctness assertion by construction. What it pins is the
+  // property the batch is only allowed to keep - that no mark is lost by deferring it - on both exits
+  // from the batched scope. The second arm is the one that can actually regress: the flush on the
+  // failure path is best-effort and separate from the success path, so deleting it turns this red
+  // while the first arm stays green.
+  const me = deriveIdentity(fromHex(MASTER_HEX));
+  const seal = (cellId: string, seq: bigint): unknown => ({
+    found: true,
+    wire: encodeEnvelope(
+      sealCell({
+        plaintext: utf8(`row ${cellId}`),
+        kek: me.kek,
+        mldsaSecretKey: me.mldsaSecretKey,
+        mldsaPubKey: me.mldsaPubKey,
+        agentIdHash: me.agentIdHash,
+        cellId,
+        seq,
+        tier: 'PRO',
+      }),
+    ),
+  });
+  const ids = ['r0', 'r1', 'r2', 'r3', 'r4'];
+
+  // ARM 1 - the loop completes. Every observed mark is on disk after ONE flush.
+  {
+    const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-batch-ok-'));
+    const mock = startMock({ recallAll: ids.map((c, i) => seal(c, BigInt(i + 1))) });
+    await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+    const d = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d);
+      const r = await callText(d, 3, 'saihm_recall', {});
+      assert.equal(r.isError, false);
+      d.proc.kill();
+      const files = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+      assert.equal(files.length, 1, 'the batched recall wrote a marks file');
+      const marks = JSON.parse(readFileSync(pathJoin(home, files[0]!), 'utf8')) as Record<
+        string,
+        { seq: string }
+      >;
+      for (let i = 0; i < ids.length; i++)
+        assert.equal(marks[ids[i]!]?.seq, String(i + 1), `deferring must not drop ${ids[i]}`);
+    } finally {
+      d.proc.kill();
+      rmSync(home, { recursive: true, force: true });
+      await new Promise<void>((r) => mock.server.close(() => r()));
+    }
+  }
+
+  // ARM 2 - the loop THROWS partway. A duplicate cellId in one response is a `malformed_response`,
+  // raised from inside the batched scope, and the marks earned before it must still reach disk.
+  {
+    const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-batch-throw-'));
+    const mock = startMock({
+      recallAll: [seal('k0', 1n), seal('k1', 2n), seal('k0', 3n)],
+    });
+    await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+    const d = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d);
+      const r = await callText(d, 3, 'saihm_recall', {});
+      assert.equal(r.isError, true, 'premise: a repeated cellId aborts the loop');
+      // A batch that ends in a throw does NOT flush - deliberately, because a marks-file error
+      // raised there would replace the error being reported. What it must not do is LOSE the marks,
+      // and it does not: the pending flag survives and `flushMarks` writes every cellId this process
+      // holds, so the next persisting operation carries them out with its own.
+      const w = await callText(d, 4, 'saihm_remember', { content: 'the next operation' });
+      assert.equal(w.isError, false);
+      d.proc.kill();
+      const files = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+      assert.equal(files.length, 1);
+      const marks = JSON.parse(readFileSync(pathJoin(home, files[0]!), 'utf8')) as Record<
+        string,
+        { seq: string }
+      >;
+      // 3, not 1, and that is correct rather than a leak. The duplicate row is a REAL envelope this
+      // identity sealed at seq 3: `openRow` opens it, and the AEAD binds seq into the AAD, so the
+      // mark it advances is authenticated before the duplicate check further down rejects the
+      // RESPONSE. A monotonic high-water may safely take the highest authenticated seq it has seen;
+      // the endpoint gains nothing by serving that envelope inside a malformed response that it
+      // would not gain by serving it inside a well-formed one.
+      assert.equal(marks['k0']?.seq, '3', 'a mark learned inside the aborted batch is not lost');
+      assert.equal(marks['k1']?.seq, '2', 'nor is the one before it');
+    } finally {
+      d.proc.kill();
+      rmSync(home, { recursive: true, force: true });
+      await new Promise<void>((r) => mock.server.close(() => r()));
+    }
   }
 });

@@ -163,7 +163,7 @@ accepts.
 | Tools appear but every call fails | `SAIHM_ENDPOINT_URL` unreachable |
 | "no identity" | Setup hasn't run on this machine yet |
 | A different memory than you expected | This machine has its own key rather than yours |
-| `status` mentions `seq-state` | A small local file can't be read or written. Your memories are fine; a safeguard is running in memory only until the next restart |
+| `status` mentions `seq-state` | A small local safeguard file couldn't be read. Your memories are unaffected. The same line ends `rollback-guard=persisting` (it has already repaired itself) or `memory-only-this-run` (it will try again next restart) |
 
 ## How it works
 
@@ -231,7 +231,7 @@ working defaults.
 | `SAIHM_AUTH_HEADER` | no | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended) — the client mints and refreshes its own token, so there is nothing to paste or re-paste. |
 | `SAIHM_TIER` | self-onboard only | Plan label recorded in encrypted metadata (`FREE`, `PRO`, …). Required when self-onboarding; otherwise resolved via `status()`. |
 | `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. |
-| `SAIHM_SEQ_STATE_PATH` | no | Overrides where the anti-rollback bookkeeping is written. Running as an MCP server this is **on by default** at `$SAIHM_HOME/seq.<id>.json`; set it only to relocate it. If the location can't be written, the client keeps the tally in memory for the session and says so in `status`. |
+| `SAIHM_SEQ_STATE_PATH` | no | Overrides where the anti-rollback bookkeeping is written. Running as an MCP server this is **on by default** at `$SAIHM_HOME/seq.<id>.json`; set it only to relocate it. The default location is ours to manage: if it can't be written, the tally stays in memory for the session and `status` says so. A location **you** set is yours: if it can't be written, calls fail and name the path, so a safeguard you asked for never goes quiet without telling you. |
 | `SAIHM_STATE_DIR` | no | Where transient operator state (such as `checkout-url.txt`) is written. Does **not** relocate your identity or its bookkeeping. |
 
 *Note:* a master secret is required, from one source or the other — but setup

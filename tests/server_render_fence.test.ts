@@ -2072,7 +2072,17 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // swallowed locally and never arrive at `failText`, so they are correctly outside this set. The
   // earlier wording called these "every route into a persist()", which was the wrong sentence for
   // the right set.
-  const CALLS = ['this.seq.observe', 'this.recallCache.merge', 'this.recallCache.replaceAll'];
+  //
+  // `this.flushPending` is SeqState's own, and it is here because batching created it. `observe` no
+  // longer writes the file inside a batch - it notes the mark and `withBatch` writes once at the end
+  // - so the wrapper at the `observe` call site stopped covering the write it was put there for.
+  // This sweep is what found that; no behavioural test in the suite did.
+  const CALLS = [
+    'this.seq.observe',
+    'this.recallCache.merge',
+    'this.recallCache.replaceAll',
+    'this.flushPending',
+  ];
   // DERIVED, not remembered. The file set around this sweep is derived and the ROUTE set was a
   // hand-kept list - the exact shape this file's opening indicts. Measured: adding a `prune()` to
   // `RecallCache` that calls `this.persist()`, then calling it UNWRAPPED, left the suite green and
@@ -2511,10 +2521,13 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   }
   assert.deepEqual(
     perFile,
-    { 'client.ts': 4, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0 },
+    // FIVE. The batch's own flush is the fifth: `withBatch` writes the deferred marks at the end of a
+    // batched scope, which is a persist-reaching call on a path a recall reaches, so it is wrapped
+    // and counted like the four before it.
+    { 'client.ts': 5, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
-  assert.equal(total, 4, 'the number of persist-reaching call sites changed');
+  assert.equal(total, 5, 'the number of persist-reaching call sites changed');
   // POSITIVE CONTROL on the exclusion check above. If `EXCLUDED` names methods that are never
   // called, the swallow assertion runs zero times and reports a clean pass on nothing - the
   // vacuous-guard failure this file records at four other sites. A zero here means either the
