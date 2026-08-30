@@ -9,6 +9,14 @@
  * with no error. Pinning the envelope's commitment alongside the seq is what makes the pair
  * distinguishable.
  *
+ * THE PIN MUST BE LOCALLY DERIVED, which is the third and fourth cases. `publicMeta` is outside
+ * both AEAD AADs -- `cellAad` and `wrapAad` cover agentIdHash, cellId, seq and schemaVer, nothing
+ * else -- and the ML-DSA signature that does cover it is only checked on the SHARED read path, where
+ * a foreign envelope has no other source of provenance. So a commitment read off `publicMeta` on the
+ * own-memory path is the endpoint's own choice of value, and comparing it to a pin taken the same way
+ * compares the endpoint to itself. Recomputing `sha256(ciphertext)` is what makes the pin mean
+ * anything: the ciphertext is authenticated by the AEAD open under this identity's KEK.
+ *
  * THE SECOND CASE IS A FOOTGUN GUARD. The obvious-looking fix is to tighten the guard from `<` to
  * `<=`. That is wrong -- it rejects every legitimate re-read of a cell at its current seq, which is
  * the ordinary case -- and it looks correct enough to be applied by someone who never saw this
@@ -17,6 +25,7 @@
 import { describe, it } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { createServer, type Server } from 'node:http';
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,6 +41,8 @@ interface Rig {
   loseNextResponse: () => void;
   /** Which committed version recall hands back; -1 is the newest. */
   serve: (index: number) => void;
+  /** Serve the next recall wearing this `publicMeta.commitmentHash`; `null` restores the real one. */
+  forgeCommitment: (hex: string | null) => void;
   done: () => Promise<void>;
 }
 
@@ -39,6 +50,7 @@ async function rig(seqStatePath: string): Promise<Rig> {
   const versions: WireEnvelope[] = [];
   let lose = false;
   let index = -1;
+  let forged: string | null = null;
 
   const server: Server = createServer((req, res) => {
     void (async () => {
@@ -69,7 +81,13 @@ async function rig(seqStatePath: string): Promise<Rig> {
         return;
       }
       if (method === 'saihm_recall') {
-        const wire = versions[index === -1 ? versions.length - 1 : index]!;
+        const base = versions[index === -1 ? versions.length - 1 : index]!;
+        // Serve a COPY when forging, so the tamper never mutates what the endpoint actually committed
+        // -- otherwise a later honest read would replay the forgery and prove nothing.
+        const wire: WireEnvelope =
+          forged === null
+            ? base
+            : { ...base, publicMeta: { ...base.publicMeta, commitmentHash: forged } };
         send(
           typeof params.cellId === 'string'
             ? { found: true, wire }
@@ -92,6 +110,7 @@ async function rig(seqStatePath: string): Promise<Rig> {
     versions,
     loseNextResponse: () => (lose = true),
     serve: (i) => (index = i),
+    forgeCommitment: (hex) => (forged = hex),
     done: () => new Promise<void>((r) => server.close(() => r())),
   };
 }
@@ -162,6 +181,82 @@ describe('PC-SEQ-COMMITMENT: two envelopes at one seq are distinguishable', () =
       await r.client.remember('after a legacy load', { cellId: 'X' });
       const seqs = r.versions.map((w) => String((w as unknown as { seq: unknown }).seq));
       assert.deepEqual(seqs, ['8'], 'the legacy high-water mark must still be honoured');
+    } finally {
+      await r.done();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a forged commitment on an otherwise honest envelope cannot poison the pin', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'saihm-seq-'));
+    const r = await rig(join(dir, 'seq.json'));
+    try {
+      await r.client.remember('only version', { cellId: 'X' });
+      const committed = r.versions[0]!;
+      const trueCommitment = createHash('sha256')
+        .update(Buffer.from(committed.ciphertext, 'hex'))
+        .digest('hex');
+      assert.equal(
+        committed.publicMeta.commitmentHash,
+        trueCommitment,
+        'setup: an honestly sealed envelope commits to its own ciphertext',
+      );
+      const FORGERY = 'a'.repeat(64); // valid hex of the right length, or `decodeEnvelope` rejects it
+      assert.notEqual(trueCommitment, FORGERY, 'setup: the forgery must differ from the real value');
+
+      r.forgeCommitment(FORGERY);
+      const first = await r.client.recallOne('X');
+      assert.equal(first?.plaintext, 'only version');
+      assert.equal(
+        first?.commitmentHash,
+        trueCommitment,
+        'the commitment must be recomputed from the ciphertext, never echoed from publicMeta',
+      );
+
+      // The denial of service the echo enables: had the forgery been pinned, this honest re-read --
+      // same cell, same seq, same bytes -- would mismatch it and keep mismatching it across restarts.
+      r.forgeCommitment(null);
+      const second = await r.client.recallOne('X');
+      assert.equal(second?.plaintext, 'only version', 'an honest re-read must not be refused');
+      assert.equal(second?.commitmentHash, trueCommitment);
+    } finally {
+      await r.done();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('wearing the pinned commitment does not smuggle a DIFFERENT envelope past the guard', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'saihm-seq-'));
+    const r = await rig(join(dir, 'seq.json'));
+    try {
+      await r.client.remember('v1', { cellId: 'X' });
+      r.loseNextResponse();
+      await assert.rejects(
+        r.client.remember('v2 — committed, response lost', { cellId: 'X' }),
+        'setup: the lost response must surface as a failure, or the mark would advance',
+      );
+      await r.client.remember('v3 — reuses the seq', { cellId: 'X' });
+      const seqs = r.versions.map((w) => String((w as unknown as { seq: unknown }).seq));
+      assert.deepEqual(seqs, ['1', '2', '2'], 'setup: the lost response must cause a seq reuse');
+
+      r.serve(2);
+      const pinned = await r.client.recallOne('X');
+      assert.equal(pinned?.plaintext, 'v3 — reuses the seq', 'setup: the pin comes from v3');
+
+      // The endpoint now serves the OTHER envelope at that seq wearing v3's commitment. If the pin
+      // and the served value are both read off `publicMeta`, this compares the endpoint to itself,
+      // they agree, and the first case's whole guard is reinstated as a no-op.
+      r.serve(1);
+      r.forgeCommitment(pinned!.commitmentHash);
+      await assert.rejects(
+        r.client.recallOne('X'),
+        (e: unknown) => {
+          assert.ok(e instanceof SaihmEndpointError, `wrong error type: ${String(e)}`);
+          assert.equal(e.code, 'stale_cell');
+          return true;
+        },
+        'a substituted envelope wearing the pinned commitment was accepted',
+      );
     } finally {
       await r.done();
       rmSync(dir, { recursive: true, force: true });

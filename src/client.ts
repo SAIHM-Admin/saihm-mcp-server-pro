@@ -47,7 +47,7 @@
  * a typed stale-seq error (no corruption); serialize same-cell updates if you need both to land.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -568,7 +568,10 @@ export interface RecalledCell {
   plaintext: string;
   /** The committed sequence number of the returned envelope (decimal string). */
   seq: string;
-  /** sha256(ciphertext) (hex), taken from the authenticated envelope. */
+  /**
+   * sha256(ciphertext) (hex), RECOMPUTED locally from the opened envelope's ciphertext -- never the
+   * endpoint's `publicMeta` echo, which nothing on this path authenticates.
+   */
   commitmentHash: string;
 }
 
@@ -2281,22 +2284,6 @@ export class SaihmProClient {
         `endpoint returned a rolled-back envelope for cell '${env.cellId}' (seq ${env.seq} < ${knownSeq})`,
       );
     }
-    // Rollback WITHIN a sequence number, which the comparison above cannot see. A seq can repeat:
-    // `remember` advances the mark only after the endpoint accepts the write, so a committed write
-    // whose response was lost leaves the mark unadvanced and the next write reuses that seq. Both
-    // envelopes are genuinely signed by this identity, so every other check on this path passes and
-    // the endpoint may serve either, alternately, forever. Comparing the pinned commitment is what
-    // separates them. Only ever checked at EQUAL seq -- a higher seq is a legitimate new version and
-    // pins a new commitment below.
-    const envCommitment = toHex(env.publicMeta.commitmentHash);
-    const knownCommitment = this.seq.currentCommitment(env.cellId);
-    if (knownSeq !== undefined && env.seq === knownSeq && knownCommitment !== undefined && envCommitment !== knownCommitment) {
-      throw new SaihmEndpointError(
-        502,
-        'stale_cell',
-        `endpoint returned a different envelope at the same sequence for cell '${env.cellId}' (seq ${env.seq})`,
-      );
-    }
     let plaintext: string;
     try {
       plaintext = fromUtf8(openCell(env, this.identity.kek));
@@ -2307,8 +2294,38 @@ export class SaihmProClient {
         `cell '${env.cellId}' could not be opened with this identity's key`,
       );
     }
-    // Both authenticated: seq is bound into the AEAD AAD, and the commitment is the envelope's own
-    // public meta, verified before this line. Neither is the endpoint's echo.
+    // Rollback WITHIN a sequence number, which the `<` comparison above cannot see. A seq can repeat:
+    // `remember` advances the mark only after the endpoint accepts the write, so a committed write
+    // whose response was lost leaves the mark unadvanced and the next write reuses that seq. Both
+    // envelopes are genuinely signed by this identity, so every other check on this path passes and
+    // the endpoint may serve either, alternately, forever. Comparing the pinned commitment is what
+    // separates them. Only ever checked at EQUAL seq -- a higher seq is a legitimate new version and
+    // pins a new commitment below.
+    //
+    // The commitment is RECOMPUTED, never read from `publicMeta`. As served, that field is the
+    // endpoint's echo: it sits outside both AEAD AADs (`cellAad` and `wrapAad` cover agentIdHash,
+    // cellId, seq and schemaVer, nothing else), and the ML-DSA signature that does cover it is not
+    // checked here -- `verifyEnvelope` runs on the SHARED read path, where a foreign envelope has no
+    // other source of provenance. This path gets provenance from our own KEK instead: nothing but
+    // this identity can produce a `wrappedDek` that unwraps. So the signature adds nothing openRow
+    // consumes, but the echo would let the endpoint pick both sides of the comparison below.
+    //
+    // Placed AFTER the decrypt deliberately, and moving it earlier to "fail fast" regresses two
+    // things. A tampered ciphertext would then be reported as `stale_cell` rather than
+    // `undecryptable`, and only when a pin happens to exist -- a misdiagnosis whose presence depends
+    // on unrelated state. Here `env.ciphertext` has been authenticated by the AEAD open, so the hash
+    // is taken over bytes this identity has already vouched for.
+    const envCommitment = createHash('sha256').update(env.ciphertext).digest('hex');
+    const knownCommitment = this.seq.currentCommitment(env.cellId);
+    if (knownSeq !== undefined && env.seq === knownSeq && knownCommitment !== undefined && envCommitment !== knownCommitment) {
+      throw new SaihmEndpointError(
+        502,
+        'stale_cell',
+        `endpoint returned a different envelope at the same sequence for cell '${env.cellId}' (seq ${env.seq})`,
+      );
+    }
+    // Both authenticated: seq is bound into the AEAD AAD, and the commitment was recomputed above
+    // from the ciphertext this identity's KEK has now opened. Neither is the endpoint's echo.
     try {
       this.seq.observe(env.cellId, env.seq, envCommitment);
     } catch (e) {
@@ -2318,7 +2335,7 @@ export class SaihmProClient {
       cellId: env.cellId,
       plaintext,
       seq: env.seq.toString(10),
-      commitmentHash: toHex(env.publicMeta.commitmentHash),
+      commitmentHash: envCommitment,
     };
   }
 
