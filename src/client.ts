@@ -36,8 +36,13 @@
  *   SAIHM_DISCOVERY_SOURCE  OPTIONAL attribution tag (e.g. `"glama"`, `"mcp-registry"`) naming the
  *                           channel this install came from; sent as `source` on self-onboard so the
  *                           operator can attribute the paid conversion. Sanitised endpoint-side.
- *   SAIHM_SEQ_STATE_PATH    optional path; persists per-cell seq high-water marks (mode 600) so a
- *                           cell UPDATE survives a process restart without a stale-seq rejection.
+ *   SAIHM_SEQ_STATE_PATH    OVERRIDES where per-cell seq high-water marks are persisted (mode 600),
+ *                           so a cell UPDATE survives a process restart without a stale-seq
+ *                           rejection. Not the on/off switch it once was: the MCP server's boot path
+ *                           opts in and DEFAULTS this to `dirname(defaultIdentityPath())/seq.<id>.json`,
+ *                           so unset now means "the default location", not "no persistence". A
+ *                           library caller constructing the client directly still gets nothing on
+ *                           disk unless it sets this or passes `persistSeqState`.
  *   SAIHM_RECALL_CACHE_PATH optional path (mode 600); when set, `recall` runs in DELTA mode —
  *                           it fetches only cells not already cached, cutting a session-start
  *                           recall from O(all cells) to O(new). Holds plaintext at rest ⇒ opt-in.

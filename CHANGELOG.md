@@ -279,6 +279,55 @@ Tracked separately.
   heuristics it used to carry are gone; the shapes those made it fail loudly on now
   simply resolve.
 
+### The rollback guard now survives a restart
+
+The guard that refuses an out-of-date copy of a memory kept its high-water marks
+in memory only, and `SAIHM_SEQ_STATE_PATH` — the one way to persist them — is not
+among the four variables `server.json` declares. A registry-installed operator
+therefore could not turn it on by any means, so in every stock install the guard
+protected exactly one process and no restart, and the commitment fix that shipped
+one commit earlier was armed for nobody across a restart.
+
+- **Persisted by default under the MCP server**, at
+  `dirname(defaultIdentityPath())/seq.<identity>.json`, mode 600. Derived from the
+  IDENTITY's directory rather than the state directory, and scoped by identity:
+  `SAIHM_STATE_DIR` deliberately does not relocate an existing identity file, and
+  a mark file that moved while the identity stayed put would silently restart the
+  count at zero — the same silent reset this change exists to close.
+- **`SAIHM_SEQ_STATE_PATH` is now an override, not a switch.** Unset means "the
+  default location", not "no persistence". Constructing `SaihmProClient` directly
+  still writes nothing: the opt-in lives on the server's boot path, so a library
+  embedding this client does not acquire a file in the caller's `$HOME`.
+- **An unwritable DEFAULT path degrades to memory for the session** and says so in
+  `saihm_status` (`seq-state=…  rollback-guard=memory-only-this-run`). An
+  unwritable EXPLICIT path still throws — that one the operator named, so it is a
+  configuration error. Failing `remember` over a file nobody asked for would
+  report a cell the endpoint has already accepted as a failed write.
+- **Concurrent processes on one home merge rather than clobber.** The file is
+  rewritten whole with no lock, and one identity routinely sits behind several
+  processes; a plain write dropped every mark the other process owned and handed
+  back the sequence space the file exists to defend.
+- **A damaged or hand-edited file no longer resets the count to zero silently** —
+  unreadable and unparseable states are distinguished from "not there yet", and
+  `__proto__`, `constructor` and `prototype` keys are skipped.
+
+**Only the sequence number is persisted. The commitment pin is not**, and that is
+a deliberate limit rather than an oversight. Two sessions of the same identity can
+legitimately seal different content at the same sequence number after a lost
+response — that is measured, not hypothetical — so a persisted pin would leave one
+of them with a permanent mismatch on a healthy cell until a human deleted a file.
+**The claim this release makes is that rollback is closed across restarts, not that
+equivocation is.** Detecting an equivocating endpoint across restarts needs a
+design that survives concurrent venues, and a flag would have implied it was
+solved.
+
+Deleting a `seq.<identity>.json` file remains a supported recovery, and a machine
+that holds the key but has no mark file — a second computer, or one whose file was
+deleted — re-seeds from the live envelope over an AEAD-authenticated read rather
+than restarting the count. Both are asserted against a real sealed envelope, since
+against a mock that serves no envelope and enforces no monotonicity the write
+succeeds either way and the assertion proves nothing.
+
 ### Compatibility
 
 The tool LIST does not change, and neither does the public API of `index.js`. SIXTEEN

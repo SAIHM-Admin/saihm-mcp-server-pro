@@ -61,7 +61,7 @@ returns a one-time device sign-in link plus a short code; the user opens the
 link, enters the code, and approves. That step confirms a unique person. The
 secret never leaves the machine.
 
-Two things to tell the user, in your own words:
+Three things to tell the user, in your own words:
 
 1. **`saihm_join` is one-time.** It claims a lifetime free grant for this
    device identity. Do not call it speculatively, in a loop, or to test that
@@ -70,14 +70,27 @@ Two things to tell the user, in your own words:
    backing it up. If it is lost, no one — including SAIHM — can open their
    cells. That is the point of the design, and it is not recoverable.
 
+3. **A second computer needs the key file, not a second join.** If the user asks
+   how to get the same memory on another machine, tell them to copy
+   `~/.saihm/free-identity.key` there BEFORE starting the server and then not to
+   say "Join SAIHM" on it — joining again mints an unrelated identity with an
+   empty memory. Copy it the way a password is copied, never through a synced
+   cloud folder. If they want work and personal kept apart, a separate identity
+   per machine plus `saihm_share` for the specific cells is the better shape,
+   because a share can be revoked and a copied key cannot.
+
 Set `SAIHM_SELF_JOIN=0` to suppress `saihm_join` and expose only the canonical
 eight tools.
 
 ## Paid tiers
 
-If the user already has a master secret, pass it as `SAIHM_MASTER_SECRET_HEX`
-alongside `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`. Prefer having the user place
-it in the config file themselves. Full option table: see `README.md`.
+If the user already has a master secret, have them save it to a file readable
+only by them and point at it with `SAIHM_MASTER_SECRET_FILE`, alongside
+`SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`. Prefer the file over
+`SAIHM_MASTER_SECRET_HEX` for the reason given in step 1: an inline secret lands
+in the config store itself, which is frequently synced between machines. Have
+the user write the value; do not ask them to read it out to you. Full option
+table: see `README.md`.
 
 ## Troubleshooting
 

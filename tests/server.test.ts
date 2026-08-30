@@ -879,8 +879,14 @@ test('server.ts: the server DEFAULTS a seq-state path, and marks survive a resta
       d2.proc.kill();
     }
     // DELETE AND RECOVER. Each venue's marks are local and disposable: this file is the supported
-    // way to reset one device's view, so a stale mark can never be a permanent brick. Asserted, not
-    // claimed - the recovery path re-seeds from the live envelope over the AEAD-authenticated read.
+    // way to reset one device's view, so a stale mark can never be a permanent brick.
+    //
+    // This arm asserts ONLY that the write still lands. It cannot assert the RE-SEED, and saying so
+    // matters because `isError === false` reads like proof and is not: this mock answers every
+    // `saihm_recall` for a cellId with `wire: undefined`, so there is no live envelope to re-seed
+    // FROM, and it never rejects a stale seq. Measured here, the client falls back and writes seq=1
+    // over a cell the endpoint has at seq 2 - which a real endpoint refuses as BLIND_STALE_SEQ. The
+    // re-seed itself is proven in the test below, against an envelope that actually exists.
     rmSync(pathJoin(home, files[0]!));
     const d3 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
     try {
@@ -890,6 +896,64 @@ test('server.ts: the server DEFAULTS a seq-state path, and marks survive a resta
     } finally {
       d3.proc.kill();
     }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('server.ts: a venue with the KEY but no marks re-seeds from the live envelope', async () => {
+  // The README tells a non-technical reader two things that both land here, and neither was proven
+  // by the arm above. First, that deleting a `seq.<id>.json` file is a supported recovery. Second,
+  // that copying the key to a second computer gives you the same memory there. Both produce the
+  // identical state - this identity's mark file is ABSENT while the endpoint holds the cell at a
+  // seq above zero - and both brick the cell if the client answers by restarting the count at 1.
+  //
+  // That is B4's silent reset arriving by a route S1 does not close, because S1 persists marks and
+  // this venue has none to persist. What closes it is the live-envelope read, and this test is the
+  // only place it is exercised: the mock serves a REAL sealed envelope at seq 2, sealed under the
+  // same MASTER_HEX the spawned server boots from, so the AEAD-authenticated open can actually
+  // succeed. Without that envelope the path is unreachable and any assertion over it is vacuous.
+  const me = deriveIdentity(fromHex(MASTER_HEX));
+  const wire = encodeEnvelope(
+    sealCell({
+      plaintext: utf8('written at the other venue'),
+      kek: me.kek,
+      mldsaSecretKey: me.mldsaSecretKey,
+      mldsaPubKey: me.mldsaPubKey,
+      agentIdHash: me.agentIdHash,
+      cellId: 'revived',
+      seq: 2n,
+      tier: 'PRO',
+    }),
+  );
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-venue-'));
+  const mock = startMock({ recallOneWire: wire });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    assert.equal(
+      readdirSync(home).filter((f) => /^seq\./.test(f)).length,
+      0,
+      'the premise: this venue starts with no marks at all',
+    );
+    const d = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(d);
+      const r = await callText(d, 3, 'saihm_remember', { content: 'd', cellId: 'revived' });
+      assert.equal(r.isError, false);
+      // 3, not 1. The endpoint's head is 2; a client that counted from its own empty state would
+      // send 1 and be refused. The number is the whole assertion - `isError === false` passes
+      // either way against a mock that does not enforce monotonicity.
+      assert.match(r.text, /seq=3/, 'a venue holding only the key must continue the sequence, not restart it');
+    } finally {
+      d.proc.kill();
+    }
+    // And having learned it, this venue now persists it like any other - so the next restart here
+    // does not have to make the round trip again.
+    const f = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(f.length, 1, 'the re-seeded mark was written for this identity');
+    const marks = JSON.parse(readFileSync(pathJoin(home, f[0]!), 'utf8')) as Record<string, { seq: string }>;
+    assert.equal(marks['revived']?.seq, '3', 'the learned high-water mark reached disk');
   } finally {
     rmSync(home, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));

@@ -3,9 +3,11 @@
 // one of the join/upgrade verbs, answer --help/--version, and reject anything else. The last one is
 // what these tests exist for. Dispatch used to match the known verbs and let EVERYTHING else fall
 // through to the server, so `free-jion` and `--help` alike started a stdio server that waited on
-// stdin forever and printed nothing — silent, and only escapable with Ctrl-C. The README's headline
-// instruction is a single command typed into a terminal, which put that silence directly in front of
-// anyone who mistyped it.
+// stdin forever and printed nothing — silent, and only escapable with Ctrl-C. The README still puts
+// a terminal command in front of people — `free-join` as the one-line alternative to the MCP config,
+// and `join` / `upgrade` for the paid paths — so a mistyped verb is still typed by a real person.
+// (It used to be the README's HEADLINE instruction; the copy rewrite demoted it to an alternative.
+// The exposure shrank, the failure mode did not, and these cases assert the failure mode.)
 //
 // Every case here asserts TERMINATION, not just output: a hang is the defect, so a test that merely
 // checked stderr would still pass against the broken build if the process never exited. The bare
