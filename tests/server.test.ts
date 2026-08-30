@@ -1990,3 +1990,79 @@ test('server.ts: a replayed envelope below the mark is REFUSED, which is what le
     await new Promise<void>((r) => mock.server.close(() => r()));
   }
 });
+
+test('server.ts: a marks file that cannot be READ leaves an empty floor, so a replay it would have refused is accepted', async () => {
+  // The mirror of the replayed-envelope test above, and the reason README warns about it. `load`
+  // returns early on every read-side failure - unparseable, malformed, unreadable - leaving the
+  // high-water marks EMPTY. `persisting` can still be true (a malformed file is writable, so the
+  // next write replaces it), and that combination is what an operator sees in `status` as
+  // `seq-state=malformed  rollback-guard=persisting`.
+  //
+  // What the status line does NOT say, and what README now does, is that the anti-rollback FLOOR
+  // went with the file. With a floor of 5 an envelope at 2 is refused as `stale_cell`; with the
+  // floor discarded there is nothing to compare against, so the first envelope seen becomes the
+  // floor whatever it is - including a replayed old one. The window closes as each cell is next
+  // read, but it is open until then, and an operator told the guard had "already repaired itself"
+  // would not know to look.
+  //
+  // Pinned because it is a REAL transient weakening rather than a hypothetical: the same fixture
+  // that the replay test proves is refused is proved accepted here, and the only difference between
+  // them is whether the marks file survived being read.
+  const me = deriveIdentity(fromHex(MASTER_HEX));
+  const seal = (cellId: string, seq: bigint): unknown => ({
+    found: true,
+    wire: encodeEnvelope(
+      sealCell({
+        plaintext: utf8(`row ${cellId} at ${seq}`),
+        kek: me.kek,
+        mldsaSecretKey: me.mldsaSecretKey,
+        mldsaPubKey: me.mldsaPubKey,
+        agentIdHash: me.agentIdHash,
+        cellId,
+        seq,
+        tier: 'PRO',
+      }),
+    ),
+  });
+  const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-floorless-'));
+  const mock = startMock({ recallAll: [seal('floor', 2n)] });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  try {
+    const first = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(first);
+      await callText(first, 3, 'saihm_remember', { content: 'a', cellId: 'floor' });
+    } finally {
+      first.proc.kill();
+    }
+    const files = readdirSync(home).filter((x) => /^seq\.[0-9a-f]{16}\.json$/.test(x));
+    assert.equal(files.length, 1, 'premise: this identity persisted a mark file');
+    const marksPath = pathJoin(home, files[0]!);
+    // A floor of 5 would refuse the seq-2 row below. `null` is valid JSON and not a marks file, so
+    // the floor never loads and never gets the chance.
+    writeFileSync(marksPath, 'null');
+    const second = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    try {
+      await handshake(second);
+      const st = await callText(second, 3, 'saihm_status', {});
+      assert.match(st.text, /seq-state=malformed/, 'premise: the file was read and refused');
+      assert.match(
+        st.text,
+        /rollback-guard=persisting/,
+        'premise: a malformed file is still writable, so the guard reports itself as running',
+      );
+      const rc = await callText(second, 4, 'saihm_recall', {});
+      assert.equal(rc.isError, false, 'with no floor there is nothing to refuse the row against');
+      assert.match(
+        rc.text,
+        /\[floor\] seq=2/,
+        'the floor went with the file: an envelope the guard would have refused is accepted',
+      );
+    } finally {
+      second.proc.kill();
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
