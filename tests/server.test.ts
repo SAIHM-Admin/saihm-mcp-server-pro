@@ -904,11 +904,18 @@ test('server.ts: the server DEFAULTS a seq-state path, and marks survive a resta
 });
 
 test('server.ts: a venue with the KEY but no marks re-seeds from the live envelope', async () => {
-  // The README tells a non-technical reader two things that both land here, and neither was proven
-  // by the arm above. First, that deleting a `seq.<id>.json` file is a supported recovery. Second,
-  // that copying the key to a second computer gives you the same memory there. Both produce the
-  // identical state - this identity's mark file is ABSENT while the endpoint holds the cell at a
-  // seq above zero - and both brick the cell if the client answers by restarting the count at 1.
+  // The README tells a non-technical reader, under "Using a second computer?", to put their key
+  // file on the second machine and recall there. That was not proven by the arm above, and it
+  // produces exactly the state this test arranges - this identity's mark file is ABSENT while the
+  // endpoint holds the cell at a seq above zero - which bricks the cell if the client answers by
+  // restarting the count at 1.
+  //
+  // This comment also used to name a second README promise landing here: that removing a marks file
+  // is a supported way to recover. The shipped README no longer makes that promise anywhere, and it
+  // is right not to - an unreadable marks file already rebuilds itself as each memory is next read,
+  // so there is nothing for a reader to go and do. The citation went stale when the docs changed and
+  // this comment did not, and it is dropped rather than left to send the next reader looking for
+  // text that is not there.
   //
   // That is B4's silent reset arriving by a route S1 does not close, because S1 persists marks and
   // this venue has none to persist. What closes it is the live-envelope read, and this test is the

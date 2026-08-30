@@ -3,11 +3,18 @@
 // one of the join/upgrade verbs, answer --help/--version, and reject anything else. The last one is
 // what these tests exist for. Dispatch used to match the known verbs and let EVERYTHING else fall
 // through to the server, so `free-jion` and `--help` alike started a stdio server that waited on
-// stdin forever and printed nothing — silent, and only escapable with Ctrl-C. The README still puts
-// a terminal command in front of people — `free-join` as the one-line alternative to the MCP config,
-// and `join` / `upgrade` for the paid paths — so a mistyped verb is still typed by a real person.
-// (It used to be the README's HEADLINE instruction; the copy rewrite demoted it to an alternative.
-// The exposure shrank, the failure mode did not, and these cases assert the failure mode.)
+// stdin forever and printed nothing — silent, and only escapable with Ctrl-C. The README puts a
+// terminal command in front of people as the FIRST thing it asks anyone to run — `free-join`, under
+// "Start free — one command" — and `upgrade` for the paid path, so a mistyped verb is still typed by
+// a real person.
+//
+// (An earlier version of this comment had that backwards, and the correction is the point rather
+// than the tidy-up. It recorded free-join as DEMOTED to an alternative by a copy rewrite and
+// concluded the exposure had shrunk; a later rewrite led with the one command again, so free-join
+// is the headline and the exposure is the widest it has been. The same sentence also cited a `join`
+// verb the shipped README does not mention anywhere. Both went stale when the docs moved and this
+// comment did not — which is why the reasoning drifted in the direction that makes these tests look
+// less necessary than they are. The failure mode never depended on either claim.)
 //
 // Every case here asserts TERMINATION, not just output: a hang is the defect, so a test that merely
 // checked stderr would still pass against the broken build if the process never exited. The bare
