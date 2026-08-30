@@ -433,7 +433,6 @@ them could occur. Checkable against the published tag rather than on trust:
   per advancing mark and the write rewrites the whole file, so a recall of n cells
   performed n whole-file rewrites of a file that is itself O(n) — quadratic, on the
   first operation this package recommends anyone run.
-
 - **An unreadable marks file no longer reports the guard as still persisting.**
   `saihm_status` performs no write, so checking it straight after a restart is how
   someone confirms the safeguard is intact — and in that window a file the next
