@@ -28,6 +28,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  watch,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1764,12 +1765,19 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
   // that is itself O(n) - quadratic, on the first operation this package tells anyone to run. The
   // batch collapses that to one write per recall.
   //
-  // This test does not measure the saving and cannot: a mutation that removes the batching is a
-  // PERFORMANCE change and passes every correctness assertion by construction. What it pins is the
-  // property the batch is only allowed to keep - that no mark is lost by deferring it - on both exits
-  // from the batched scope. The second arm is the one that can actually regress: the flush on the
-  // failure path is best-effort and separate from the success path, so deleting it turns this red
-  // while the first arm stays green.
+  // Removing the batching is a PERFORMANCE change: it passes every CORRECTNESS assertion by
+  // construction, because the marks it writes one-at-a-time are the same marks, and the file it
+  // leaves behind is byte-identical. Arms 1 and 2 therefore pin only the property the batch is
+  // allowed to keep - that no mark is lost by deferring it - on both exits from the batched scope.
+  // The second arm is the one that can actually regress: the flush on the failure path is
+  // best-effort and separate from the success path, so deleting it turns this red while the first
+  // arm stays green.
+  //
+  // The COUNT needs a different instrument, and arm 3 is it. An earlier version of this comment
+  // said the saving could not be measured here; that was too strong - it cannot be measured by
+  // asserting on RESULTS, which is not the same thing. Every write goes out under a tmp name
+  // carrying a monotonic counter, so watching the directory and collecting distinct tmp names
+  // counts writes directly. Measured: with the batch in place a five-cell recall produces ONE.
   const me = deriveIdentity(fromHex(MASTER_HEX));
   const seal = (cellId: string, seq: bigint): unknown => ({
     found: true,
@@ -1853,6 +1861,47 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
       assert.equal(marks['k0']?.seq, '3', 'a mark learned inside the aborted batch is not lost');
       assert.equal(marks['k1']?.seq, '2', 'nor is the one before it');
     } finally {
+      d.proc.kill();
+      rmSync(home, { recursive: true, force: true });
+      await new Promise<void>((r) => mock.server.close(() => r()));
+    }
+  }
+
+  // ARM 3 - the write COUNT, which is the whole point of the batch and which neither arm above can
+  // see. Both of those assert on the FILE, and the file a per-cell writer leaves is identical.
+  //
+  // Counted by name, not by event. Each write goes out as `<path>.tmp.<pid>.<ms>.<counter>` with a
+  // process-monotonic counter, so distinct tmp names ARE distinct writes even if the watcher
+  // reports one name twice. Filtered to `seq.` because the identity key is written into this same
+  // directory through the same tmp-then-rename dance, and counting its tmp would inflate the total.
+  //
+  // FAILURE DIRECTION IS DELIBERATE. The assertion is an equality against 1, so a watcher that
+  // misses its event reports 0 and turns this RED rather than green: a dropped notification cannot
+  // be mistaken for a batch that worked. Unbatched, this reports 5.
+  {
+    const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-batch-count-'));
+    const mock = startMock({ recallAll: ids.map((c, i) => seal(c, BigInt(i + 1))) });
+    await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+    const d = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
+    const tmps = new Set<string>();
+    const w = watch(home, (_event, name) => {
+      if (typeof name === 'string' && name.startsWith('seq.') && name.includes('.tmp.'))
+        tmps.add(name);
+    });
+    try {
+      await handshake(d);
+      const r = await callText(d, 3, 'saihm_recall', {});
+      assert.equal(r.isError, false, 'premise: the recall itself succeeded');
+      // inotify is delivered asynchronously; the rename that ends the write can land after the
+      // response the client already returned.
+      await new Promise<void>((done) => setTimeout(done, 300));
+      assert.equal(
+        tmps.size,
+        1,
+        `a ${ids.length}-cell recall must write the marks file ONCE, not once per cell`,
+      );
+    } finally {
+      w.close();
       d.proc.kill();
       rmSync(home, { recursive: true, force: true });
       await new Promise<void>((r) => mock.server.close(() => r()));
