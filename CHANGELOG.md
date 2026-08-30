@@ -389,6 +389,14 @@ same set. Persisting them split those sets, and what follows is what fell into t
 gap: the fixes in this release, and after them one documentation correction in
 `README.md` that closes the same gap in prose.
 
+**None of this reached a default install.** Persisting the marks at all was
+opt-in on 0.4.x — `SAIHM_SEQ_STATE_PATH`, with no default anywhere in the client
+— and the change that turns it on for every MCP server is in THIS release,
+alongside the fixes below rather than ahead of them. Every item here needs a
+marks file to exist, so on a published version that never wrote one, none of
+them could occur. Checkable against the published tag rather than on trust:
+`git show v0.4.1:src/client.ts` guards the assignment with `if (optSeqPath)`.
+
 - **A mark that is BEHIND the endpoint is no longer trusted.** `remember` now
   re-reads a cell's live sequence on the first touch of that cell in a process,
   keyed on what this process has OBSERVED rather than on what is on disk. It does
