@@ -70,14 +70,12 @@ Three things to tell the user, in your own words:
    backing it up. If it is lost, no one — including SAIHM — can open their
    cells. That is the point of the design, and it is not recoverable.
 
-3. **A second computer needs the key file, not a second join.** If the user asks
-   how to get the same memory on another machine, tell them to copy
-   `~/.saihm/free-identity.key` there BEFORE starting the server and then not to
-   say "Join SAIHM" on it — joining again mints an unrelated identity with an
-   empty memory. Copy it the way a password is copied, never through a synced
-   cloud folder. If they want work and personal kept apart, a separate identity
-   per machine plus `saihm_share` for the specific cells is the better shape,
-   because a share can be revoked and a copied key cannot.
+3. **A second computer.** Offer sharing first: a separate identity on the second
+   machine plus `saihm_share` (which takes an optional `expiryEpoch`) keeps work
+   and personal apart, and a share can be revoked where a copied key cannot. If
+   they want the SAME memory on both, the key file has to be on both — placed
+   before the server starts, and without running `saihm_join` there, since that
+   mints an unrelated identity with an empty memory.
 
 Set `SAIHM_SELF_JOIN=0` to suppress `saihm_join` and expose only the canonical
 eight tools.
