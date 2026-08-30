@@ -621,7 +621,10 @@ marked as such below; two more are breaking without being regressions (the
   `instanceof` is not available to consumers; `e.name` and the message are. Two further sites are NEW rather than reclassified (the
   configured-but-empty secret and the zero-byte identity file), and the whitespace-only
   `SAIHM_MASTER_SECRET_FILE` shape ALSO moves from a plain `Error` to
-  `SaihmConfigError` under a new message — seven construction sites ship in all.
+  `SaihmConfigError` under a new message — seven distinct configuration errors in all,
+  raised from EIGHT construction sites, because the unreadable self-join identity file has one
+  in the exported self-join helper and one in `bootFromEnv`, carrying different remediation
+  text. Stated both ways because `grep -c 'new SaihmConfigError('` returns the second number.
   Configuration errors naming neither a path nor a URL still throw plain `Error`, as
   does a malformed `SAIHM_MASTER_SECRET_HEX`. `SaihmEndpointError` has always presented this shape.
 - **A configuration error naming a URL now round-trips that URL.** The invalid
