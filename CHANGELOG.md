@@ -2,6 +2,103 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-08-31
+
+Tool descriptions now say what each tool does, what it returns, and what it will
+not do — written against this package's own measured surface rather than copied
+from the standards client, plus a server-level `instructions` string and a
+recovery path for the one `saihm_join` failure a user cannot otherwise resolve.
+
+**Copying the standards client's wording would have shipped a defect**, on two
+independent divergences. The two packages do not share a CUSTODY MODEL, and this is
+the client-side-blind one: the key never leaves this process and the server holds
+ciphertext it cannot read. A description carried across states the wrong property
+for whichever package it lands in. And the sharing tools take different parameters
+entirely — `saihm_share` takes a single `cellId` with `recipientRecord` and
+`recipientPinnedAgentIdHashHex` and no `type` enum, and `saihm_revoke_share` takes
+`cellId` and `recipientHex` rather than a contract id. Wording that named the other
+package's parameters would have described tools that do not exist here.
+
+### Governance descriptions no longer announce a capability this client does not have
+
+`governancePropose()` and `governanceVote()` return `Promise<never>`. The endpoint
+serves governance as a clean unavailable — a 403 stub — and the bindings exist for
+surface parity. The previous descriptions read as though the calls worked: "Use
+this to open a protocol governance vote", and "Use this to approve or reject an
+open proposal". An agent that believed either spent a call to receive
+`governance_unavailable`.
+
+Both now state plainly that protocol governance is not enabled for this client yet,
+that the tool is present so the surface stays stable, and that calling it returns
+an error rather than opening a vote or recording one. The parameters are still
+documented, so the surface remains self-describing.
+
+Worth recording as a method rather than an incident: the wording that had to be
+corrected was schema-ACCURATE and semantically wrong. Verifying a tool against its
+input schema — which is what `tools/list` publishes — establishes nothing about
+what its handler returns, or whether it does anything at all.
+
+### Changed
+
+- All eight protocol tool descriptions rewritten. Each now names its own
+  parameters, states the custody property that applies to it, and says what it
+  does NOT do: `saihm_forget` is irreversible and is not a tidy-up, and
+  `saihm_revoke_share` cannot retract what a recipient has already read and is not
+  the tool that erases.
+- `saihm_remember` documents that it returns the cell id `saihm_forget` takes, and
+  that passing an existing `cellId` updates that cell rather than adding one.
+- `saihm_status` distinguishes the identity, which this client derives locally,
+  from the counts the server reports. It names only fields the output schema
+  declares.
+- The **gSAIHM** ticker is gone from both governance descriptions. The tools govern
+  protocol parameters; naming a token in a tool description advertised something
+  the tool does not take and the caller does not need.
+- `saihm_join` is deliberately unchanged. It is an onboarding bootstrap
+  affordance, its wording is tuned for that, and its claims were re-verified as
+  accurate.
+
+### Added
+
+- A server-level `instructions` string, sent once in the `initialize` result. It
+  is the only place the custody property can be stated for the whole server
+  instead of repeated in all eight descriptions.
+- `saihm_join` failures now carry recovery guidance for the case a user cannot
+  resolve from the error alone: the free tier is one activation per identity, so
+  an agent that has already activated on another machine must copy that key rather
+  than activate again. The guidance names this machine's key file, fenced through
+  `safePathField` because the value has to round-trip for the user to act on it.
+  It is emitted from BOTH arms — the tool result, and the `free-join` CLI verb,
+  where it is written to stderr before the rethrow so it survives whatever `main`
+  does with the error and reaches a caller who is piping stdout.
+
+### Footprint
+
+Measured by driving `tools/list` against the built server, same instrument for
+both figures: the announced block is 6,736 characters against 5,368 at 0.5.0
+(+25.5%), of which 271 characters are the new `instructions`. That cost is paid
+once per session. It is returned the first time an agent does not spend a call
+discovering that governance 403s, does not pass a parameter the other package's
+tools take, and does not call `saihm_forget` expecting a working set to tidy.
+
+### Grading
+
+A patch. No announced identifier changes value, nothing stops round-tripping, and
+no tool, parameter or return shape changes. The only behaviour that differs at all
+is what a FAILED `saihm_join` says, which the second paragraph below takes up
+rather than waving past. `instructions` is optional server documentation rather than functionality —
+the same class as the tool descriptions beside it, and nothing matches on it. The
+rule this project set at 0.3.0 and applied at 0.5.0 is that an announced
+IDENTIFIER changing value is not a patch; that rule does not reach a field that
+names nothing.
+
+The `saihm_join` guidance is the one addition that produces output which did not
+exist before, so it is worth saying why it does not move the grade either: it is
+appended to an error, and 0.5.0 drew that line deliberately when it graded itself
+on `e.name` rather than on the message beside it. A consumer matching on error
+TEXT was already unsupported. Both a `feat:` commit type and a patch version are
+correct here, and they are not in tension — this project grades releases by the
+rule written above, not by the commit type.
+
 ## [0.5.0] — 2026-08-30
 
 Closes a defect class rather than its instances: a caller-actionable value — a
@@ -895,6 +992,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.5.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.1
 [0.5.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.0
 [0.4.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.4.1
 [0.4.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.4.0

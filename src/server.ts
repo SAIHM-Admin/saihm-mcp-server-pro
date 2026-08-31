@@ -75,7 +75,13 @@ const PACKAGE_VERSION: string = (
 // the same serverInfo.name, or directories that key on it conflate them.
 const server = new McpServer(
   { name: 'saihm-pro', version: PACKAGE_VERSION },
-  { capabilities: { tools: {}, prompts: {} } },
+  {
+    capabilities: { tools: {}, prompts: {} },
+    // Sent ONCE in the `initialize` result, not per tool call, and it is the only place the custody
+    // property can be stated for the whole server rather than repeated in all eight descriptions.
+    instructions:
+      "SAIHM is this agent's persistent memory across sessions, models and vendors. Memories are encrypted and decrypted in this process; the key never leaves it. Load your memory before other work, and erase only when erasure is intended — it is cryptographic and irreversible.",
+  },
 );
 
 // Lazily boot so the MCP `initialize` handshake always succeeds; a misconfiguration surfaces as a
@@ -94,6 +100,42 @@ const ok = (text: string, structuredContent?: Record<string, unknown>) => ({
 /** Surface any error as a typed MCP tool error (never crash the server). */
 function fail(e: unknown) {
   return { content: [{ type: 'text' as const, text: failText(e) }], isError: true as const };
+}
+
+/**
+ * Guidance appended to a FAILED free-join, on BOTH arms: the `saihm_join` tool and the `free-join`
+ * verb. One resolution, because fixing one arm and leaving the other is the shape this file keeps
+ * reproducing.
+ *
+ * Stated unconditionally rather than detected. The failure worth naming — an account that already
+ * activated elsewhere — has no typed signal: the bridge resolves `granted`, `already_granted`,
+ * `nonce_stale` and `pending`, and reports everything else as an endpoint-chosen string. Matching
+ * that string would let an operator-chosen value select the message a user acts on. A reader who
+ * failed for an unrelated reason loses three lines; a reader on their second machine keeps their
+ * memories.
+ *
+ * Never names a path it does not have: `identityKeyFile()` returns null for an inline-hex identity,
+ * and rendering a null in a slot built for a path is this package's recurring defect class, so the
+ * inline case gets its own sentence naming the variable the caller actually set.
+ */
+function freeJoinFailureGuidance(): string {
+  const keyFile = identityKeyFile();
+  return (
+    '\n\nAlready activated SAIHM free on another machine or account?\n' +
+    '  The free tier is one activation per identity. Do not activate again —\n' +
+    '  copy the key from that machine and point SAIHM_MASTER_SECRET_FILE at it.\n' +
+    (keyFile
+      ? `  This machine's key file: ${safePathField(keyFile, MAX_PATH_FIELD_CHARS)}\n`
+      : '  This machine uses the key you supplied inline in SAIHM_MASTER_SECRET_HEX.\n')
+  );
+}
+
+/** {@link fail}, plus the free-join guidance. Used only by `saihm_join`. */
+function failJoin(e: unknown) {
+  return {
+    content: [{ type: 'text' as const, text: failText(e) + freeJoinFailureGuidance() }],
+    isError: true as const,
+  };
 }
 
 /**
@@ -176,7 +218,7 @@ server.registerTool(
   {
     title: 'Remember',
     description:
-      'Store information to SAIHM persistent encrypted memory (sealed client-side). Pass an existing cellId to update it. Use this when an agent or user wants a fact, decision, or context to persist across sessions.',
+      'Store information in SAIHM persistent memory. Encryption happens in this process and the key never leaves it, so the server holds ciphertext it cannot read. Use this when a fact, decision, or piece of context should outlive the current session. Pass an existing cellId to update that cell instead of adding a new one. Returns the cell id that saihm_forget takes.',
     inputSchema: {
       content: z.string().describe('Information to remember'),
       cellId: z
@@ -252,7 +294,7 @@ server.registerTool(
   {
     title: 'Recall',
     description:
-      'Retrieve and decrypt your memories (opened client-side). Optional keyword filter. Use this at the start of a session or whenever past context is needed. Can ALSO read one specific cell another agent shared TO you — pass sharerPinnedAgentIdHashHex + sharerRecord + cellId (read-only; the sharer must have shared it with you).',
+      'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or leave it out to load everything. To read a single cell another agent shared with you, pass their sharerPinnedAgentIdHashHex and sharerRecord together with the cellId; that path is read-only.',
     inputSchema: {
       query: z
         .string()
@@ -569,7 +611,7 @@ server.registerTool(
   {
     title: 'Forget (GDPR erasure)',
     description:
-      'Cryptographically erase a memory (GDPR Art. 17): destroys the endpoint-side wrapped DEK so the cell can never be decrypted again. Use this only to permanently and irreversibly delete a memory by its cell id.',
+      'Cryptographically erase one memory by its cell id (GDPR Art. 17). Destroying the wrapped key leaves the content unreadable to everyone, the operator included. Irreversible: use it when erasure is the intent, not to tidy a working set.',
     inputSchema: { id: z.string().describe('Memory cell id (hex) to erase') },
     annotations: {
       title: 'Forget (GDPR erasure)',
@@ -620,7 +662,7 @@ server.registerTool(
   {
     title: 'Status',
     description:
-      'Show operator-observable session status (no plaintext): tier, shards, sharing, BFSI, custody. Use this to check the identity, custody, storage, and sharing state of the current SAIHM session.',
+      'Show the current SAIHM session: the agent identity, which this client derives locally, plus the tier, custody mode, shard and sharing counts, and bfsi score the server reports. No plaintext appears, because the server holds none. Use it to check which identity is active and what is stored and shared.',
     inputSchema: {},
     outputSchema: {
       agentIdHash: z.string(),
@@ -737,7 +779,7 @@ server.registerTool(
   {
     title: 'Share',
     description:
-      "Share a cell with another agent, end-to-end authenticated. Pin the grantee's agentIdHash out-of-band. Use this to grant another agent access to a specific memory.",
+      "Grant one other agent access to a single memory cell, named by cellId. Identify the recipient by their recipientPinnedAgentIdHashHex, pinned out-of-band, and their recipientRecord. Set scope to 'read', 'write' or 'readwrite'. Only that one cell is exposed, and sharing re-wraps its key rather than copying the memory.",
     inputSchema: {
       cellId: z.string().describe('The cell to share'),
       recipientRecord: z
@@ -805,7 +847,7 @@ server.registerTool(
   {
     title: 'Revoke share',
     description:
-      "Revoke a prior share grant to a recipient for a cell. Use this to withdraw a grantee's access.",
+      "Withdraw a grant made with saihm_share, naming the same cellId and the recipient's recipientHex. It applies to future reads and cannot retract what the recipient has already read. Use it to end access; the memory itself remains, and saihm_forget is what erases.",
     inputSchema: {
       cellId: z.string().describe('The shared cell id'),
       recipientHex: z
@@ -841,7 +883,7 @@ server.registerTool(
   {
     title: 'Propose (governance)',
     description:
-      "Submit a gSAIHM governance proposal. Scope MUST be 'emission_param' or 'protocol_upgrade'. Use this to open a protocol governance vote.",
+      "Open a protocol governance proposal: set scope to 'emission_param' or 'protocol_upgrade', and for 'emission_param' also pass paramKey and proposedValue. Protocol governance is not enabled for this client yet — the tool is present so the surface stays stable, and calling it returns a 'governance unavailable' error rather than opening a vote.",
     inputSchema: {
       scope: z
         .enum(['emission_param', 'protocol_upgrade'])
@@ -879,7 +921,7 @@ server.registerTool(
   {
     title: 'Vote (governance)',
     description:
-      'Cast a vote on an open gSAIHM governance proposal. Use this to approve or reject an open proposal by its proposalId.',
+      "Cast a vote on an open protocol governance proposal by its proposalId, with approve set to true to approve or false to reject. Protocol governance is not enabled for this client yet — the tool is present so the surface stays stable, and calling it returns a 'governance unavailable' error rather than recording a vote.",
     inputSchema: {
       proposalId: z.string().describe('Hex proposalId'),
       approve: z.boolean().describe('true = approve, false = reject'),
@@ -1041,7 +1083,7 @@ if (selfJoinEnabled()) {
           if (joinState.error) {
             const e = joinState.error;
             joinState = null; // allow a clean retry
-            return fail(e);
+            return failJoin(e);
           }
           if (joinState.prompt) return ok(joinPendingText(joinState));
           await waitForJoinSignal(15_000); // running but no prompt yet
@@ -1049,7 +1091,7 @@ if (selfJoinEnabled()) {
           if (joinState?.error) {
             const e = joinState.error;
             joinState = null;
-            return fail(e);
+            return failJoin(e);
           }
           if (joinState?.prompt) return ok(joinPendingText(joinState));
           return ok('Still getting your activation ready — ask me to "Join SAIHM" again in a few seconds.');
@@ -1093,14 +1135,14 @@ if (selfJoinEnabled()) {
         if (s.error) {
           const e = s.error;
           if (joinState === s) joinState = null; // clearing unconditionally would kill a NEWER join
-          return fail(e);
+          return failJoin(e);
         }
         if (s.result) return ok(joinSuccessText(s)); // instant already_granted
         if (s.prompt) return ok(joinPendingText(s));
         return ok('Starting your free activation — ask me to "Join SAIHM" again in a few seconds to get your approval code.');
       } catch (e) {
         joinState = null;
-        return fail(e);
+        return failJoin(e);
       }
     },
   );
@@ -1403,7 +1445,14 @@ async function main(): Promise<void> {
     return;
   }
   if (verb === 'free-join') {
-    await runFreeJoin();
+    try {
+      await runFreeJoin();
+    } catch (e) {
+      // Same helper the tool arm uses. Written BEFORE the rethrow so the guidance survives whatever
+      // `main`'s catch does with the error, and to stderr so a caller piping stdout still sees it.
+      process.stderr.write(freeJoinFailureGuidance());
+      throw e;
+    }
     return;
   }
   if (verb === 'upgrade') {

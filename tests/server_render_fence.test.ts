@@ -386,8 +386,10 @@ const RENDER_SITES_PIN: Record<string, number> = {
   'index.ts': 0,
   // 0 by design - the fences themselves render nothing; they return values their callers render.
   'render_fence.ts': 0,
-  // 18 `ok(...)` + 6 `stdout.write` + 2 `stderr.write`.
-  'server.ts': 26,
+  // 18 `ok(...)` + 6 `stdout.write` + 3 `stderr.write`. The third `stderr.write` is the `free-join`
+  // failure guidance, written BEFORE the rethrow so it survives whatever `main` does with the
+  // error, and to stderr so a caller piping stdout still sees it.
+  'server.ts': 27,
 };
 // Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. The bar for an
 // entry is a sentence explaining why a delimiter, a label or a newline cannot reach it - no count is
@@ -1897,7 +1899,11 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       // "Also written to", "Back up <keyPath>", and the two join-result keyPaths
       // FIVE since `join` stopped telling a file-key caller to keep an env var: it now names the
       // key file through the same `identityKeyFile()` resolution `free-join` uses.
-      'safePathField:MAX_PATH_FIELD_CHARS': 5,
+      // SIX since `saihm_join` and the `free-join` verb started naming this machine's key file on
+      // FAILURE. That value has to round-trip - a user who already activated on another machine
+      // recovers by copying the key at that path - which is why it is `safePathField` and not
+      // `safeField`, the class distinction this release's sibling entry turns on.
+      'safePathField:MAX_PATH_FIELD_CHARS': 6,
       'safePathField:MAX_PATH_MESSAGE_CHARS': 1, // the erasure residual, which embeds the cache path
     },
     'render_fence.ts': {
@@ -3488,7 +3494,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // introduced - and a SIXTH env-derived name was disclosed as the residual while this one sat
       // in the tree. Both occurrences are inside a `safePathField` call; if a third appears
       // unfenced, this count moves and the sweep says where.
-      identityKeyFile: 2,
+      // THREE now. The third is the `free-join` failure guidance, which binds the resolver to a
+      // local and renders it one line down through `safePathField` — a BINDING then a fence,
+      // where the other two fence inline. Same safety, one shape further out, which is exactly
+      // the case the note above predicted would move this count.
+      identityKeyFile: 3,
       // Two of these nine (944, 945) DO render - through `keyPath`, the local bound at 939 to
       // `safePathField(...)` or to `null`. An earlier cut exempted such a local BY NAME, which
       // exempted all of them and any future one; an unfenced `${s.keyPath}` in the join result then
@@ -4597,7 +4607,11 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // new `saihm_status` field returns this count to exactly 75 and drops the safeScalar sweep to 23.
   // One field, two examined spans - the `labelSafe` wrapper and the `safeScalar` inside it - which is
   // how every other `label=value` field on that same line already counts.
-  const EXAMINED_SPANS_PIN = 77;
+  // 79 since the `free-join` failure guidance renders this machine's key file. ONE new rendered
+  // value, TWO spans: the sweep has a concatenation arm and a template arm, and a value inside a
+  // template that sits in a `+` chain is seen by both. That double count is deliberate - a
+  // documented prior evasion hid a value in exactly that shape - so the pin moves by two.
+  const EXAMINED_SPANS_PIN = 79;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
