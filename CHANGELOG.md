@@ -2,6 +2,46 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] — 2026-08-31
+
+Corrects the reading ORDER of the `saihm_join` failure guidance added in `0.5.1`.
+
+**`0.5.1` was tagged but never published.** It was superseded before any Release
+or npm publish referenced it, so `0.5.2` is the first release carrying its
+changes; the `0.5.1` entry below describes work that ships here, and its link
+points at the git tag rather than an npm version that does not exist. Nothing was
+installable at `0.5.1` and nothing needs to skip it.
+
+### Fixed
+
+- The `free-join` CLI verb printed the recovery guidance ABOVE the error rather
+  than below it. The guidance was written before the rethrow, so `main`'s catch
+  printed the cause underneath — and a transport failure then read as "Already
+  activated SAIHM free on another machine or account?", a confident wrong answer
+  in the most-read position. The error now comes first and the guidance sits under
+  it, which is also the order the `saihm_join` tool arm already used: the two arms
+  disagreed, which is precisely the split the shared helper exists to prevent.
+
+  The catch now writes both through `failText` and exits there, rather than
+  rethrowing, so the pair cannot be separated and the error is not printed twice.
+  Stderr is unchanged, so a caller piping stdout still sees it and stdout stays
+  empty on failure.
+
+  Found by forcing the failure against an unreachable endpoint under an isolated
+  `SAIHM_HOME` — a path the unit suite covers for content but not for the order
+  two writers produce between them.
+
+### Internal
+
+- The render-fence sweep flagged the new write, correctly: it composes
+  `failText(e)` with a call it cannot see through. Declared in
+  `RENDER_ALLOWED_TABLE` rather than papered over, with the reason it is safe —
+  `failText` is a registered message fence, and `freeJoinFailureGuidance()` takes
+  no argument, so there is no caller-chosen or endpoint-chosen value at that site
+  at all. The one variable it embeds is fenced inside the helper and held by the
+  `identityKeyFile` count, which is what moves if a fourth occurrence ever appears
+  unfenced.
+
 ## [0.5.1] — 2026-08-31
 
 Tool descriptions now say what each tool does, what it returns, and what it will
@@ -992,7 +1032,8 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
-[0.5.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.1
+[0.5.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.2
+[0.5.1]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/releases/tag/v0.5.1
 [0.5.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.0
 [0.4.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.4.1
 [0.4.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.4.0

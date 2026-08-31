@@ -417,6 +417,14 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
   'server.ts:CLI_USAGE':
     'a static usage block: string literals plus PACKAGE_VERSION, which has its own entry above. No ' +
     'interpolation reaches it from outside the module',
+  "server.ts:failText(e) + '\\n' + freeJoinFailureGuidance()":
+    'the free-join failure pair, error first and guidance under it. `failText` is a registered ' +
+    'MESSAGE_FENCE, and `freeJoinFailureGuidance()` takes NO ARGUMENT - there is no caller-chosen ' +
+    'or endpoint-chosen value at this site for a fence to apply to. Its body is string literals ' +
+    'plus exactly one variable, `identityKeyFile()`, fenced INSIDE the helper through ' +
+    '`safePathField` and held there by the `identityKeyFile` count below, which is what would move ' +
+    'if a fourth occurrence appeared unfenced. Reported only because the predicate cannot see ' +
+    'through a call boundary to the fence on the other side',
 };
 const SAFESCALAR_SITES_PIN = 24; // +1: `saihm_status`'s local seq-state degradation token
 const RENDER_HELPER_EXPORTS: string[] = [

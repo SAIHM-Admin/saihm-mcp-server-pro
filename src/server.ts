@@ -1448,10 +1448,17 @@ async function main(): Promise<void> {
     try {
       await runFreeJoin();
     } catch (e) {
-      // Same helper the tool arm uses. Written BEFORE the rethrow so the guidance survives whatever
-      // `main`'s catch does with the error, and to stderr so a caller piping stdout still sees it.
-      process.stderr.write(freeJoinFailureGuidance());
-      throw e;
+      // Same helper the tool arm uses, in the SAME ORDER: the error first, the guidance under it.
+      // Writing the guidance before the rethrow put a confident diagnosis ABOVE the cause, and a
+      // transport failure then read as "already activated on another machine" - a wrong answer in
+      // the most-read position. The two arms also disagreed about order, which is the shape the
+      // helper exists to prevent.
+      //
+      // Written here rather than left to `main`'s catch so the pair cannot be separated, through
+      // `failText` for the reason that catch records, and exiting here so the error is not printed
+      // twice. Stderr, so a caller piping stdout still sees it.
+      process.stderr.write(failText(e) + '\n' + freeJoinFailureGuidance());
+      process.exit(1);
     }
     return;
   }
