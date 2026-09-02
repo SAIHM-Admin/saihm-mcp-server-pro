@@ -1094,6 +1094,15 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     },
     'client.ts': {
       MAX_ERROR_CODE_CHARS: 64,
+      // TCP keep-alive probe interval for the client's own HTTP agent. Not a render budget and
+      // not an idle cap — socket lifetime is bounded by the server, measured at >180 s. Pinned
+      // here because this sweep reads SOURCE and a declared constant must be a stated fact.
+      KEEPALIVE_PROBE_MS: 30000,
+      // Redirect-hop bound for the client's keep-alive transport, restoring `fetch` behaviour.
+      MAX_REDIRECTS: 5,
+      // Response status-line+header ceiling for the keep-alive transport. Node's 16 KiB default
+      // rejects responses `fetch` accepts; raised so the swap does not narrow what can be read.
+      MAX_RESPONSE_HEADER_BYTES: 98304,
       // A BIGINT, and the first one this sweep could see. It shipped unpinned through nine review
       // rounds because every literal test in the matcher named `isNumericLiteral`: a declared wire
       // ceiling, in no table and in no `found` result. Stated as the literal it evaluates to rather
@@ -1103,6 +1112,11 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       MAX_SHARED_ANNOUNCEMENTS: 256,
       MAX_ANNOUNCEMENT_FIELD_CHARS: 64,
       MAX_ANNOUNCEMENT_TOTAL_CHARS: 32 * 1024,
+      // Minimum age before an orphaned identity temp is swept. Not a render budget: it is the
+      // margin that keeps the sweep from deleting a CONCURRENT mint that is between its write and
+      // its rename. Stated as the literal it evaluates to, not as `60 * 60 * 1000`, per the
+      // MAX_SEQ note above - a pin that repeats the expression cannot catch an edit to it.
+      STALE_TEMP_MIN_AGE_MS: 3600000,
       // MODULE-PRIVATE, and the reason this sweep now reads SOURCE for every module rather than
       // only for `server.ts`. Six constants sat here unpinned under a test named EVERY declared
       // budget: the import arm can only see EXPORTS, and `server.ts` was read from source for a
@@ -2074,6 +2088,13 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     'client.ts:flushMarks': 4, // SeqState's writer
     'client.ts:persist': 4, // RecallCache's writer
     'server.ts:persistCheckoutUrl': 4, // writes the checkout URL, and is already wrapped
+    // ONE, and it is an UNLINK, not a write to the cache. `sweepStaleIdentityTemps` removes
+    // orphaned `<identity>.tmp.*` files stranded by a hard kill between the atomic write and the
+    // rename. It is listed here rather than wrapped because its failure never reaches the
+    // renderer: every entry is attempted inside its own try/catch and a failure is skipped, so no
+    // caller-chosen path can arrive at `failText` through it. It also names no env path - the
+    // directory is always the DEFAULT identity path, never `SAIHM_MASTER_SECRET_FILE`.
+    'client.ts:sweepStaleIdentityTemps': 1,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
@@ -3469,7 +3490,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // AND A THIRTEENTH, of that same deliberate shape: the UNREADABLE arm of that read now
       // carries the path in a `SaihmConfigError` too, instead of re-throwing Node's errno. Both
       // arms of one read now name the file; before, only one did.
-      keyPath: 13,
+      // SIXTEEN, up from thirteen: `sweepStaleIdentityTemps` takes the key path as a parameter and
+      // reads it twice - `dirname(keyPath)` and `basename(keyPath)` inside the prefix template.
+      // A parameter declaration and two call arguments. None reaches a rendered line: the value is
+      // used to derive a directory and a startsWith prefix, and the function returns a count.
+      keyPath: 16,
       // SEVEN OCCURRENCES, not seven lines: the delete/rewrite carries three on one line (the
       // condition, the property write and the value read). A count of occurrences described as a
       // list of lines reads as an off-by-two to anyone who checks it.
@@ -4619,7 +4644,13 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // value, TWO spans: the sweep has a concatenation arm and a template arm, and a value inside a
   // template that sits in a `+` chain is seen by both. That double count is deliberate - a
   // documented prior evasion hid a value in exactly that shape - so the pin moves by two.
-  const EXAMINED_SPANS_PIN = 79;
+  // 80 since the stale-temp sweep derives its match prefix as `${basename(keyPath)}.tmp.`.
+  // ESTABLISHED AS A RISE, not assumed, per this pin's own rule: the suite was green at 79 on the
+  // commit before this one, and the single new span is that template - a pure template with no `+`
+  // chain, so the concatenation arm does not also see it and the pin moves by ONE, not two. The
+  // value is never RENDERED: it is a filename prefix consumed by `startsWith` over readdir output,
+  // so it cannot close a delimiter in anything a human or a model reads.
+  const EXAMINED_SPANS_PIN = 80;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

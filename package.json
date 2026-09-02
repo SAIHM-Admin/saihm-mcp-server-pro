@@ -20,7 +20,7 @@
     "build": "npm run clean && tsc -p . && chmod +x dist/server.js",
     "build:mcpb": "node scripts/build-mcpb.mjs",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test": "tsx --test tests/smoke.test.ts tests/server.test.ts tests/self_join.test.ts tests/server_recall_shared.test.ts tests/server_self_join.test.ts tests/server_shared_announce.test.ts tests/client_announce.test.ts tests/server_render_fence.test.ts tests/server_render_hostile.test.ts tests/server_cli_dispatch.test.ts tests/client_free_onboard.test.ts tests/client_upgrade_nag.test.ts tests/client_recall_cache.test.ts tests/client_seq_commitment.test.ts tests/server_json_registry.test.ts",
+    "test": "tsx --test tests/smoke.test.ts tests/server.test.ts tests/self_join.test.ts tests/server_recall_shared.test.ts tests/server_self_join.test.ts tests/server_shared_announce.test.ts tests/client_announce.test.ts tests/server_render_fence.test.ts tests/server_render_hostile.test.ts tests/server_cli_dispatch.test.ts tests/client_free_onboard.test.ts tests/client_upgrade_nag.test.ts tests/client_recall_cache.test.ts tests/client_seq_commitment.test.ts tests/server_json_registry.test.ts tests/client_stale_temp_sweep.test.ts",
     "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "files": [

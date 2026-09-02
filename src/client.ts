@@ -53,16 +53,22 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
+import { Agent as HttpAgent, request as httpRequest } from 'node:http';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
+import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join as pathJoin } from 'node:path';
+import { basename, dirname, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 
 import {
@@ -508,6 +514,174 @@ export function isPathBearing(e: unknown): boolean {
 }
 
 /** Read a response body with a hard byte budget — never trusts the content-length header. */
+/*
+ * KEEP-ALIVE TRANSPORT.
+ *
+ * WHY THIS EXISTS. The client previously called global `fetch`, whose connection pool has a
+ * ~4 s idle timeout. An agent harness idles longer than that between tool calls almost every
+ * time — model inference alone usually exceeds it — so in practice nearly EVERY operation
+ * re-paid a full TCP+TLS handshake. Measured from a subscriber vantage at ~325 ms RTT:
+ * ~1.5 s cold vs ~0.35 s warm, i.e. roughly 77% of every operation after the first was
+ * handshake the subscriber did not need to pay. The same trap sat on the free-onboarding
+ * device-flow poll, whose 5 s interval is just past the 4 s cutoff, so the very first thing a
+ * subscriber ever does reconnected on every single poll.
+ *
+ * WHY A SHIM RATHER THAN A FLAG. Node's `fetch` does not accept an agent, and the underlying
+ * pool is not configurable without taking on a runtime dependency. A dependency is an
+ * install-time failure surface for every subscriber, so the stdlib path was chosen instead.
+ *
+ * WHAT THIS MUST PRESERVE, because both call sites and `readBodyCapped` depend on it:
+ *   - a real `Response`, with a WHATWG `body` stream, so the response cap can still abort
+ *     mid-stream rather than after buffering everything;
+ *   - `AbortError` BY NAME on signal abort — the callers branch on `e.name`;
+ *   - redirect following and content decoding, both of which `fetch` does silently and
+ *     `https.request` does not. Omitting either would be a silent behaviour change.
+ *
+ * NOT AN HTTP/2 CLIENT. Measured: the client negotiates http/1.1 today, while the server
+ * prefers h2 when offered. This keeps that unchanged — it is parity, not a downgrade. h2
+ * (also stdlib, via node:http2) is a separate and larger win, deliberately not bundled here.
+ */
+/*
+ * TCP keep-alive PROBE interval, not an idle cap. Node's agent does not expire free sockets on
+ * its own — reuse ends when the SERVER closes, measured at more than 180 s against the live
+ * endpoint (one socket served requests across 30/60/90/120/180 s idle gaps). The probe keeps
+ * NAT and firewall paths from silently dropping an idle connection in between.
+ */
+const KEEPALIVE_PROBE_MS = 30_000;
+
+/* Redirect hops before giving up. `fetch` follows redirects and `request` does not, so this
+ * bound is part of restoring that behaviour rather than an addition to it. */
+const MAX_REDIRECTS = 5;
+
+/*
+ * Status line + headers Node will accept on a response.
+ *
+ * Node's http client caps this at 16 KiB by default and REJECTS the whole response past it —
+ * `fetch` does not, at that boundary. That is not academic: an endpoint that answers with an
+ * oversized reason phrase produced a transport error here where `fetch` returned a perfectly
+ * readable non-2xx, which turned a typed endpoint failure into an opaque one and lost the
+ * status the caller needed. Raised so the transport swap cannot narrow what the client can
+ * still read and report. The response BODY is bounded separately and unchanged.
+ */
+const MAX_RESPONSE_HEADER_BYTES = 96 * 1024;
+
+const KEEPALIVE_OPTS = { keepAlive: true, keepAliveMsecs: KEEPALIVE_PROBE_MS, maxSockets: 8, maxFreeSockets: 4 };
+
+/*
+ * ONE AGENT PER SCHEME. `fetch` handles http: and https: transparently; `request` does not,
+ * and an agent belongs to exactly one scheme. Hardcoding https here failed 200 of 309 tests
+ * on the first run — every test that points the client at a local http://127.0.0.1 server,
+ * which is most of them. Caught by baselining the suite BEFORE the change (309/309 clean) and
+ * diffing, rather than by reading the failures and guessing.
+ */
+const saihmKeepAliveAgentHttps = new HttpsAgent(KEEPALIVE_OPTS);
+const saihmKeepAliveAgentHttp = new HttpAgent(KEEPALIVE_OPTS);
+
+function decodeBody(stream: Readable, encoding: string | undefined): Readable {
+  switch ((encoding ?? '').trim().toLowerCase()) {
+    case 'gzip':
+    case 'x-gzip':
+      return stream.pipe(createGunzip());
+    case 'deflate':
+      return stream.pipe(createInflate());
+    case 'br':
+      return stream.pipe(createBrotliDecompress());
+    default:
+      return stream;
+  }
+}
+
+/** Drop-in replacement for `fetch` over a keep-alive agent. Same contract, warm sockets. */
+async function keepAliveFetch(
+  url: string,
+  init: RequestInit = {},
+  redirectsLeft = MAX_REDIRECTS,
+): Promise<Response> {
+  const target = new URL(url);
+  const signal = init.signal as AbortSignal | null | undefined;
+  const method = (init.method ?? 'GET').toUpperCase();
+  const body = typeof init.body === 'string' ? init.body : undefined;
+  const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
+  if (body !== undefined && headers['content-length'] === undefined) {
+    headers['content-length'] = String(Buffer.byteLength(body));
+  }
+  headers['accept-encoding'] ??= 'gzip, deflate, br';
+
+  return new Promise<Response>((resolve, reject) => {
+    const abortError = (): Error => {
+      const e = new Error('The operation was aborted');
+      e.name = 'AbortError';
+      return e;
+    };
+    if (signal?.aborted) { reject(abortError()); return; }
+
+    const isHttps = target.protocol === 'https:';
+    const doRequest = isHttps ? httpsRequest : httpRequest;
+    const req = doRequest(
+      {
+        agent: isHttps ? saihmKeepAliveAgentHttps : saihmKeepAliveAgentHttp,
+        protocol: target.protocol,
+        host: target.hostname,
+        port: target.port || (isHttps ? 443 : 80),
+        path: target.pathname + target.search,
+        method,
+        headers,
+        maxHeaderSize: MAX_RESPONSE_HEADER_BYTES,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        const location = res.headers.location;
+        if (status >= 300 && status < 400 && typeof location === 'string' && redirectsLeft > 0) {
+          res.resume();
+          if (signal) signal.removeEventListener('abort', onAbort);
+          // 301/302/303 downgrade to GET and drop the body, matching fetch; 307/308 preserve both.
+          const keepMethod = status === 307 || status === 308;
+          let nextInit: RequestInit = init;
+          if (!keepMethod) {
+            // Omit `body` entirely rather than setting it undefined — the project builds with
+            // exactOptionalPropertyTypes, under which an explicit undefined is not the same as absent.
+            const { body: _dropped, ...rest } = init;
+            nextInit = { ...rest, method: 'GET' };
+          }
+          keepAliveFetch(new URL(location, target).toString(), nextInit, redirectsLeft - 1).then(resolve, reject);
+          return;
+        }
+        const decoded = decodeBody(res, res.headers['content-encoding'] as string | undefined);
+        /*
+         * RESPONSE HEADERS ARE DELIBERATELY NOT COPIED ONTO THE Response.
+         *
+         * Measured: nothing downstream reads them. The only readers of a response header in
+         * this file are the two lines above — the redirect Location and the content encoding —
+         * both consumed here and neither surviving into the returned object. Callers use
+         * `ok`, `status`, and the body.
+         *
+         * Copying them would mean an anonymous whole-object read of attacker-influenced
+         * header names and values, which is precisely the shape `server_render_fence` refuses
+         * to let through unenumerated. Not copying is strictly less surface than copying and
+         * then writing down why it is safe.
+         */
+        resolve(
+          new Response(Readable.toWeb(decoded) as unknown as ReadableStream<Uint8Array>, {
+            status,
+            statusText: res.statusMessage ?? '',
+          }),
+        );
+      },
+    );
+
+    function onAbort(): void { req.destroy(abortError()); }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+    req.on('error', (e: Error) => { reject(e); });
+    // `end(body)` rather than `write(body); end()` — one call, and it keeps this file free of a
+    // `.write(` whose receiver is not a render stream. server_render_fence sweeps every such call
+    // and requires each to be either a swept render surface or a written-down exception; an HTTP
+    // request body is neither, so the better answer is not to create the site.
+    if (body === undefined) req.end();
+    else req.end(body);
+  });
+}
+
 async function readBodyCapped(
   res: Response,
   max: number,
@@ -886,7 +1060,81 @@ export function identityKeyFile(): string | null {
  * and (only if unset) `SAIHM_TIER=FREE` are set so the very next bootFromEnv self-onboards this
  * identity FREE. The master secret is the ONLY key to the memory and is never logged — only its path.
  */
+/**
+ * Age below which a stale identity temp is LEFT ALONE. A temp younger than this may belong to a
+ * live `ensureSelfJoinIdentityEnv` in another process that is between its write and its rename,
+ * and deleting that one would break a working mint to clean up after a dead one.
+ */
+export const STALE_TEMP_MIN_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Sweep orphaned identity temp files left by a HARD KILL between the atomic write and the rename.
+ *
+ * `ensureSelfJoinIdentityEnv` already unlinks its own temp when the RENAME throws, and `wx` proves
+ * that temp was ours. Neither covers SIGKILL: the process simply stops, and what it leaves behind
+ * is a mode-600 file containing THE MASTER SECRET, beside the key file, that nothing ever removes.
+ * `forget()` and a delta recall both rewrite `<keyPath>`, which the temp is not.
+ *
+ * Bounded exactly as specified, because this function deletes files:
+ *  - EXACT PREFIX `<basename>.tmp.`, matched with startsWith on enumerated directory entries. Not a
+ *    glob. The key file itself is `<basename>` with no `.tmp.` suffix, so it can never match.
+ *  - REGULAR FILES ONLY, via lstat, so a symlink planted in the directory is skipped rather than
+ *    followed — the delete must never act through a link to somewhere else.
+ *  - OWN UID only, where the platform reports one.
+ *  - OLDER THAN `STALE_TEMP_MIN_AGE_MS`, so a concurrent in-flight mint is never destroyed.
+ *  - UNLINKED BY EXACT RESOLVED NAME, one at a time.
+ * Best-effort throughout: a failure on one entry must never prevent the join it is running ahead of.
+ *
+ * DARK BY DEFAULT. Runs only under `SAIHM_SWEEP_STALE_TEMPS=1` until the behaviour has been proven
+ * in the field, because the failure mode of a sweep bug is deleting something that mattered.
+ *
+ * @returns the number of files actually unlinked.
+ */
+export function sweepStaleIdentityTemps(keyPath: string, now: number = Date.now()): number {
+  const dir = dirname(keyPath);
+  const prefix = `${basename(keyPath)}.tmp.`;
+  let swept = 0;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return 0; // no directory yet, or unreadable: nothing to sweep, and never a reason to fail a join
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const full = pathJoin(dir, name);
+    try {
+      const st = lstatSync(full); // lstat, NOT stat: a symlink must be skipped, never followed
+      if (!st.isFile()) continue;
+      if (uid !== null && st.uid !== uid) continue;
+      if (now - st.mtimeMs < STALE_TEMP_MIN_AGE_MS) continue;
+      unlinkSync(full);
+      swept++;
+    } catch {
+      continue; // vanished under us, or not ours to remove
+    }
+  }
+  return swept;
+}
+
 export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string | null } {
+  // Clear orphaned temps from a previous hard kill. ABOVE both early returns on purpose: the first
+  // successful mint SETS `SAIHM_MASTER_SECRET_FILE`, so every subsequent call returns at the very
+  // next line — and the steady state, where the key already exists and nothing is minted, is
+  // precisely the run on which an orphan from the kill that preceded it would otherwise sit
+  // forever. Wiring this below those returns made it dead code in the only case that matters.
+  //
+  // Always the DEFAULT path, never `SAIHM_MASTER_SECRET_FILE`: this package writes temps at the
+  // default path and nowhere else, so a temp beside an operator-configured key file was not ours
+  // and is not ours to delete.
+  if (process.env.SAIHM_SWEEP_STALE_TEMPS === '1') {
+    try {
+      sweepStaleIdentityTemps(defaultIdentityPath());
+    } catch {
+      /* a sweep must never break a join */
+    }
+  }
   if (process.env.SAIHM_MASTER_SECRET_FILE) {
     return { created: false, keyPath: process.env.SAIHM_MASTER_SECRET_FILE };
   }
@@ -2498,7 +2746,7 @@ export class SaihmProClient {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
     try {
-      const res = await fetch(url, { ...init, signal: ctrl.signal });
+      const res = await keepAliveFetch(url, { ...init, signal: ctrl.signal });
       const text = await readBodyCapped(res, MAX_RESPONSE_BYTES, 'onboard');
       if (!res.ok) {
         let code: string | undefined;
@@ -2694,7 +2942,7 @@ export class SaihmProClient {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
     try {
-      const res = await fetch(this.endpoint, {
+      const res = await keepAliveFetch(this.endpoint, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
