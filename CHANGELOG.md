@@ -2,6 +2,56 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] — 2026-09-03
+
+The client now owns its HTTP transport. No new tools, no removed tools and no
+schema change: every tool accepts exactly the input it accepted in `0.5.2`.
+
+### Changed
+
+- **Warm connections between tool calls.** The client called global `fetch`,
+  whose connection pool drops an idle socket after roughly four seconds. An
+  agent idles longer than that between tool calls almost every time — model
+  inference alone usually exceeds it — so in practice nearly every operation
+  after the first re-paid a full TCP and TLS handshake. Requests now go over a
+  keep-alive agent from the standard library, with no new dependency to install.
+  The free-onboarding device-flow poll is the clearest case: its five-second
+  interval sat just past the cutoff, so the very first thing a new subscriber
+  ever did reconnected on every poll.
+
+  Restoring what `fetch` did for free is most of the work, and each piece is
+  deliberate: redirects are followed with 301/302/303 downgrading to GET while
+  307/308 keep the method and body; `gzip`, `deflate` and `br` responses are
+  decoded; an aborted request still raises an error named `AbortError`, which
+  callers branch on; the response is a real streaming `Response`, so the
+  response-size cap can still stop a body mid-stream instead of buffering it
+  first; and the accepted header size is raised, because Node's client rejects
+  a response whose headers exceed 16 KiB where `fetch` does not — an endpoint
+  with an oversized reason phrase turned a readable non-2xx into an opaque
+  transport error. Response headers are not copied onto the returned
+  `Response`: nothing downstream reads them, and copying attacker-influenced
+  header names and values wholesale is exactly the shape the render fence
+  refuses to let through unenumerated.
+
+  This is not an HTTP/2 client. The client negotiated http/1.1 before and still
+  does; that is parity, not a downgrade.
+
+### Added
+
+- **A sweep for identity temp files left behind by a hard kill, off by
+  default.** Minting a self-join identity writes the master secret to a
+  temporary file and then renames it. A thrown rename already cleans up after
+  itself, but `SIGKILL` between the two steps leaves a mode-600 file holding the
+  master secret next to the key file, and nothing removed it. The sweep is
+  bounded before it deletes anything: an exact `<key>.tmp.` prefix over
+  enumerated directory entries rather than a glob; regular files only, checked
+  with `lstat` so a symlink is skipped rather than followed; owned by the
+  current user; older than an hour, so a mint running concurrently in another
+  process is never destroyed; and unlinked one at a time by resolved name. It
+  runs only where this package writes temps, never beside an operator-configured
+  key file. **It stays dark until the behaviour is proven in the field** — the
+  failure mode of a sweep bug is deleting something that mattered.
+
 ## [0.5.2] — 2026-08-31
 
 Corrects the reading ORDER of the `saihm_join` failure guidance added in `0.5.1`.
@@ -1032,6 +1082,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.5.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.3
 [0.5.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.2
 [0.5.1]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/releases/tag/v0.5.1
 [0.5.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.0
@@ -1049,4 +1100,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.5.3...HEAD

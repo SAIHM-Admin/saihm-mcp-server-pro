@@ -569,9 +569,9 @@ const KEEPALIVE_OPTS = { keepAlive: true, keepAliveMsecs: KEEPALIVE_PROBE_MS, ma
 
 /*
  * ONE AGENT PER SCHEME. `fetch` handles http: and https: transparently; `request` does not,
- * and an agent belongs to exactly one scheme. Hardcoding https here failed 200 of 309 tests
+ * and an agent belongs to exactly one scheme. Hardcoding https here failed most of the suite
  * on the first run — every test that points the client at a local http://127.0.0.1 server,
- * which is most of them. Caught by baselining the suite BEFORE the change (309/309 clean) and
+ * which is most of them. Caught by baselining the suite BEFORE the change, green, and
  * diffing, rather than by reading the failures and guessing.
  */
 const saihmKeepAliveAgentHttps = new HttpsAgent(KEEPALIVE_OPTS);
