@@ -1132,6 +1132,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.6.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.0
 [0.5.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.3
 [0.5.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.2
 [0.5.1]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/releases/tag/v0.5.1

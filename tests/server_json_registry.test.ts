@@ -66,6 +66,34 @@ describe("RM2: the manifest cannot drift from the package it describes", () => {
     assert.equal(npm[0].identifier, pkg.name);
   });
 
+  // The release workflow gates SEVEN artifacts, not two, and this file used to check two. The
+  // lockfile and the changelog SHIP: `files` carries CHANGELOG.md, and a hand-edit of package.json
+  // and server.json leaves package-lock.json on the previous version because only `npm version`
+  // touches it. v0.6.0 was tagged, released and REFUSED by CI for exactly that, after a local suite
+  // that was green — so the gate now exists here, where it costs seconds instead of a failed
+  // release. Derived from package.json, so it needs no upkeep at the next bump.
+  it("the lockfile and the changelog carry this version too, as the release gate demands", () => {
+    const lock = JSON.parse(
+      readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
+    ) as { version: string; packages: Record<string, { version: string }> };
+    assert.equal(lock.version, pkg.version, "package-lock.json version != package.json version");
+    assert.equal(
+      lock.packages[""]?.version,
+      pkg.version,
+      'package-lock.json packages[""].version != package.json version',
+    );
+
+    const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+    assert.ok(
+      new RegExp(`^## \\[${pkg.version.replace(/\./g, "\\.")}\\]`, "m").test(changelog),
+      `CHANGELOG.md has no '## [${pkg.version}]' heading`,
+    );
+    assert.ok(
+      new RegExp(`^\\[${pkg.version.replace(/\./g, "\\.")}\\]:`, "m").test(changelog),
+      `CHANGELOG.md has no '[${pkg.version}]:' link definition`,
+    );
+  });
+
   it("every version in the manifest matches package.json", () => {
     assert.equal(manifest.version, pkg.version, "server.json version != package.json version");
     for (const p of manifest.packages) {
