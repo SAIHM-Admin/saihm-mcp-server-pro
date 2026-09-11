@@ -32,6 +32,13 @@ import { join } from 'node:path';
 import type { WireEnvelope } from '@saihm/client-pro';
 import { SaihmProClient } from '../src/client.js';
 
+// The erasure feed's root derives from the IDENTITY's directory - `SAIHM_ERASURE_FEED_DIR`, then
+// `SAIHM_HOME`, then `~/.saihm` - so a `forget()` in an unpinned test appends a REAL erasure line to
+// whoever runs this suite. Pin the FEED alone rather than `SAIHM_HOME`: nothing else in this file
+// reads this variable, so what is under test is unchanged and the sequence-state default is left
+// exactly where each harness already put it.
+process.env.SAIHM_ERASURE_FEED_DIR = mkdtempSync(join(tmpdir(), 'saihm-feed-'));
+
 type Shape = 'full' | 'delta';
 
 interface Stack {

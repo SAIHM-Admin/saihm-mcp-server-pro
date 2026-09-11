@@ -96,6 +96,11 @@ import {
   SeqHighWaterMark,
 } from '@saihm/client-pro';
 import { safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
+import {
+  MAX_FEED_CELL_ID_CHARS,
+  emitErasureLineReporting,
+  ensureTenantDir,
+} from './erasure-feed.js';
 import type {
   ClientIdentity,
   WireEnvelope,
@@ -818,6 +823,15 @@ export interface ForgetResult {
    * cache could not be purged. `undefined` on every other path. See {@link SaihmProClient.forget}.
    */
   localCacheResidual?: string;
+  /**
+   * Set by THIS CLIENT, never by the endpoint, when the erasure succeeded but the downstream erasure
+   * feed line could not be written — so nothing derived from this cell has been told to purge it.
+   *
+   * Deliberately NOT folded into `localCacheResidual`: that field states that PLAINTEXT may remain
+   * in a local cache, which is a different subsystem and a different remedy. An operator who read a
+   * feed failure under that name would go looking for a cache file that is perfectly fine.
+   */
+  feedResidual?: string;
 }
 
 export interface StatusSnapshot {
@@ -901,6 +915,17 @@ export interface SaihmProClientOpts {
    * the guard, by asking for it.
    */
   persistSeqState?: boolean;
+  /**
+   * Create `<feed root>/tenants/<agentIdHash>/` at construction so a downstream erasure consumer can
+   * arm a directory watch on a directory that EXISTS rather than polling for one to appear.
+   *
+   * Off unless asked for, on the same asymmetry as `persistSeqState` above and for the same measured
+   * reason: a directly-constructed client writes nothing anywhere. `bootFromEnv` turns it on. It
+   * creates the directory only — never the `erasures.ndjson` file, because an empty feed and a
+   * never-written one read identically to a consumer, and the directory alone says "this identity is
+   * wired" without asserting an erasure history that does not exist.
+   */
+  ensureErasureFeedDir?: boolean;
   /**
    * Path to persist this agent's opened cells (mode 600), keyed by cellId. When set, `recall`
    * switches to DELTA mode: it sends the cached cellIds to the endpoint and fetches only cells it
@@ -995,6 +1020,20 @@ export interface FreeEntitlementResult {
  */
 export function selfJoinEnabled(): boolean {
   return process.env.SAIHM_SELF_JOIN !== '0';
+}
+
+/**
+ * Whether a `forget` writes its downstream erasure-feed line. DEFAULT ON; `SAIHM_ERASURE_FEED=0`
+ * opts out. Same `!== '0'` shape as {@link selfJoinEnabled} so one rule covers both knobs.
+ *
+ * On by default because the consumer half of this seam is on by default: a delete that stops at this
+ * substrate leaves artifacts derived from the cell alive downstream, which presents to the operator
+ * as an erasure that happened. A feed that has to be switched on is a feed nobody switches on, and
+ * the failure it prevents is silent. Writing costs one <=1KiB append under the identity's own home,
+ * and a write that cannot happen is REPORTED on the receipt rather than thrown.
+ */
+export function erasureFeedEnabled(): boolean {
+  return process.env.SAIHM_ERASURE_FEED !== '0';
 }
 
 /** Default on-disk location of a self-generated FREE identity (written mode 600). */
@@ -2002,6 +2041,31 @@ export class SaihmProClient {
       opts.persistSeqState === true,
     );
     this.recallCache = new RecallCache(opts.recallCachePath);
+    // Create this identity's erasure-feed directory NOW, while the identity is being loaded, rather
+    // than lazily at the first `forget`. A downstream consumer can arm a directory watch on a
+    // directory that exists; a missing one leaves it polling until something appears, so an erasure
+    // is applied late for no reason other than when the directory happened to be made. The file is
+    // NOT created — an empty `erasures.ndjson` and a never-written one read identically, and the
+    // directory alone carries "this identity is wired" without asserting a history that is not there.
+    //
+    // Never fatal. A client that cannot make a directory under its own home is a client with a
+    // problem worth reporting, but refusing to CONSTRUCT over it would take away recall and remember
+    // as well — a strictly larger outage than the one being prevented. A `forget` that cannot write
+    // its line says so on its own receipt, which is where an operator is actually looking.
+    //
+    // OPT-IN, exactly like `persistSeqState` and for the identical reason. Doing this in the
+    // constructor was measured: `new SaihmProClient(...)` created `tenants/` inside the caller's real
+    // `$HOME`, and the suite said so — a library that touches `$HOME` as a side effect of a
+    // constructor is intrusive on its own, and it makes an embedder's tests order-dependent through
+    // a directory they never named. `bootFromEnv` turns it on because the MCP server is the surface
+    // that actually erases and `~/.saihm` is already its home.
+    if (opts.ensureErasureFeedDir === true && erasureFeedEnabled()) {
+      try {
+        ensureTenantDir(this.agentIdHashHex);
+      } catch {
+        /* reported per-erasure on the receipt via `feedResidual`, not at construction */
+      }
+    }
     this.requestTimeoutMs =
       typeof opts.requestTimeoutMs === 'number' && opts.requestTimeoutMs > 0
         ? opts.requestTimeoutMs
@@ -2240,6 +2304,9 @@ export class SaihmProClient {
     // having across restarts and where `~/.saihm` already holds this identity's key. Constructing
     // `SaihmProClient` directly does not reach here and writes nothing.
     opts.persistSeqState = true;
+    // THE SERVER OPTS IN here too, and only here. Same boundary as the line above: this is the
+    // process that performs erasures, so this is the process whose consumer has something to watch.
+    opts.ensureErasureFeedDir = true;
     if (optRecallCachePath) opts.recallCachePath = optRecallCachePath;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
@@ -3600,6 +3667,44 @@ export class SaihmProClient {
         `the DEK is destroyed and this cell is unrecoverable, but the local plaintext cache could ` +
         `not be purged: plaintext may remain in ${where} until the next successful cache write`;
     }
+    // Tell anything downstream that derived from this cell. The erasure is ALREADY irreversible, so
+    // this cannot be allowed to throw: the pre-erase ordering that makes an append failure fatal is
+    // only constructible where the erasure is performed, and it is performed remotely. Report both
+    // halves instead, exactly as the cache purge above does.
+    //
+    // `complete` is stated FALSE unconditionally rather than forwarded from `r`. This runtime does
+    // ACCESS-CONTROL erasure — the index flag, tombstone, CID blacklist and audit entry are real, the
+    // per-cell key is not destroyed — so `true` would be untrue here. It is also unreachable: a
+    // consumer refuses `complete:true` without a verbatim `destructionAnchor`, and `ForgetResult`
+    // has no such field to copy one from. Forwarding a `true` the endpoint happened to set would
+    // produce a line the consumer discards, which purges nothing and looks like a delivered erasure.
+    //
+    // GATED ON THE ID'S LENGTH, and the reason is the RENDER rather than the feed. `cellId` is a
+    // caller argument and free-form, so it is the only value on this wire a caller chooses. Emitting
+    // an over-long one makes `buildFeedLine` refuse, which sets a residual, which renders a SECOND
+    // line in a tool result whose structure is pinned at one — handing a caller a lever over the
+    // shape of a render, which is exactly what every fence in this package exists to deny. This
+    // package's posture for a hostile caller argument is to render it INERTLY, never to change shape
+    // around it, so the id is checked here and the emit is skipped rather than allowed to fail.
+    //
+    // THE RESIDUAL OF THAT CHOICE, WRITTEN DOWN RATHER THAN CLAIMED AWAY: a cell whose id is longer
+    // than the pointer ceiling gets no feed line AND no sentence saying so. Such an id is already
+    // unusable through every other surface here — it renders cut, it cannot be kept in an
+    // announcement, it cannot be fed back to resolve a grant — so the feed is the last place it stops
+    // working, not the first. That does not make the silence free, and if a downstream consumer ever
+    // needs to hear about this class, the honest fix is a field on the line the receipt ALREADY
+    // renders, never a second conditional line.
+    let feedResidual: string | undefined;
+    if (erasureFeedEnabled() && cellId.length > 0 && cellId.length <= MAX_FEED_CELL_ID_CHARS) {
+      feedResidual = emitErasureLineReporting({
+        cellId,
+        agentIdHash: this.agentIdHashHex,
+        at: new Date().toISOString(),
+        complete: false,
+        source: 'mcp-client',
+      });
+    }
+
     // The endpoint's claim is DELETED before ours is set, not merely overwritten. `r` is an
     // unvalidated cast of the endpoint's body, so a hostile endpoint can put `localCacheResidual` in
     // its 200 and would otherwise be writing a sentence straight into a rendered erasure receipt —
@@ -3607,9 +3712,12 @@ export class SaihmProClient {
     // where an operator is most likely to act on what it says. `delete` rather than assigning
     // `undefined` because `exactOptionalPropertyTypes` makes absent and present-but-undefined
     // different things, and absent is the one that means "this client had nothing to report".
+    // `feedResidual` is the same channel and gets the same treatment.
     const out: ForgetResult = { ...r };
     delete out.localCacheResidual;
+    delete out.feedResidual;
     if (localCacheResidual !== undefined) out.localCacheResidual = localCacheResidual;
+    if (feedResidual !== undefined) out.feedResidual = feedResidual;
     return out;
   }
 

@@ -649,7 +649,23 @@ server.registerTool(
           // narrower constant.
           (r.localCacheResidual
             ? `\n  ! ${safePathField(r.localCacheResidual, MAX_PATH_MESSAGE_CHARS)}`
-            : ''),
+            : '') +
+          // A SECOND residual line, deliberately not folded into the one above. They are different
+          // subsystems with different remedies and the operator acts on them differently: the cache
+          // residual says PLAINTEXT MAY REMAIN HERE, and the answer is to go and remove a file; this
+          // one says the erasure happened but NOTHING DOWNSTREAM WAS TOLD, and the answer is to
+          // repair the feed path and re-run the erasure so the line is re-emitted. Summing them into
+          // one sentence would make each one's remedy unreadable, and a residual an operator cannot
+          // act on is the same as no residual at all.
+          //
+          // Same fence and same budget as its sibling, for the same two reasons. It carries a path
+          // from operator env that is not statically known here, and the sentence around it is long
+          // enough that the narrow message budget would cut the filename off the end - naming a file
+          // the operator then cannot find, on the line whose whole purpose is to send them to it.
+          // Safe to widen HERE because `client.ts` deletes any endpoint-supplied field of this name
+          // before setting its own, exactly as it does for `localCacheResidual`, so no hostile value
+          // reaches this render.
+          (r.feedResidual ? `\n  ! ${safePathField(r.feedResidual, MAX_PATH_MESSAGE_CHARS)}` : ''),
       );
     } catch (e) {
       return fail(e);

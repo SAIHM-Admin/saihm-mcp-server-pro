@@ -292,7 +292,12 @@ const fenceOf = (n: ts.Node): 'safeField' | 'safePathField' | null => {
  * construction, and no widening of a name matcher reaches it. That class is enumerated by its own
  * instrument instead, because the honest closure for "no name appears" is a different question.
  */
-const SEEDS = ['keyPath', 'secretFile', 'savedTo', 'localCacheResidual', 'SAIHM_HOME'];
+// `feedResidual` joins the seeds for the same reason `localCacheResidual` is here: it is a sentence
+// this package writes that INTERPOLATES a path from operator env, so every occurrence of it outside
+// a fence has to be written down rather than trusted. Adding the name is what makes the sweep below
+// enumerate it; without it a new residual channel would have shipped with the suite green, which is
+// the hand-kept-list failure this file's opening indicts one field over from where it was caught.
+const SEEDS = ['keyPath', 'secretFile', 'savedTo', 'localCacheResidual', 'feedResidual', 'SAIHM_HOME'];
 const foldString = (n: ts.Node): string | null => {
   if (ts.isStringLiteralLike(n)) return n.text;
   if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n)) return foldString(n.expression);
@@ -383,6 +388,11 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // client.ts calls neither. The 1 is pinned so that scope stays a stated fact rather than an
   // impression: were it to fall to 0, the sweep would examine nothing here and still pass.
   'client.ts': 1,
+  // 0 - this module renders nothing. It THROWS, and the CALLER decides what to render: the blind
+  // endpoint fails the forget, the MCP client folds the message into `feedResidual`. Pinned rather
+  // than omitted so that an `ok(...)` or a `std*.write` added here - the shape that would let a feed
+  // path reach an operator without passing a fence on the way - turns this red on that commit.
+  'erasure-feed.ts': 0,
   'index.ts': 0,
   // 0 by design - the fences themselves render nothing; they return values their callers render.
   'render_fence.ts': 0,
@@ -1140,6 +1150,23 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       // are the percentages a user is warned at; a silent edit changes what they are told and when.
       QUOTA_NAG_THRESHOLDS: [80, 95, 100],
     },
+    // The erasure feed's two declared numbers. `MAX_FEED_LINE_BYTES` bounds what ONE line may
+    // carry, and it is enforced by REFUSAL rather than truncation - a truncated NDJSON line is not a
+    // short line, it is a corrupt one, and it corrupts its successor once the newline is lost, so
+    // the budget converts "this erasure was not recorded" into "two erasures were recorded wrongly"
+    // the moment it truncates. `FEED_VERSION` is not a budget at all; it is here because this sweep
+    // takes EVERY numeric export with no name filter, and that exhaustiveness is worth more than the
+    // precision a filter would buy - a consumer BRANCHES on this value, so a silent bump is a wire
+    // change, which is exactly the class a name-keyed filter would have looked away from.
+    'erasure-feed.ts': {
+      MAX_FEED_LINE_BYTES: 1024,
+      FEED_VERSION: 1,
+      // The cellId ceiling, DUPLICATED from `client.ts` because `client.ts` imports that module and
+      // the dependency cannot run the other way. The duplication is pinned equal below rather than
+      // trusted: a literal copied across a module boundary with a comment saying "keep these equal"
+      // is the same hand-kept list this file's opening indicts.
+      MAX_FEED_CELL_ID_CHARS: 64,
+    },
     // The package's PUBLIC surface: a barrel of re-exports. It declares no budget of its own, and
     // `{}` says so deliberately rather than by omission — omission is what left it outside this
     // sweep in the first place. If the barrel ever re-exports one, this turns red and the author
@@ -1203,6 +1230,36 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
           typeof v === 'number' || (Array.isArray(v) && v.every((x) => typeof x === 'number')),
       ),
     ) as Record<string, number | number[]>;
+
+  // THE DUPLICATION, pinned EQUAL rather than pinned twice. `MAX_FEED_CELL_ID_CHARS` exists because
+  // `cellId` is the one caller-chosen field on the erasure-feed wire, and its value is `client.ts`'s
+  // own pointer ceiling - the cap that is itself set equal to the server's per-field render budget so
+  // a kept cellId always renders at FULL length. Three constants, one invariant. `erasure-feed.ts`
+  // cannot import the other two (`client.ts` imports IT), so the value is copied, and a copy with no
+  // instrument over it drifts on the commit that widens one side. Read from the imported MODULES map
+  // rather than retyped here, so this assertion cannot agree with a stale literal.
+  // NOT VACUOUS, checked first. Both sides are read by string key off an imported namespace, so a
+  // renamed or moved export makes BOTH `undefined` and the equality below passes on nothing - the
+  // vacuous-guard failure this file records at five other sites. A `number` on each side is the
+  // cheapest thing that cannot be true by accident.
+  for (const [mod, name] of [
+    ['erasure-feed.ts', 'MAX_FEED_CELL_ID_CHARS'],
+    ['client.ts', 'MAX_ANNOUNCEMENT_FIELD_CHARS'],
+  ] as const)
+    assert.equal(
+      typeof MODULES[mod]?.[name],
+      'number',
+      `${mod} no longer exports ${name} under that name, so the ceiling equality below would ` +
+        'compare undefined with undefined and pass on nothing',
+    );
+  assert.equal(
+    MODULES['erasure-feed.ts']?.['MAX_FEED_CELL_ID_CHARS'],
+    MODULES['client.ts']?.['MAX_ANNOUNCEMENT_FIELD_CHARS'],
+    'the erasure feed\'s cellId ceiling drifted from the announcement field cap. They are ONE ' +
+      'ceiling - the length at which a cellId stops being a pointer this package can render at full ' +
+      'length, keep in an announcement, or feed back to resolve a grant. Widening either alone means ' +
+      'one surface accepts a pointer another silently cuts',
+  );
 
   // `server.ts` is the module that APPLIES these fences, and it declares two budgets of its own that
   // sat outside this enumeration while its name claimed EVERY declared budget. That is the same shape
@@ -1926,8 +1983,20 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       // recovers by copying the key at that path - which is why it is `safePathField` and not
       // `safeField`, the class distinction this release's sibling entry turns on.
       'safePathField:MAX_PATH_FIELD_CHARS': 6,
-      'safePathField:MAX_PATH_MESSAGE_CHARS': 1, // the erasure residual, which embeds the cache path
+      // TWO erasure residuals, not one. The first embeds the local cache path; the second embeds the
+      // erasure-feed path, and it is a SEPARATE rendered line because the two say different things to
+      // the operator - plaintext may remain HERE, versus the erasure happened and nothing downstream
+      // was told. Both take the MESSAGE budget rather than the field budget for the same measured
+      // reason: the surrounding sentence is long enough that the narrow budget cuts the filename off
+      // the end, naming a file the operator cannot then find.
+      'safePathField:MAX_PATH_MESSAGE_CHARS': 2,
     },
+    // {} - this module calls no fence, deliberately. It is a LEAF: it throws `ErasureFeedError` and
+    // its caller renders, the same shape `client.ts` uses for `SaihmConfigError`. Declared rather
+    // than omitted, because the first fence call added here has to be a decision about VALUE CLASS,
+    // not a reach for the nearest constant: a feed path must ROUND-TRIP for an operator to act on
+    // it, so it takes `safePathField`, never `safeField`.
+    'erasure-feed.ts': {},
     'render_fence.ts': {
       'safeField:max': 1, // a pass-through: the caller's own budget, not one of ours
       'safeField:MAX_ERROR_CODE_CHARS': 1,
@@ -2095,6 +2164,27 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // caller-chosen path can arrive at `failText` through it. It also names no env path - the
     // directory is always the DEFAULT identity path, never `SAIHM_MASTER_SECRET_FILE`.
     'client.ts:sweepStaleIdentityTemps': 1,
+    // THREE, and not one of them touches the seq/cell cache. They write the GDPR Art.17 erasure
+    // feed - `<root>/tenants/<agentIdHash>/erasures.ndjson` - which is append-only, never read back
+    // by this package, and never rewritten, truncated or rotated in place. `ensureTenantDir` creates
+    // the directory at JOIN rather than at the first erasure, so a downstream consumer can arm a
+    // watch on a directory that EXISTS; `appendFeedLine` re-creates it before each append because a
+    // process that outlives an operator deleting the tree must not start silently dropping lines.
+    'erasure-feed.ts:ensureTenantDir': 1, // mkdirSync - the tenant directory, not the cache
+    'erasure-feed.ts:appendFeedLine': 1, // mkdirSync - the same directory, before the append
+    // The KEY IS A VARIABLE NAME, not a function, and that is the instrument rather than a typo:
+    // `enclosing()` stops at the nearest named declaration and `const fd = openSync(path, 'a', ...)`
+    // is a VariableDeclaration, so the append's open keys as `fd`. Written down rather than reshaped
+    // around, with the RESIDUAL stated instead of claimed away: a SECOND `const fd = openSync(...)`
+    // anywhere in this module would SUM under this one key, and a call moving between the two would
+    // leave the total unchanged - the exact aggregation the `flushMarks`/`persist` split above was
+    // made to expose. If a second one is ever added, give the two bindings distinct names.
+    //
+    // The `writeSync`/`fsyncSync`/`closeSync` that follow this open are NOT counted here, because
+    // `MUTATORS` is keyed on the name IMPORTED from `node:fs` and holds none of the three. That is
+    // an observation about the census, not a gap in it: the open is what creates or extends the
+    // file, and it is the call whose failure names a path.
+    'erasure-feed.ts:fd': 1,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
@@ -2559,7 +2649,10 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // FIVE. The batch's own flush is the fifth: `withBatch` writes the deferred marks at the end of a
     // batched scope, which is a persist-reaching call on a path a recall reaches, so it is wrapped
     // and counted like the four before it.
-    { 'client.ts': 5, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0 },
+    // `erasure-feed.ts: 0` - it reaches no `persist()`. It writes a DIFFERENT artifact through its
+    // own `node:fs` calls, censused in `FS_WRITES` above; there is nothing here for a wrapper to
+    // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
+    { 'client.ts': 5, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -2653,7 +2746,14 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
   // property, and either a behavioural test or a reason like that one.
   assert.deepEqual(
     perFile,
-    { 'client.ts': 3, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1 },
+    // `erasure-feed.ts: 0`, and it is a PROPERTY of the module rather than an omission: the feed is
+    // APPEND-ONLY, so there is no whole-file write for a tmp-then-rename to make atomic. Atomicity
+    // is at the line instead - one `writeSync` of a bounded line, then `fsync` - and the durability
+    // direction that matters is the one a rename cannot give: the line must be on disk BEFORE the
+    // erasure is reported, so a crash leaves a line with no erasure (recoverable) rather than an
+    // erasure with no line (not). A tmp-then-rename arm appearing here would mean the file had
+    // started being rewritten as a whole, which is a different artifact than this one.
+    { 'client.ts': 3, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
 });
@@ -3499,6 +3599,12 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // condition, the property write and the value read). A count of occurrences described as a
       // list of lines reads as an off-by-two to anyone who checks it.
       localCacheResidual: 7,
+      // SEVEN, the same count and the same shape as its sibling above, which is the point: the field
+      // declaration, the `delete out.feedResidual` that strips any endpoint-supplied value of this
+      // name before ours is set, and the guarded assignment. It tracks `localCacheResidual` exactly
+      // because it gets exactly the same hostile-endpoint treatment; if the two ever diverge, one of
+      // them has lost a guard, and that divergence is what this pair of numbers is for.
+      feedResidual: 7,
       // NINE. Seven came with the configured-but-empty secret becoming a named configuration error;
       // two more when the hex-validation failures stopped naming SAIHM_MASTER_SECRET_HEX whatever
       // the secret's actual source was, and started naming the file they were really about.
@@ -3511,6 +3617,17 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // documents for the throw site.
       secretFile: 12,
     },
+    'erasure-feed.ts': {
+      // TWO occurrences of the NAME, and not one occurrence of a value. The first is the read
+      // itself, `env['SAIHM_HOME']`; the second is the refusal message naming WHICH variable was
+      // relative - one of two constant string literals, selected by which variable was set, never by
+      // a caller. The path that message quotes goes through `JSON.stringify`, which quotes and
+      // escapes it, and the message reaches an operator only as `feedResidual`, fenced at the render
+      // site rather than here. Not fenced in place because this module imports no fence by design:
+      // it is a leaf that throws, and fencing at the throw would fence the same value twice, on the
+      // narrow message budget the render site is deliberately not using.
+      SAIHM_HOME: 2,
+    },
     'index.ts': {},
     'render_fence.ts': {},
     'server.ts': {
@@ -3520,6 +3637,7 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // this file written under the old path with no declared variable to redirect it.
       SAIHM_HOME: 1,
       localCacheResidual: 1, // truthiness selecting whether the residual line renders at all
+      feedResidual: 1, // the same, for the second residual line
       savedTo: 2, // parameter declaration, and the truthiness guarding its (fenced) render
       // TWO calls to `identityKeyFile()`, the key-file resolver this release's own fix routes the
       // `join` and `free-join` backup lines through. It carries a caller-actionable path and named
@@ -4650,7 +4768,23 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // chain, so the concatenation arm does not also see it and the pin moves by ONE, not two. The
   // value is never RENDERED: it is a filename prefix consumed by `startsWith` over readdir output,
   // so it cannot close a delimiter in anything a human or a model reads.
-  const EXAMINED_SPANS_PIN = 80;
+  // 82 since `src/erasure-feed.ts` joined the walk. ESTABLISHED AS A RISE BY MEASUREMENT, not by
+  // argument, per this pin's own rule: with the two interpolations in `resolveFeedRoot`'s refusal
+  // message replaced by literal text and nothing else changed, this sweep examined 80 and test 50
+  // was green; restored, it examines 82. So the delta is those two spans and no predicate moved.
+  // Both are seed-carrying by FOLDING rather than by spelling - `which` hops to a conditional whose
+  // arms are literal env-var names, `root` hops through `home` to `env['SAIHM_HOME']` - which is the
+  // `carriesFence` hop working as intended: the seed clause is an IN-SCOPE FILTER here, so selecting
+  // a value that did not need examining costs nothing. Neither span sits inside a delimiter: the
+  // surrounding text is prose, and the quotes around the path are produced by `JSON.stringify`
+  // INSIDE the span, where they escape the value rather than bound it.
+  // 84 since the erasure-feed residual gained its own rendered line in `server.ts`. ONE new fenced
+  // value, TWO spans, by the double count this pin's note above already records: the sweep has a
+  // concatenation arm and a template arm, and a value inside a template that sits in a `+` chain is
+  // seen by both. Its sibling `localCacheResidual` is rendered in the identical shape and contributes
+  // the identical pair, which is what makes this a RISE from one added site rather than a predicate
+  // that started matching something new.
+  const EXAMINED_SPANS_PIN = 84;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
