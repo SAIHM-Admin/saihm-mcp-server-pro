@@ -51,6 +51,11 @@ and no schema change: every tool accepts exactly the input it accepted in
   `tenants/<identity>` layout is not unique to this feed, so a root pointed at
   another store's base directory would place the feed inside a tree whose owner
   deletes it wholesale when that identity is erased.
+- A **line that could not be written in full** — a write is permitted to place
+  fewer bytes than it was given, so the guarantee above had to hold in the
+  syscall and not only in the record builder. The write is completed in a loop,
+  and a failure part-way rolls the file back to the bytes it held before, rather
+  than leaving behind the half-record the size limit exists to prevent.
 
 ## [0.5.3] — 2026-09-03
 

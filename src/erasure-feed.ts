@@ -42,7 +42,16 @@
  * so was the next one". Refusing keeps the damage to one line and reports it.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, writeSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  writeSync,
+} from 'node:fs';
 import { dirname, isAbsolute, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -234,10 +243,49 @@ export function buildFeedLine(rec: ErasureFeedRecord): string {
  */
 export function appendFeedLine(path: string, line: string): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const buf = Buffer.from(line, 'utf8');
   const fd = openSync(path, 'a', 0o600);
+  const sizeBefore = fstatSync(fd).size;
+  let off = 0;
   try {
-    writeSync(fd, line);
+    // Node's own `writeFileSync` loops here, and this file needs the loop for a sharper reason than
+    // tidiness: `writeSync` is permitted to write fewer bytes than it was handed, and a short write
+    // on THIS file leaves exactly the artefact `buildFeedLine` refuses to construct — a half-record
+    // whose missing newline takes its successor down with it. Refusing to build one and then writing
+    // one anyway would be a guarantee made in the error message and broken in the syscall.
+    //
+    // The loop trades one property for a better one. A single append under `O_APPEND` is indivisible
+    // against a second writer; a retried one is not, so a concurrent writer to the SAME identity's
+    // feed could interleave between iterations. That is the right trade: the interleave needs two
+    // processes on one identity AND a short write, while the corruption it replaces needs only the
+    // short write, and a short write on a file this small effectively means the disk is full.
+    while (off < buf.length) {
+      const n = writeSync(fd, buf, off, buf.length - off);
+      if (n <= 0) {
+        throw new ErasureFeedError(
+          `the erasure feed line could not be written in full: the write returned ${n} with ` +
+            `${buf.length - off} of ${buf.length} bytes still owed. Refusing to spin: a partial ` +
+            `line is a corrupt record, and the caller is told rather than left believing the ` +
+            `downstream feed was notified.`,
+        );
+      }
+      off += n;
+    }
     fsyncSync(fd);
+  } catch (e) {
+    // Put the file back the way it was found. Without this the guarantee in the error messages above
+    // is a guarantee about the RECORD and not about the FILE: a write that fails after placing bytes
+    // — part-way through the loop, or when the flush that follows it fails — has already put those
+    // bytes on the disk, and they are the half-record this module refuses to construct.
+    // The rollback is conditional on the file still ending exactly where our own bytes ended, so a
+    // second writer that appended in the meantime is never truncated away — losing somebody else's
+    // erasure line to tidy up our own would be the more expensive mistake.
+    try {
+      if (off > 0 && fstatSync(fd).size === sizeBefore + off) ftruncateSync(fd, sizeBefore);
+    } catch {
+      /* The line stays partial and the caller is told; nothing better is available here. */
+    }
+    throw e;
   } finally {
     closeSync(fd);
   }

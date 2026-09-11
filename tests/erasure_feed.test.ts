@@ -418,3 +418,40 @@ test('a tenant directory that belongs to another store is refused, an empty or o
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// A feed line is written through a loop now, because `writeSync` is allowed to write fewer bytes
+// than it was handed and this file's whole argument is that a half-record never reaches the disk.
+// A loop over a Buffer is offset arithmetic, and offset arithmetic is where a multi-byte character
+// gets sliced in half — so the shape this pins is the one the change could plausibly break: several
+// appends, non-ASCII among them and one close to the ceiling, compared as BYTES rather than as
+// parsed objects. Parsing first would hide the failure, because a corrupted tail still parses if the
+// corruption lands past the last brace.
+test('appended lines are byte-exact across multi-byte content and repeated appends', () => {
+  const root = tmp();
+  try {
+    const path = feedPathFor(root, ID);
+    const bodies = [
+      '{"n":1}',
+      '{"n":"é中文🔒"}',
+      '{"n":"' + 'z'.repeat(MAX_FEED_LINE_BYTES - 20) + '"}',
+      '{"n":"é"}',
+    ];
+    const lines = bodies.map((b) => b + '\n');
+    for (const l of lines) appendFeedLine(path, l);
+
+    assert.deepEqual(
+      readFileSync(path),
+      Buffer.from(lines.join(''), 'utf8'),
+      'the file is not the exact concatenation of what was appended',
+    );
+    const back = readFileSync(path, 'utf8').split('\n').filter((l) => l !== '');
+    assert.equal(back.length, lines.length, 'a line was lost or split');
+    assert.equal(
+      (JSON.parse(back[1] as string) as Record<string, unknown>)['n'],
+      'é中文🔒',
+      'a multi-byte character did not survive the write loop intact',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
