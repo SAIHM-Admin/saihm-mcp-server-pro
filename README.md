@@ -164,6 +164,7 @@ accepts.
 | "no identity" | Setup hasn't run on this machine yet |
 | A different memory than you expected | This machine has its own key rather than yours |
 | `status` mentions `seq-state` | A small local safeguard file couldn't be read or written. Your memories are unaffected — see `SAIHM_SEQ_STATE_PATH` below |
+| `forget` worked but mentions a feed | The erasure stands — only the notification line couldn't be written. See `SAIHM_ERASURE_FEED` below |
 
 ## How it works
 
@@ -183,6 +184,10 @@ deleted somewhere.
   [`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro).
 - **Crypto-shred erasure** — `forget` destroys the endpoint-side wrapped
   data-encryption key, rendering the cell undecryptable (GDPR Art. 17).
+- **Erasure that travels** — `forget` also appends one line to a per-identity
+  feed, so anything that derived from a cell — an index, a mirror, an extracted
+  fact — can be told to drop it too. An erasure that stops at this substrate is
+  not an erasure. On by default; `SAIHM_ERASURE_FEED=0` turns it off.
 - **Standard transport** — `POST {method, params}` with
   `Authorization: Bearer <JWT>`; the endpoint binds your tenant from the JWT.
   HTTPS only, with loopback `http` permitted for local development.
@@ -201,6 +206,7 @@ deleted somewhere.
 | Tenant isolation | Your `agentIdHash` (the JWT `sub`) namespaces your state; a write whose signed identity differs from the JWT is rejected. |
 | Authenticated sharing | Grantee public keys are pinned out-of-band and verified before any secret is bound to them; on the recipient side, `recallShared` pins the sharer's key and verifies the cell signature before returning any plaintext. |
 | Erasure | Destroying the endpoint-side wrapped DEK crypto-shreds the cell. |
+| Erasure cascade | Each `forget` appends one line to `$SAIHM_HOME/tenants/<agentIdHash>/erasures.ndjson`. The line carries the cell id, the identity and the time — never cell content. |
 
 ### Where encrypted cells are stored
 
@@ -227,12 +233,14 @@ working defaults.
 | `SAIHM_MASTER_SECRET_FILE` | see note | Path to a **mode-600** file holding the hex master secret. **The preferred way to supply a key**, because it keeps the key out of a config file that may be synced or shared. Takes precedence over `SAIHM_MASTER_SECRET_HEX`. |
 | `SAIHM_MASTER_SECRET_HEX` | see note | The master secret inline, ≥ 64 hex characters (≥ 32 bytes), high-entropy, client-held, never sent. Prefer the file form: anything inline lands in the config file itself. |
 | `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool — the one that answers *"Join SAIHM"*. **On by default**; set to `0` to remove it and expose only the canonical eight tools. |
-| `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600) and where per-restart bookkeeping is kept. Defaults to `~/.saihm`. |
+| `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600), where per-restart bookkeeping is kept, and where the erasure feed is written unless `SAIHM_ERASURE_FEED_DIR` overrides it. Defaults to `~/.saihm`. |
 | `SAIHM_AUTH_HEADER` | no | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended) — the client mints and refreshes its own token, so there is nothing to paste or re-paste. |
 | `SAIHM_TIER` | self-onboard only | Plan label recorded in encrypted metadata (`FREE`, `PRO`, …). Required when self-onboarding; otherwise resolved via `status()`. |
 | `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. |
 | `SAIHM_SEQ_STATE_PATH` | no | Overrides where the anti-rollback bookkeeping is written. Running as an MCP server this is **on by default** at `$SAIHM_HOME/seq.<id>.json`; set it only to relocate it. The default location is ours to manage: if it can't be written, the tally stays in memory for the session and `status` says so. A location **you** set is yours: if it can't be written, calls fail and name the path, so a safeguard you asked for never goes quiet without telling you. `status` reports this as `seq-state=…` followed by `rollback-guard=persisting` (writes still work, so the next one rewrites the file) or `memory-only-this-run` (it retries at the next restart). Either way, if the file couldn't be READ at startup the safeguard starts from scratch and rebuilds as each memory is next read — so an older copy of a memory would not be caught during that window. At the default location that window is about accidental corruption rather than an attacker: writing to that file takes the same access that reads the identity key sitting beside it. Somewhere you relocate it to, that no longer follows — give it the protection you give `$SAIHM_HOME`. |
 | `SAIHM_STATE_DIR` | no | Where transient operator state (such as `checkout-url.txt`) is written. Does **not** relocate your identity or its bookkeeping. |
+| `SAIHM_ERASURE_FEED` | no | Controls the erasure feed — one line appended per `forget`, so a consumer can drop whatever it derived from that cell. **On by default**; set to `0` to write nothing. Writing the line can never fail an erasure: the erasure is what you asked for and the line is a notification about it, so a feed that can't be written is reported beside the result and the erasure still stands. |
+| `SAIHM_ERASURE_FEED_DIR` | no | Overrides the feed's root. Defaults to `SAIHM_HOME`, then `~/.saihm`; the feed itself is at `<root>/tenants/<agentIdHash>/erasures.ndjson`, and the directory is created the first time a tool runs. Must be an **absolute** path — a relative one resolves against the working directory, so one identity would write to a different file depending on where the process started while a consumer reported the feed missing. Deliberately **not** `SAIHM_STATE_DIR`: a feed is identity-scoped, so it has to move with the identity or not at all, and a consumer refuses a line from an identity it is not watching. |
 
 *Note:* a master secret is required, from one source or the other — but setup
 creates and configures it for you, which is why the config above has neither.

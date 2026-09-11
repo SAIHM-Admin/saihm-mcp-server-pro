@@ -2,6 +2,56 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-09-11
+
+`saihm_forget` now tells downstream consumers. No new tools, no removed tools
+and no schema change: every tool accepts exactly the input it accepted in
+`0.5.3`.
+
+### Added
+
+- **An erasure feed, so a delete here becomes a delete there.** An erasure that
+  stops at this substrate is not an erasure. Consumers derive artifacts from
+  cells — indexes, mirrors, extracted facts — and those survive a
+  `saihm_forget` unless they are told. Each erasure now appends one NDJSON line
+  to `<root>/tenants/<agentIdHash>/erasures.ndjson`, which a consumer watches
+  and fans out to whatever it derived from that cell.
+
+  The root follows the IDENTITY chain — `SAIHM_ERASURE_FEED_DIR`, then
+  `SAIHM_HOME`, then `~/.saihm`. It deliberately does not read
+  `SAIHM_STATE_DIR`: that variable relocates one unrelated artifact, and
+  honouring it here would silently split a single identity's feed across two
+  roots the first time an operator set it. The server creates the identity's
+  directory on its first tool call — measured from the packed artifact, not
+  from the code — so a consumer that polls for the directory arms its watch
+  before the first erasure rather than after it.
+
+  On by default. `SAIHM_ERASURE_FEED=0` opts out.
+
+- **Writing the line can never fail an erasure.** The erasure is what the caller
+  asked for; the feed is a notification about it. A feed that cannot be written
+  is reported as a sentence beside the result, and the erasure still stands.
+
+### Refused rather than approximated
+
+  Each of these is a way of recording an erasure WRONGLY, which is worse than
+  not recording it at all:
+
+- A **relative feed root** — it resolves against the working directory, so one
+  identity would write to a different file depending on where the process was
+  started, while a consumer reported the feed absent.
+- An **identity that is not 64 hex characters** — the feed is partitioned by
+  identity, and a consumer refuses a foreign line as a wiring fault.
+- A **line over 1 KiB** — a truncated NDJSON line is not a short line, it is a
+  corrupt one, and it corrupts the line after it once the newline is lost.
+- A **cell id over 64 characters** — a truncated pointer is not a shorter
+  pointer, it is a different one, and a consumer that matches it would purge an
+  artifact derived from some other cell.
+- A **tenant directory that already holds state and no feed file** — the
+  `tenants/<identity>` layout is not unique to this feed, so a root pointed at
+  another store's base directory would place the feed inside a tree whose owner
+  deletes it wholesale when that identity is erased.
+
 ## [0.5.3] — 2026-09-03
 
 The client now owns its HTTP transport. No new tools, no removed tools and no
