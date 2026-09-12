@@ -2,6 +2,42 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] — 2026-09-12
+
+One sentence spoken by the agent, and package descriptions that say who the
+package is for. No new tools, no removed tools and no schema change: every tool
+accepts exactly the input it accepted in `0.6.0`.
+
+### Changed
+
+- **The operator is told when an installed memory is not active yet.** Install
+  and activation are a two-actor handoff: a host can finish the install
+  unattended, but only the operator can say "Join SAIHM". Until now nothing
+  told the operator that a memory was sitting installed and inert. The
+  `initialize` instructions now ask the agent, when a memory tool answers that
+  there is no SAIHM memory yet on this device, to say one line to the
+  operator — *"SAIHM memory is installed but not active yet. Say 'Join SAIHM'
+  to activate the free memory."* — and then wait; `saihm_join` runs only when
+  the operator asks. The first-run error a memory tool returns carries the
+  same sentence, so the agent can relay it verbatim.
+
+  Under `SAIHM_SELF_JOIN=0` there is no `saihm_join` tool to point at, so the
+  line is not emitted and the opt-out path is unchanged.
+
+- **The package descriptions open with the free path.** The registry and npm
+  descriptions now begin "Free-to-start portable memory for AI agents" and end
+  with "Join SAIHM", so the way in is visible in the first sentence rather than
+  one level down in an environment-variable note. The standards client,
+  `@saihm/mcp-server`, says the converse in its own release.
+
+### Refused rather than approximated
+
+- A `postinstall` script that prints the activation line. Hosts spawn the
+  server with `npx -y`, so its output lands in the host's log, not in front of
+  the operator; a stdio server must never write to stdout; and a lifecycle
+  script is a supply-chain smell this package does not want to carry. The
+  operator reads the agent's reply, so the agent is told exactly what to say.
+
 ## [0.6.0] — 2026-09-11
 
 `saihm_forget` now tells downstream consumers. No new tools, no removed tools
@@ -1137,6 +1173,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.6.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.1
 [0.6.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.0
 [0.5.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.3
 [0.5.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.2

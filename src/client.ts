@@ -2245,7 +2245,7 @@ export class SaihmProClient {
       // surfacing a raw env-var error (a memory tool was called before `saihm_join`).
       if (selfJoinEnabled())
         throw new Error(
-          'No SAIHM memory yet on this device. Ask me to "Join SAIHM" first (the saihm_join tool) to create your free memory, then try again.',
+          'No SAIHM memory yet on this device. Tell the operator: "SAIHM memory is installed but not active yet. Say \'Join SAIHM\' to activate the free memory." When they ask, run the saihm_join tool to create their free memory, then try again.',
         );
       throw new Error(
         'SAIHM_MASTER_SECRET_HEX (or SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars).' +

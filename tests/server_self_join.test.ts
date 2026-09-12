@@ -305,6 +305,51 @@ test('saihm_join OPT-OUT: SAIHM_SELF_JOIN=0 => canonical 8 tools, no saihm_join 
   }
 });
 
+test('saihm_join DEFAULT: initialize instructions tell the agent to surface the operator activation line', async () => {
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const home = mkdtempSync(join(tmpdir(), 'saihm-selfjoin-instr-on-'));
+  const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home });
+  try {
+    const init = await d.rpc(1, 'initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 't', version: '0' },
+    });
+    const instr = String(init.result.instructions ?? '');
+    assert.match(instr, /persistent memory/, 'base instructions must still be present');
+    assert.match(instr, /installed but not active yet/, 'operator activation line must be present when self-join is on');
+    assert.match(instr, /Join SAIHM/);
+    assert.match(instr, /saihm_join/);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('saihm_join OPT-OUT: initialize instructions carry no operator activation line (no saihm_join to point at)', async () => {
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const home = mkdtempSync(join(tmpdir(), 'saihm-selfjoin-instr-off-'));
+  const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '0' });
+  try {
+    const init = await d.rpc(1, 'initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 't', version: '0' },
+    });
+    const instr = String(init.result.instructions ?? '');
+    assert.match(instr, /persistent memory/, 'base instructions must still be present (guards a vacuous pass on an empty string)');
+    assert.doesNotMatch(instr, /installed but not active yet/);
+    assert.doesNotMatch(instr, /saihm_join/);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('saihm_join DEFAULT: flag unset => saihm_join is exposed alongside the canonical 8', async () => {
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));

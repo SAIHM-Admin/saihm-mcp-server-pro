@@ -177,6 +177,7 @@ test('bootFromEnv: DEFAULT (flag unset) + no identity => friendly "Join SAIHM" h
   try {
     withEnv({ SAIHM_ENDPOINT_URL: 'https://x.test/mcp', SAIHM_HOME: home }, () => {
       assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
+      assert.throws(() => SaihmProClient.bootFromEnv(), /installed but not active yet/);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -188,6 +189,7 @@ test('bootFromEnv: flag ON + no identity => friendly "Join SAIHM" hint', () => {
   try {
     withEnv({ SAIHM_ENDPOINT_URL: 'https://x.test/mcp', SAIHM_SELF_JOIN: '1', SAIHM_HOME: home }, () => {
       assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
+      assert.throws(() => SaihmProClient.bootFromEnv(), /installed but not active yet/);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });

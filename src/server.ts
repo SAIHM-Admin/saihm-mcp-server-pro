@@ -80,7 +80,14 @@ const server = new McpServer(
     // Sent ONCE in the `initialize` result, not per tool call, and it is the only place the custody
     // property can be stated for the whole server rather than repeated in all eight descriptions.
     instructions:
-      "SAIHM is this agent's persistent memory across sessions, models and vendors. Memories are encrypted and decrypted in this process; the key never leaves it. Load your memory before other work, and erase only when erasure is intended — it is cryptographic and irreversible.",
+      "SAIHM is this agent's persistent memory across sessions, models and vendors. Memories are encrypted and decrypted in this process; the key never leaves it. Load your memory before other work, and erase only when erasure is intended — it is cryptographic and irreversible." +
+      // Install and activation are a two-actor handoff: the agent can finish the install unattended, only the
+      // operator can say "Join SAIHM". Without this line the operator is never told that an installed memory is
+      // sitting inert (funnel audit 2026-09-11, F5). Conditional because under SAIHM_SELF_JOIN=0 there is no
+      // saihm_join tool to point at.
+      (selfJoinEnabled()
+        ? ' If a memory tool answers that there is no SAIHM memory yet on this device, tell the operator in one line: "SAIHM memory is installed but not active yet. Say \'Join SAIHM\' to activate the free memory." Then wait; call saihm_join only when they ask.'
+        : ''),
   },
 );
 
