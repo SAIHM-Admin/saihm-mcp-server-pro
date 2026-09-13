@@ -2,6 +2,31 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] — 2026-09-13
+
+A fix for the recall cache and a clearer install step. No new tools, no removed
+tools and no schema change: every tool accepts exactly the input it accepted in
+`0.7.0`.
+
+### Fixed
+
+- **A forgotten memory can no longer come back through another session's
+  recall cache.** Two MCP server sessions using the same identity file share one
+  recall cache. In `0.7.0`, if one session saved its cache while the other was
+  forgetting a memory, the save could write the forgotten memory's plaintext
+  back into the file. Forget now records the erasure before it removes the
+  memory, and saves and forgets take turns through a lock file beside the cache.
+  A lock left behind by a process that has exited is taken over. If the lock
+  cannot be taken within a few seconds, forget still destroys the memory's key
+  and says that a local copy may remain until the next successful save.
+
+### Changed
+
+- **Install instructions.** After installing, the agent tells the user that
+  memory is installed but not yet active and that saying "Join SAIHM" activates
+  it, whether or not the user asked, and calls `saihm_join` only when the user
+  says so.
+
 ## [0.7.0] — 2026-09-13
 
 Recall asks only for what is new. No new tools, no removed tools and no schema
@@ -1196,6 +1221,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.7.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.1
 [0.7.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.0
 [0.6.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.1
 [0.6.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.0
@@ -1217,4 +1243,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.7.1...HEAD

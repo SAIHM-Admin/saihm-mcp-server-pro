@@ -52,10 +52,16 @@ confirm `npx` is on `PATH`.
 Do not call `saihm_join` as a smoke test — see below. To verify liveness
 without side effects, `saihm_status` is read-only.
 
-## Step 3 — activation (only when the user asks)
+## Step 3 — tell the user (always)
 
-Tell the user that memory is installed but not yet activated, and that saying
-**"Join SAIHM"** activates it. When they do, call `saihm_join`. It generates a
+Once the tools appear, tell the user that memory is installed but not yet
+activated, and that saying **"Join SAIHM"** activates it. Do this whether or
+not they asked: they cannot ask for something they do not know exists. Say it
+once, in your own words, and do not call `saihm_join` yourself.
+
+## Step 4 — activation (only when the user says "Join SAIHM")
+
+When they do, call `saihm_join`. It generates a
 32-byte master secret locally at `~/.saihm/free-identity.key` (mode 600) and
 returns a one-time device sign-in link plus a short code; the user opens the
 link, enters the code, and approves. That step confirms a unique person. The

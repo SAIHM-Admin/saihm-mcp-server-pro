@@ -360,7 +360,7 @@ test('every test that forgets pins the feed root away from $HOME', () => {
 });
 
 
-// Sankofa asked for this refusal on the WRITER side (ERASURE-FEED-0911c): her consumer hard-codes
+// A consumer asked for this refusal on the WRITER side: it hard-codes
 // `tenants/<identity>/erasures.ndjson` and will not rename, so the writer is the half that can
 // notice it is about to append into a directory some other store already owns. Every refusal arm
 // here is paired with the permissive arm next to it - a guard that refuses everything would pass

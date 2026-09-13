@@ -1104,6 +1104,12 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     },
     'client.ts': {
       MAX_ERROR_CODE_CHARS: 64,
+      // The recall cache's cross-process write lock (two sessions of one identity on one cache file). Not render
+      // budgets: how long a save or a forget waits for another live session, when a lock is abandoned, and how long
+      // an empty lock (created but not yet written) is treated as being written.
+      RECALL_CACHE_LOCK_WAIT_MS: 5000,
+      RECALL_CACHE_LOCK_STALE_MS: 30000,
+      RECALL_CACHE_LOCK_MALFORMED_GRACE_MS: 1000,
       // TCP keep-alive probe interval for the client's own HTTP agent. Not a render budget and
       // not an idle cap — socket lifetime is bounded by the server, measured at >180 s. Pinned
       // here because this sweep reads SOURCE and a declared constant must be a stated fact.
@@ -2155,7 +2161,12 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // same-named methods in one module summed here, so a call MOVED between them left the total
     // unchanged. Keyed by enclosing function, that move is now visible.
     'client.ts:flushMarks': 4, // SeqState's writer
-    'client.ts:persist': 4, // RecallCache's writer
+    'client.ts:persistLocked': 4, // RecallCache's writer (`persist` now takes the write lock and calls it)
+    // FOUR, and none of them writes the cache: `withWriteLock` creates `<cache>.lock` (and its directory) and removes
+    // it twice (an abandoned lock, then its own on release). Its failure is a thrown lock error that carries no path,
+    // and it reaches callers only through `persist`, whose routes are the ones this test sweeps, or through `forget`,
+    // which catches it and reports a residual.
+    'client.ts:withWriteLock': 4,
     'server.ts:persistCheckoutUrl': 4, // writes the checkout URL, and is already wrapped
     // ONE, and it is an UNLINK, not a write to the cache. `sweepStaleIdentityTemps` removes
     // orphaned `<identity>.tmp.*` files stranded by a hard kill between the atomic write and the
@@ -3595,10 +3606,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // A parameter declaration and two call arguments. None reaches a rendered line: the value is
       // used to derive a directory and a startsWith prefix, and the function returns a count.
       keyPath: 16,
-      // SEVEN OCCURRENCES, not seven lines: the delete/rewrite carries three on one line (the
+      // EIGHT OCCURRENCES, not eight lines: the delete/rewrite carries three on one line (the
       // condition, the property write and the value read). A count of occurrences described as a
-      // list of lines reads as an off-by-two to anyone who checks it.
-      localCacheResidual: 7,
+      // list of lines reads as an off-by-two to anyone who checks it. The eighth is the recall cache
+      // lock residual in `forget`, built from the same `where` as the purge residual and rendered the same way.
+      localCacheResidual: 8,
       // SEVEN, the same count and the same shape as its sibling above, which is the point: the field
       // declaration, the `delete out.feedResidual` that strips any endpoint-supplied value of this
       // name before ours is set, and the guarded assignment. It tracks `localCacheResidual` exactly

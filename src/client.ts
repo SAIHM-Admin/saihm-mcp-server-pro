@@ -1913,6 +1913,21 @@ class SeqState {
 // client coherent with its OWN writes. A different client/session sharing the same cache path would
 // not observe that update until it re-reads the cell — the same single-writer contract the seq store
 // already carries; document + serialize same-cell writes across clients if you need both to land.
+const RECALL_CACHE_LOCK_WAIT_MS = 5_000;
+const RECALL_CACHE_LOCK_STALE_MS = 30_000;
+const RECALL_CACHE_LOCK_MALFORMED_GRACE_MS = 1_000;
+const LOCK_WAIT_CELL = new Int32Array(new SharedArrayBuffer(4));
+
+/** True unless the process is known to be gone (EPERM means it exists under another user). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 class RecallCache {
   private cells = new Map<string, RecalledCell>();
   // Bumped by every mutation that actually changed something. A recall snapshots this BEFORE its
@@ -1997,6 +2012,11 @@ class RecallCache {
 
   private persist(): void {
     if (this.path === undefined) return;
+    this.withWriteLock(() => this.persistLocked());
+  }
+
+  private persistLocked(): void {
+    if (this.path === undefined) return;
     this.dropErased();
     const obj: Record<string, RecalledCell> = {};
     for (const [id, c] of this.cells) obj[id] = c;
@@ -2024,6 +2044,79 @@ class RecallCache {
         /* never created, or already gone */
       }
       throw e;
+    }
+  }
+
+  // CROSS-PROCESS WRITE LOCK. Two sessions of one identity can share this file. Measured against 0.7.0 with two real
+  // processes: a forget removed the cell and only then appended its erasure line, and a save by the other session that
+  // landed between the two had read the feed before the line existed, so it wrote the forgotten cell's plaintext back
+  // while the forget reported nothing. Every save now reads the feed and renames under `<path>.lock`, and `forget`
+  // appends the line and removes the cell under the same lock, so a save either lands before the erasure (and the
+  // forgetting session's own write replaces it) or reads the feed after the line exists (and drops the cell).
+  // Re-entrant within one process (a forget holds it across the removal's own save). A lock whose holder process is
+  // gone, or that is older than RECALL_CACHE_LOCK_STALE_MS, is taken over; a live holder past RECALL_CACHE_LOCK_WAIT_MS
+  // makes the call throw, which every caller already reports as a residual.
+  private lockDepth = 0;
+
+  withWriteLock<T>(fn: () => T): T {
+    if (this.path === undefined) return fn();
+    if (this.lockDepth > 0) {
+      this.lockDepth++;
+      try {
+        return fn();
+      } finally {
+        this.lockDepth--;
+      }
+    }
+    // Pinned like the directory the cache itself creates (see persistLocked).
+    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+    const lock = `${this.path}.lock`;
+    const token = `${process.pid} ${Date.now()} ${randomBytes(8).toString('hex')}`;
+    const deadline = Date.now() + RECALL_CACHE_LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        writeFileSync(lock, token, { mode: 0o600, flag: 'wx' });
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      }
+      let holder: string;
+      let age: number;
+      try {
+        holder = readFileSync(lock, 'utf-8');
+        age = Date.now() - statSync(lock).mtimeMs;
+      } catch {
+        continue; // released between the create and the read
+      }
+      const pid = Number(holder.split(' ')[0]);
+      // An empty or unparseable lock is one being written right now (the create and the write are two steps), so it
+      // is only taken over once it is clearly abandoned.
+      const wellFormed = Number.isInteger(pid) && pid > 0;
+      const abandoned =
+        age > RECALL_CACHE_LOCK_STALE_MS || (wellFormed ? !processAlive(pid) : age > RECALL_CACHE_LOCK_MALFORMED_GRACE_MS);
+      if (abandoned) {
+        try {
+          if (readFileSync(lock, 'utf-8') === holder) unlinkSync(lock);
+        } catch {
+          /* its owner or another waiter got there first */
+        }
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`the recall cache is locked by process ${wellFormed ? pid : 'unknown'}`);
+      }
+      Atomics.wait(LOCK_WAIT_CELL, 0, 0, 5);
+    }
+    this.lockDepth = 1;
+    try {
+      return fn();
+    } finally {
+      this.lockDepth = 0;
+      try {
+        if (readFileSync(lock, 'utf-8') === token) unlinkSync(lock);
+      } catch {
+        /* already gone */
+      }
     }
   }
 
@@ -3762,14 +3855,16 @@ export class SaihmProClient {
     // happened, so the residual is bounded — the next successful persist rewrites the file without
     // this cell — but "it will probably fix itself" is not something to leave unsaid on an erasure.
     let localCacheResidual: string | undefined;
-    try {
-      this.recallCache.remove(cellId);
-    } catch {
-      const where = this.recallCache.cachePath ?? 'the configured recall cache';
-      localCacheResidual =
-        `the DEK is destroyed and this cell is unrecoverable, but the local plaintext cache could ` +
-        `not be purged: plaintext may remain in ${where} until the next successful cache write`;
-    }
+    const purgeCache = (): void => {
+      try {
+        this.recallCache.remove(cellId);
+      } catch {
+        const where = this.recallCache.cachePath ?? 'the configured recall cache';
+        localCacheResidual =
+          `the DEK is destroyed and this cell is unrecoverable, but the local plaintext cache could ` +
+          `not be purged: plaintext may remain in ${where} until the next successful cache write`;
+      }
+    };
     // Tell anything downstream that derived from this cell. The erasure is ALREADY irreversible, so
     // this cannot be allowed to throw: the pre-erase ordering that makes an append failure fatal is
     // only constructible where the erasure is performed, and it is performed remotely. Report both
@@ -3798,14 +3893,36 @@ export class SaihmProClient {
     // needs to hear about this class, the honest fix is a field on the line the receipt ALREADY
     // renders, never a second conditional line.
     let feedResidual: string | undefined;
-    if (erasureFeedEnabled() && cellId.length > 0 && cellId.length <= MAX_FEED_CELL_ID_CHARS) {
-      feedResidual = emitErasureLineReporting({
-        cellId,
-        agentIdHash: this.agentIdHashHex,
-        at: new Date().toISOString(),
-        complete: false,
-        source: 'mcp-client',
+    const appendFeed = (): void => {
+      if (erasureFeedEnabled() && cellId.length > 0 && cellId.length <= MAX_FEED_CELL_ID_CHARS) {
+        feedResidual = emitErasureLineReporting({
+          cellId,
+          agentIdHash: this.agentIdHashHex,
+          at: new Date().toISOString(),
+          complete: false,
+          source: 'mcp-client',
+        });
+      }
+    };
+    // ORDER AND LOCK: the erasure line first, then the removal, both under the recall cache's cross-process write lock
+    // (see RecallCache.withWriteLock for the two-session measurement this closes). If another live session holds the
+    // lock past the wait, the erasure line is still written (so every later save, including this session's, drops the
+    // cell), the file is not rewritten (that needs the lock), and the receipt says the plaintext may still be on disk.
+    let erasedLocally = false;
+    try {
+      this.recallCache.withWriteLock(() => {
+        erasedLocally = true;
+        appendFeed();
+        purgeCache();
       });
+    } catch {
+      if (!erasedLocally) {
+        appendFeed();
+        const where = this.recallCache.cachePath ?? 'the configured recall cache';
+        localCacheResidual =
+          `the DEK is destroyed and this cell is unrecoverable, but the recall cache lock could not be taken, so ` +
+          `the local plaintext cache was not purged: plaintext may remain in ${where} until the next successful cache write`;
+      }
     }
 
     // The endpoint's claim is DELETED before ours is set, not merely overwritten. `r` is an
