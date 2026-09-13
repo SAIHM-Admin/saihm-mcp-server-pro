@@ -2,6 +2,29 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-09-13
+
+Recall asks only for what is new. No new tools, no removed tools and no schema
+change: every tool accepts exactly the input it accepted in `0.6.1`.
+
+### Changed
+
+- **The MCP server keeps a recall cache by default.** When your key is the
+  self-join identity file in `SAIHM_HOME`, the server keeps the memories it has
+  already opened in `$SAIHM_HOME/recall.<id>.json` — unencrypted, mode 600,
+  beside the key — and asks the endpoint only for memories it does not hold yet,
+  so recall no longer grows with everything you have stored. The cache follows
+  your own `remember` and `forget`, and drops memories erased elsewhere at the
+  next recall.
+
+- **`SAIHM_RECALL_CACHE=0` keeps no local copy**, even when
+  `SAIHM_RECALL_CACHE_PATH` is set. An inline key (`SAIHM_MASTER_SECRET_HEX`) or
+  a key file placed anywhere else keeps the previous behaviour: no cache unless
+  `SAIHM_RECALL_CACHE_PATH` names one.
+
+- **Library callers are unchanged.** A client constructed directly still writes
+  nothing; `persistRecallCache: true` opts into the default location.
+
 ## [0.6.1] — 2026-09-12
 
 One sentence spoken by the agent, and package descriptions that say who the
@@ -1173,6 +1196,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.7.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.0
 [0.6.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.1
 [0.6.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.0
 [0.5.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.5.3

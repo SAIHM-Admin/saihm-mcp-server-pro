@@ -43,9 +43,13 @@
  *                           so unset now means "the default location", not "no persistence". A
  *                           library caller constructing the client directly still gets nothing on
  *                           disk unless it sets this or passes `persistSeqState`.
- *   SAIHM_RECALL_CACHE_PATH optional path (mode 600); when set, `recall` runs in DELTA mode —
- *                           it fetches only cells not already cached, cutting a session-start
- *                           recall from O(all cells) to O(new). Holds plaintext at rest ⇒ opt-in.
+ *   SAIHM_RECALL_CACHE_PATH path (mode 600) of the recall cache; with a cache, `recall` runs in DELTA
+ *                           mode — it fetches only cells not already cached, cutting a recall from
+ *                           O(all cells) to O(new). Holds plaintext at rest. The MCP server's boot
+ *                           path turns the cache ON by default at `dirname(defaultIdentityPath())/
+ *                           recall.<id>.json` when this identity boots from that default key file;
+ *                           set this to relocate it or to enable it for any other identity source.
+ *   SAIHM_RECALL_CACHE      `0` turns the recall cache off, default and explicit path alike.
  *
  * Concurrency: writes to DISTINCT cells are safe to run concurrently. Concurrent updates to the
  * SAME cell are single-writer by contract — the server's monotonic-seq guard rejects the loser with
@@ -100,6 +104,8 @@ import {
   MAX_FEED_CELL_ID_CHARS,
   emitErasureLineReporting,
   ensureTenantDir,
+  feedPathFor,
+  resolveFeedRoot,
 } from './erasure-feed.js';
 import type {
   ClientIdentity,
@@ -936,6 +942,12 @@ export interface SaihmProClientOpts {
    */
   recallCachePath?: string;
   /**
+   * Use {@link defaultRecallCachePath} when `recallCachePath` is not given. Off unless asked for, on
+   * the same asymmetry as `persistSeqState`: a directly-constructed client writes nothing. `bootFromEnv`
+   * turns it on for an identity booted from the default key file, unless `SAIHM_RECALL_CACHE=0`.
+   */
+  persistRecallCache?: boolean;
+  /**
    * The proof-of-entitlement rail (`"stripe"`, `"stablecoin"`, …) used when SELF-ONBOARDING (i.e.
    * no static `authHeader`). Sent in the `/api/onboard` request alongside the ML-DSA-signed nonce.
    * Required for self-onboarding; ignored when a static `authHeader` is supplied.
@@ -1064,6 +1076,53 @@ export function defaultIdentityPath(): string {
  */
 export function defaultSeqStatePath(agentIdHashHex: string): string {
   return pathJoin(dirname(defaultIdentityPath()), `seq.${agentIdHashHex.slice(0, 16)}.json`);
+}
+
+/**
+ * Where the recall cache lives when the MCP server turns it on by default.
+ *
+ * Beside the default key file and the sequence marks, for the reasons given on
+ * {@link defaultSeqStatePath}: the cache is identity-scoped, so it moves with the identity or not at
+ * all, and it is named by the identity's hash so two identities sharing a home never read each
+ * other's cells. The default only applies to an identity that boots from this same default key file
+ * — see `bootFromEnv` — because that is the one installation where this process already keeps
+ * secret material in this directory.
+ */
+export function defaultRecallCachePath(agentIdHashHex: string): string {
+  return pathJoin(dirname(defaultIdentityPath()), `recall.${agentIdHashHex.slice(0, 16)}.json`);
+}
+
+/**
+ * The cellIds this identity's erasure feed records, re-read only when the feed file changed. Never
+ * throws: no feed yet, an unreadable one or a misconfigured root all mean "nothing known to be erased",
+ * which leaves the cache exactly as it was before this reader existed.
+ */
+function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlySet<string> {
+  let seen = '';
+  let ids: ReadonlySet<string> = new Set<string>();
+  return () => {
+    try {
+      const file = feedPathFor(resolveFeedRoot(), agentIdHashHex);
+      const st = statSync(file);
+      const key = `${st.size}:${st.mtimeMs}`;
+      if (key !== seen) {
+        const next = new Set<string>();
+        for (const line of readFileSync(file, 'utf-8').split('\n')) {
+          try {
+            const r = JSON.parse(line) as { cellId?: unknown };
+            if (typeof r.cellId === 'string') next.add(r.cellId);
+          } catch {
+            /* a torn or empty line names no cell */
+          }
+        }
+        ids = next;
+        seen = key;
+      }
+    } catch {
+      /* nothing known to be erased */
+    }
+    return ids;
+  };
 }
 
 /**
@@ -1863,9 +1922,33 @@ class RecallCache {
   // both silently, both defeating the self-write coherence this class exists to provide. A plain
   // counter is enough because the only question asked of it is "did anything change", never "what".
   private mutations = 0;
-  constructor(private readonly path?: string) {
+  constructor(
+    private readonly path?: string,
+    private readonly erasedElsewhere?: () => ReadonlySet<string>,
+  ) {
     if (this.path) this.load();
   }
+
+  /**
+   * Drop every cell this identity has erased in ANY session. `forget` appends to the identity's erasure
+   * feed; a second running session that still holds the cell in memory would otherwise write its
+   * plaintext back on its next save — after the endpoint's copy was crypto-shredded, the only plaintext
+   * left. Applied after load and before every save. With the feed off (SAIHM_ERASURE_FEED=0) the next
+   * recall's live-cell list is what evicts it. A cellId written again after its erasure is only fetched
+   * again on each recall instead of being cached — slower, never stale.
+   */
+  private dropErased(): boolean {
+    const erased = this.erasedElsewhere?.();
+    if (!erased) return false;
+    let dropped = false;
+    for (const id of erased) if (this.cells.delete(id)) dropped = true;
+    return dropped;
+  }
+
+  // The FILE still holds plaintext of a cell dropped at load. Memory no longer knows the cell, so a
+  // `forget` of it would find nothing to remove and leave the plaintext on disk without saying so;
+  // this flag makes that forget rewrite the file anyway — and report the residual if it cannot.
+  private erasedOnDisk = false;
 
   get configured(): boolean {
     return this.path !== undefined;
@@ -1907,10 +1990,14 @@ class RecallCache {
         this.cells.set(cellId, { cellId, plaintext: c.plaintext, seq: c.seq, commitmentHash: c.commitmentHash });
       }
     }
+    // No write from a constructor: the next save rewrites the file, and a forget of the dropped cell
+    // does so even though memory no longer holds it (see `erasedOnDisk`).
+    if (this.dropErased()) this.erasedOnDisk = true;
   }
 
   private persist(): void {
     if (this.path === undefined) return;
+    this.dropErased();
     const obj: Record<string, RecalledCell> = {};
     for (const [id, c] of this.cells) obj[id] = c;
     // `mode` applies ONLY when the directory is CREATED — an existing one keeps its own
@@ -1922,6 +2009,7 @@ class RecallCache {
     writeFileSync(tmp, JSON.stringify(obj), { mode: 0o600, flag: 'wx' });
     try {
       renameSync(tmp, this.path); // atomic; inherits the tmp file's 0600 mode
+      this.erasedOnDisk = false;
     } catch (e) {
       // The tmp already holds the full contents. Nothing in this package sweeps stale tmp files, and
       // no later purge reaches one: `forget()` and a delta recall both rewrite `<path>`, which the tmp
@@ -1989,7 +2077,7 @@ class RecallCache {
    *  endpoint has crypto-shredded (delta would not re-list it, so it must be removed here). */
   remove(cellId: string): void {
     if (this.path === undefined) return;
-    if (this.cells.delete(cellId)) {
+    if (this.cells.delete(cellId) || this.erasedOnDisk) {
       this.mutations++;
       this.persist();
     }
@@ -2040,7 +2128,13 @@ export class SaihmProClient {
       opts.seqStatePath,
       opts.persistSeqState === true,
     );
-    this.recallCache = new RecallCache(opts.recallCachePath);
+    const recallCachePath =
+      opts.recallCachePath ??
+      (opts.persistRecallCache === true ? defaultRecallCachePath(this.agentIdHashHex) : undefined);
+    this.recallCache = new RecallCache(
+      recallCachePath,
+      recallCachePath !== undefined && erasureFeedEnabled() ? erasedCellIdsReader(this.agentIdHashHex) : undefined,
+    );
     // Create this identity's erasure-feed directory NOW, while the identity is being loaded, rather
     // than lazily at the first `forget`. A downstream consumer can arm a directory watch on a
     // directory that exists; a missing one leaves it polling until something appears, so an erasure
@@ -2270,13 +2364,15 @@ export class SaihmProClient {
     // same function, so they cannot disagree, and an operator who points the variable AT the
     // self-join file is told the truth either way.
     const selfJoinIdentity = defaultIdentityPath();
-    const secretSource: { label: string; kind: 'path' | 'env' } = secretFile
+    // `defaultKey` rides on the same comparison: the recall-cache default below applies only to the
+    // self-join identity file, however this process was pointed at it.
+    const secretSource: { label: string; kind: 'path' | 'env'; defaultKey: boolean } = secretFile
       ? secretFile === selfJoinIdentity
-        ? { label: `the self-join identity file ${secretFile}`, kind: 'path' }
-        : { label: `SAIHM_MASTER_SECRET_FILE ${secretFile}`, kind: 'path' }
+        ? { label: `the self-join identity file ${secretFile}`, kind: 'path', defaultKey: true }
+        : { label: `SAIHM_MASTER_SECRET_FILE ${secretFile}`, kind: 'path', defaultKey: false }
       : process.env.SAIHM_MASTER_SECRET_HEX
-        ? { label: 'SAIHM_MASTER_SECRET_HEX', kind: 'env' }
-        : { label: `the self-join identity file ${selfJoinIdentity}`, kind: 'path' };
+        ? { label: 'SAIHM_MASTER_SECRET_HEX', kind: 'env', defaultKey: false }
+        : { label: `the self-join identity file ${selfJoinIdentity}`, kind: 'path', defaultKey: true };
     const badSecret = (why: string): Error =>
       secretSource.kind === 'path'
         ? new SaihmConfigError(`${secretSource.label} ${why}.` + setupHint(), 'path')
@@ -2307,7 +2403,14 @@ export class SaihmProClient {
     // THE SERVER OPTS IN here too, and only here. Same boundary as the line above: this is the
     // process that performs erasures, so this is the process whose consumer has something to watch.
     opts.ensureErasureFeedDir = true;
-    if (optRecallCachePath) opts.recallCachePath = optRecallCachePath;
+    // THE SERVER OPTS IN to the recall cache too, but by default only for an identity booted from the
+    // default key file in SAIHM_HOME: that installation already keeps the key and its sequence marks in
+    // that directory. An inline secret, or a key file placed elsewhere, means the operator decided where
+    // state lives, so the cache stays off there unless SAIHM_RECALL_CACHE_PATH names a file.
+    // SAIHM_RECALL_CACHE=0 turns it off in every case, an explicit path included.
+    const recallCacheOff = process.env.SAIHM_RECALL_CACHE === '0';
+    if (!recallCacheOff && optRecallCachePath) opts.recallCachePath = optRecallCachePath;
+    else if (!recallCacheOff && secretSource.defaultKey) opts.persistRecallCache = true;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
