@@ -2,6 +2,37 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-09-14
+
+Follow the shares made to you as they change, without listing them on every
+recall. Opt-in (`SAIHM_EVENTS=1`); no new tools and no removed tools. With the
+switch unset, nothing new runs.
+
+### Added
+
+- **Share events (opt-in).** With `SAIHM_EVENTS=1`, the server long-polls the
+  endpoint for changes to the shares made to you (new, updated, stale, ended
+  and erased), and `saihm_recall` returns them as `shareStates` beside `shared`
+  when it lists memories. Each entry carries its grant, the sharer's latest
+  write sequence and commitment when known, and `senderVerified`, which becomes
+  true only after a read checked the sharer's signature. The map is kept in
+  memory and starts again when the server restarts. The README section
+  *Following shares* says how to read it safely: when a cached copy counts as
+  erased, and when a missing entry means anything.
+- To catch up after a gap, the client asks the endpoint for the shares made to
+  it alone, never opens its own memories for this, and retries a listing that
+  failed or was incomplete after a growing delay.
+- A share that cannot be opened with the key it carries is marked `stale` in
+  `shareStates` until an update names it again.
+- `startShareEvents()`, `shareStates()` and `stopShareEvents()` on
+  `SaihmProClient`, for library use.
+
+### Notes
+
+- Endpoints that do not offer share events are left alone: nothing polls.
+- The feed stops when the host closes the server's input, so the server exits
+  as it does without the feed.
+
 ## [0.8.0] — 2026-09-14
 
 Shared memories stay readable after they are updated. No new tools and no
@@ -1256,6 +1287,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.9.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.9.0
 [0.8.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.8.0
 [0.7.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.1
 [0.7.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.0

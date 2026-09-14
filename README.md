@@ -243,6 +243,7 @@ working defaults.
 | `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. Defaults to `$SAIHM_HOME/recall.<id>.json` for the self-join identity; setting it turns the cache on for any key source. `SAIHM_RECALL_CACHE=0` still turns it off. |
 | `SAIHM_STATE_DIR` | no | Where transient operator state (such as `checkout-url.txt`) is written. Does **not** relocate your identity or its bookkeeping. |
 | `SAIHM_ERASURE_FEED` | no | Controls the erasure feed — one line appended per `forget`, so a consumer can drop whatever it derived from that cell. **On by default**; set to `0` to write nothing. Writing the line can never fail an erasure: the erasure is what you asked for and the line is a notification about it, so a feed that can't be written is reported beside the result and the erasure still stands. |
+| `SAIHM_EVENTS` | no | Set to `1` to follow share events: the server long-polls the endpoint for shares made to you (new, updated, stale, ended, erased) and returns them as `shareStates` in the result of `saihm_recall` when it lists memories, beside `shared` (see *Following shares* below). **Off by default.** The map is kept in memory, so it starts again when the server restarts; a sender is marked verified only after a shared memory is read and its signature checked. Endpoints that do not offer events are left alone. |
 | `SAIHM_ERASURE_FEED_DIR` | no | Overrides the feed's root. Defaults to `SAIHM_HOME`, then `~/.saihm`; the feed itself is at `<root>/tenants/<agentIdHash>/erasures.ndjson`, and the directory is created the first time a tool runs. Must be an **absolute** path — a relative one resolves against the working directory, so one identity would write to a different file depending on where the process started while a consumer reported the feed missing. Deliberately **not** `SAIHM_STATE_DIR`: a feed is identity-scoped, so it has to move with the identity or not at all, and a consumer refuses a line from an identity it is not watching. |
 
 *Note:* a master secret is required, from one source or the other — but setup
@@ -311,6 +312,21 @@ other agents can share to you.
 Constructing `SaihmProClient` directly writes nothing to your home directory; the
 per-restart bookkeeping is opted into by the MCP server's boot path, or by setting
 `SAIHM_SEQ_STATE_PATH` explicitly.
+
+**Following shares (optional).** With `SAIHM_EVENTS=1`, or `saihm.startShareEvents()` in your own process, the client
+long-polls the endpoint and keeps a map of the shares made to you: `saihm.shareStates()`, and `shareStates` in the
+`saihm_recall` result. Each entry names the sharer and cell, a `status` (`live`, `stale`, `ended` or `erased`), the grant,
+the sharer's latest `seq` and `commitment` when known, and `senderVerified`, which is true only after a read checked the
+sharer's signature. To read it safely:
+
+- Treat a cached copy of a shared memory as erased when its entry is `erased`, or when the copy was made before the
+  entry's `copiesInvalidBefore` (count a copy made up to 5 minutes after that time as made before it, for clock skew).
+- An entry whose `endedBy` is `reconciliation` may have been erased rather than revoked: treat its copies as possibly
+  erased.
+- Conclude anything from a missing entry only when `since` is set and `complete` is true. Until then the map may still
+  be catching up, and a `live` entry may be out of date.
+- The map lives in memory and starts again, with a new `since`, when the process restarts. `saihm.stopShareEvents()`
+  ends the polling.
 
 **Errors.** Non-2xx responses throw `SaihmEndpointError` carrying `status` and a
 typed `code` (e.g. `BLIND_BAD_EXPIRY`, `BLIND_STALE_SEQ`,

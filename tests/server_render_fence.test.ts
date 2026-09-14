@@ -393,6 +393,8 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // than omitted so that an `ok(...)` or a `std*.write` added here - the shape that would let a feed
   // path reach an operator without passing a fence on the way - turns this red on that commit.
   'erasure-feed.ts': 0,
+  // 0 - the share events feed renders nothing; its caller surfaces the map as structured data.
+  'share-events.ts': 0,
   'index.ts': 0,
   // 0 by design - the fences themselves render nothing; they return values their callers render.
   'render_fence.ts': 0,
@@ -1108,6 +1110,9 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       // write. Not render budgets; they bound how much one write can re-issue.
       REISSUE_PAGE: 16,
       MAX_REISSUE_PAGES: 64,
+      // How often the share events feed may renew a rejected token. Not a render budget: it keeps a token that keeps
+      // failing from sending the feed to the onboarding route more than four times an hour.
+      FEED_RENEW_INTERVAL_MS: 900000,
       // The recall cache's cross-process write lock (two sessions of one identity on one cache file). Not render
       // budgets: how long a save or a forget waits for another live session, when a lock is abandoned, and how long
       // an empty lock (created but not yet written) is treated as being written.
@@ -1181,6 +1186,14 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     // `{}` says so deliberately rather than by omission — omission is what left it outside this
     // sweep in the first place. If the barrel ever re-exports one, this turns red and the author
     // states it here, which is correct: a budget on the public surface is the one consumers see.
+    // The share events feed's module-private bounds. Not render budgets: how long discovery waits after an operator
+    // offers no feed (and the daily reconciliation), the tombstone window before an operator advertises its own
+    // retention, the entries the map and an accepted listing hold, the largest cell id held, the event ids remembered
+    // for deduplication, and how reconciliations are retried and spaced.
+    'share-events.ts': {
+      DAY_MS: 86_400_000, DEFAULT_RETENTION_S: 604_800, MAX_ENTRIES: 4096, MAX_CELL_ID_BYTES: 4096, MAX_SEEN: 65536,
+      RECONCILE_RETRY_MS: 60000, RECONCILE_RETRY_MAX_MS: 3600000, RECONCILE_SPACING_MS: 10000,
+    },
     'index.ts': {},
     // Budgets, but not exports: `server.ts` exports nothing at all and calls `main()` at module
     // scope, so importing it to read them off would start a server. They are derived from its SOURCE
@@ -2025,6 +2038,9 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     // `{}` here - "renders nothing" - which was false, and the false comment sat in the guard built
     // for exactly this class while the value went out raw.
     'client.ts': { 'safePathField:MAX_PATH_FIELD_CHARS': 1 },
+    // {} - the share events feed calls no fence: it renders nothing, and its snapshot is surfaced
+    // as structured data by its caller.
+    'share-events.ts': {},
     'index.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
@@ -2667,7 +2683,7 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // `erasure-feed.ts: 0` - it reaches no `persist()`. It writes a DIFFERENT artifact through its
     // own `node:fs` calls, censused in `FS_WRITES` above; there is nothing here for a wrapper to
     // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
-    { 'client.ts': 5, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0 },
+    { 'client.ts': 5, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -2768,7 +2784,7 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // erasure is reported, so a crash leaves a line with no erasure (recoverable) rather than an
     // erasure with no line (not). A tmp-then-rename arm appearing here would mean the file had
     // started being rewritten as a whole, which is a different artifact than this one.
-    { 'client.ts': 3, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1 },
+    { 'client.ts': 3, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
 });
@@ -3202,6 +3218,7 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       memories: 'UNBOUNDED BY DESIGN: the payload, plus caller-supplied labels',
       shared: 'BOUNDED IN THE CLIENT: per field, running total, and row count',
       sharedTruncated: 'client-computed',
+      shareStates: 'BOUNDED IN THE CLIENT: hex ids, digit strings, a scope enum, cell ids within the advertised bound (at most 4,096 bytes), at most 4,096 entries',
     },
     saihm_status: {
       agentIdHash: "this client's own — never the endpoint's `agentIdHashHex`",
@@ -3647,6 +3664,9 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // narrow message budget the render site is deliberately not using.
       SAIHM_HOME: 2,
     },
+    // {} - the share events feed holds no caller-chosen value: it parses operator answers into a map
+    // that its caller returns as structured data, and renders nothing itself.
+    'share-events.ts': {},
     'index.ts': {},
     'render_fence.ts': {},
     'server.ts': {
@@ -3761,7 +3781,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // by a DIFFERENT process, possibly an older build, so it may not assume any field is present. The
   // two shapes it accepts are the two `load` accepts, and nothing read there reaches a renderer -
   // every value is either discarded by a digit test or becomes a decimal string this file wrote.
-  const ANON: Record<string, number> = { 'client.ts': 6 };
+  // share-events.ts: 4 - the feed reads its own maps whole in three internal places, never a value from outside: the
+  // cap orders entries (naming `status`, `copiesInvalidBefore` and `changedAt`), the state file is written from the
+  // entries and the seen ids, and the seen-id bound drops the oldest id (a validated hex id, used only as a key). What
+  // a caller receives is built field by field.
+  const ANON: Record<string, number> = { 'client.ts': 6, 'share-events.ts': 4 };
   // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
   // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
   // measured green, which is this round's whole lesson landing on the fix for this round's finding.

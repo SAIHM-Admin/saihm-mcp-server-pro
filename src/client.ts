@@ -99,6 +99,7 @@ import {
   ctEqual,
   SeqHighWaterMark,
 } from '@saihm/client-pro';
+import { ShareEventsFeed, type ShareEventsTransport, type ShareStates } from './share-events.js';
 import { safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
 import {
   MAX_FEED_CELL_ID_CHARS,
@@ -791,6 +792,10 @@ export type ShareReissueSkip = 'unverified' | 'no_record' | 'revoked' | 'refused
 const REISSUE_PAGE = 16;
 /** Pages followed for one write, so one write re-issues at most REISSUE_PAGE × MAX_REISSUE_PAGES grants. */
 const MAX_REISSUE_PAGES = 64;
+
+/** The share events feed renews a rejected token at most this often, so a token that keeps failing does not keep the
+ *  onboarding route busy. */
+const FEED_RENEW_INTERVAL_MS = 900_000;
 const HEX64_RE = /^[0-9a-f]{64}$/;
 
 /** An own data property of a JSON value, never a prototype-chain lookup. */
@@ -2257,6 +2262,9 @@ export class SaihmProClient {
   private readonly seq: SeqState;
   /** Grants this process revoked, keyed JSON [cellId, recipientHex]: never re-issued, whatever the endpoint lists. */
   private readonly revokedGrants = new Set<string>();
+  /** The share events feed, when started (SAIHM_EVENTS=1). Memory only: a new map and `since` at each start. */
+  private shareFeed?: ShareEventsFeed;
+  private lastFeedRenewAt = -Infinity;
   private readonly recallCache: RecallCache;
   private readonly requestTimeoutMs: number;
   private tier: string | undefined;
@@ -3940,11 +3948,12 @@ export class SaihmProClient {
     // only constructible where the erasure is performed, and it is performed remotely. Report both
     // halves instead, exactly as the cache purge above does.
     //
-    // `complete` is stated FALSE unconditionally rather than forwarded from `r`. This runtime does
-    // ACCESS-CONTROL erasure — the index flag, tombstone, CID blacklist and audit entry are real, the
-    // per-cell key is not destroyed — so `true` would be untrue here. It is also unreachable: a
-    // consumer refuses `complete:true` without a verbatim `destructionAnchor`, and `ForgetResult`
-    // has no such field to copy one from. Forwarding a `true` the endpoint happened to set would
+    // `complete` is stated FALSE unconditionally rather than forwarded from `r`. It means this client
+    // cannot PROVE the destruction, not that none happened: the hosted endpoint does destroy the cell's
+    // wrapped key, but nothing on this receipt lets a consumer check that, and an endpoint's own
+    // `complete` is a post-condition that also holds for an id that never existed. A consumer refuses
+    // `complete:true` without a verbatim `destructionAnchor`, and `ForgetResult` has no such field to
+    // copy one from. Forwarding a `true` the endpoint happened to set would
     // produce a line the consumer discards, which purges nothing and looks like a delivered erasure.
     //
     // GATED ON THE ID'S LENGTH, and the reason is the RENDER rather than the feed. `cellId` is a
@@ -4346,6 +4355,7 @@ export class SaihmProClient {
         recipientMlkemSecretKey: this.identity.mlkemSecretKey,
       });
     } catch {
+      this.shareFeed?.markOpenFailed(grant.sharerPinnedAgentIdHashHex, grant.cellId);
       throw new SaihmEndpointError(
         502,
         'undecryptable_share',
@@ -4390,12 +4400,16 @@ export class SaihmProClient {
       try {
         plaintext = fromUtf8(openCellWithDek(env, dek));
       } catch {
+        // Typically a key envelope that wraps an earlier version of the cell: the share is stale until it is re-issued.
+        this.shareFeed?.markOpenFailed(grant.sharerPinnedAgentIdHashHex, grant.cellId);
         throw new SaihmEndpointError(
           502,
           'undecryptable',
           `shared cell '${grant.cellId}' could not be opened with the unwrapped DEK`,
         );
       }
+      // The sharer's signature was checked against the pinned record above: the feed may say so.
+      this.shareFeed?.markSenderVerified(grant.sharerPinnedAgentIdHashHex, grant.cellId);
       return {
         cellId: env.cellId,
         plaintext,
@@ -4405,6 +4419,77 @@ export class SaihmProClient {
     } finally {
       dek.fill(0); // scrub the unwrapped DEK regardless of outcome
     }
+  }
+
+  /**
+   * Start the share events feed, when the endpoint offers one. Opt-in (SAIHM_EVENTS=1). The feed long-polls the
+   * endpoint's events route and reconciles against this client's own shared listing; nothing it learns opens content.
+   */
+  startShareEvents(): void {
+    if (this.shareFeed) return;
+    const base = this.endpoint.endsWith('/') ? this.endpoint : `${this.endpoint}/`;
+    const origin = new URL(base).origin;
+    // A request ends with the feed or after `ms`, whichever is first; `done` releases the timer and the listener.
+    const bounded = (feed: AbortSignal, ms: number): { signal: AbortSignal; done: () => void } => {
+      const ctrl = new AbortController();
+      const abort = (): void => ctrl.abort();
+      const timer = setTimeout(abort, ms);
+      feed.addEventListener('abort', abort, { once: true });
+      return { signal: ctrl.signal, done: () => { clearTimeout(timer); feed.removeEventListener('abort', abort); } };
+    };
+    const transport: ShareEventsTransport = {
+      info: async (feed) => {
+        const r = bounded(feed, this.requestTimeoutMs);
+        try {
+          const res = await keepAliveFetch(new URL('info', base).toString(), { method: 'GET', signal: r.signal });
+          const text = await readBodyCapped(res, 65_536, 'events_info');
+          if (!res.ok) return null;
+          return (JSON.parse(text) as { events?: unknown }).events ?? null;
+        } finally {
+          r.done();
+        }
+      },
+      poll: async (path, body, timeoutMs, feed) => {
+        // The advertised path is honoured on this endpoint's own origin only: the request carries the credential.
+        const url = new URL(path, base);
+        if (url.origin !== origin) throw new Error('events path is not on the endpoint origin');
+        const r = bounded(feed, timeoutMs);
+        try {
+          const send = async (auth: string): Promise<Response> => keepAliveFetch(url.toString(), {
+            method: 'POST', headers: { 'content-type': 'application/json', authorization: auth }, body: JSON.stringify(body), signal: r.signal,
+          });
+          let res = await send(await this.currentAuthHeader());
+          if (res.status === 401 && !this.staticAuthHeader && Date.now() - this.lastFeedRenewAt >= FEED_RENEW_INTERVAL_MS) {
+            await readBodyCapped(res, 65_536, 'events_poll').catch(() => '');
+            this.lastFeedRenewAt = Date.now();
+            this.cachedJwt = undefined;
+            res = await send(await this.currentAuthHeader());
+          }
+          const text = await readBodyCapped(res, 1_048_576, 'events_poll');
+          let parsed: unknown = {};
+          try { parsed = text ? JSON.parse(text) : {}; } catch { parsed = {}; }
+          const ra = res.headers.get('retry-after');
+          return { status: res.status, body: parsed, ...(ra && /^[0-9]{1,5}$/.test(ra) ? { retryAfterS: Number(ra) } : {}) };
+        } finally {
+          r.done();
+        }
+      },
+      // The share listing alone: an endpoint that offers the feed answers without reading any own cell. One that does
+      // not answers with the full listing, which the feed reads for shares only and never opens.
+      listing: async () => this.call<unknown>('saihm_recall', { sharesOnly: true }),
+    };
+    this.shareFeed = new ShareEventsFeed({ transport });
+    this.shareFeed.start();
+  }
+
+  /** Stop the share events feed, including a poll in flight, so nothing keeps the process running. */
+  async stopShareEvents(): Promise<void> {
+    await this.shareFeed?.stop();
+  }
+
+  /** The share map from the events feed, or undefined when the feed is not running. */
+  shareStates(): ShareStates | undefined {
+    return this.shareFeed?.snapshot();
   }
 
   /**

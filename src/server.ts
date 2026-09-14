@@ -95,7 +95,18 @@ const server = new McpServer(
 // typed tool error on first use rather than crashing the transport.
 let client: SaihmProClient | null = null;
 function getClient(): SaihmProClient {
-  if (!client) client = SaihmProClient.bootFromEnv();
+  if (!client) {
+    client = SaihmProClient.bootFromEnv();
+    // Share events are opt-in: the feed long-polls only when asked to. Its open request would keep the process running
+    // after the host closes stdin, so the feed stops then, and never starts once stdin has ended.
+    if (process.env.SAIHM_EVENTS === '1' && !process.stdin.readableEnded) {
+      const started = client;
+      started.startShareEvents();
+      const stop = (): void => void started.stopShareEvents();
+      process.stdin.once('end', stop);
+      process.stdin.once('close', stop);
+    }
+  }
   return client;
 }
 
@@ -375,6 +386,30 @@ server.registerTool(
       ),
       /** True when the endpoint announced more grants than the client keeps; the list above is cut. */
       sharedTruncated: z.boolean(),
+      // The share events map (SAIHM_EVENTS=1), separate from `shared`: absent when the feed is not running. Its entries
+      // carry public identifiers only, and `senderVerified` is true only after this client checked the sharer's signature.
+      shareStates: z
+        .object({
+          since: z.string().nullable(),
+          complete: z.boolean(),
+          entries: z.array(
+            z.object({
+              sharer: z.string(),
+              cellId: z.string(),
+              status: z.enum(['live', 'stale', 'ended', 'erased']),
+              grant: z.string().nullable(),
+              scope: z.string().nullable(),
+              expiryEpoch: z.string().nullable(),
+              seq: z.string().nullable(),
+              commitment: z.string().nullable(),
+              senderVerified: z.boolean(),
+              endedAt: z.string().nullable(),
+              endedBy: z.enum(['event', 'reconciliation']).nullable(),
+              copiesInvalidBefore: z.string().nullable(),
+            }),
+          ),
+        })
+        .optional(),
     },
     annotations: {
       title: 'Recall',
@@ -620,11 +655,14 @@ server.registerTool(
                   `  [${labelSafe(safeScalar(c.cellId))}] seq=${labelSafe(safeScalar(c.seq))} | ${c.plaintext}`,
               ),
             ];
+      const shareStates = getClient().shareStates();
       return ok([...lines, ...sharedLines].join('\n'), {
         count: cells.length,
         memories,
         shared,
         sharedTruncated: announcementsTruncated,
+        // Undefined when the feed is not running, so the key serializes away.
+        shareStates,
       });
     } catch (e) {
       return fail(e);
