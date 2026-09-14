@@ -13,6 +13,7 @@ coverage/
 # Operator-internal integration suite (imports the non-shipping operator
 # endpoint package); validated locally, not part of the public client repo.
 tests/client_pro.test.ts
+tests/client_share_reissue_e2e.test.ts
 dist-mcpb/
 
 # Agent worktrees created by tooling; never part of the package.

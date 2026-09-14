@@ -750,6 +750,71 @@ export interface RememberResult {
    * envelope sealed in this process. An endpoint-supplied commitment would commit to nothing.
    */
   commitmentHash: string;
+  /**
+   * Present when this write left existing grants of the cell on the previous version. Every write seals the cell
+   * under a new key and a grant carries the key of one version, so a grant made before this write cannot open it
+   * until it is re-issued. See {@link ShareReissueReport}.
+   */
+  shares?: ShareReissueReport;
+}
+
+/**
+ * What became of the grants a write left on an older version. Counts are this client's own: a grant counts as
+ * re-issued only when this client built a new share for it and the endpoint accepted that share.
+ */
+export interface ShareReissueReport {
+  reissued: number;
+  /**
+   * Grants that were not re-issued. `recipient` is set only when it was read off a share signed by THIS identity for
+   * this cell; it is `null` when the endpoint's entry did not verify, so an endpoint cannot name a recipient here.
+   */
+  notReissued: Array<{ recipient: string | null; reason: ShareReissueSkip }>;
+  /**
+   * True when the endpoint listed grants this client did not examine: the walk stopped at its page bound, at a page
+   * it could not continue from, or at a failed request. The counts above then cover only the grants examined.
+   */
+  incomplete: boolean;
+}
+
+/**
+ * - `unverified`: the share is not this identity's grant of this cell to that recipient, or the recipient record does
+ *   not verify against the recipient.
+ * - `no_record`: the endpoint holds no recipient record for this grant (grants made before re-issue existed); share
+ *   the cell again with `saihm_share`.
+ * - `revoked`: this process revoked the grant; it is not re-issued even though the endpoint listed it.
+ * - `refused`: the endpoint did not accept the new share.
+ * - `unavailable`: the re-issue request failed (an older endpoint, a newer write of the cell, or no connection).
+ */
+export type ShareReissueSkip = 'unverified' | 'no_record' | 'revoked' | 'refused' | 'unavailable';
+
+/** Grants per re-issue request and per page; the endpoint's page size. */
+const REISSUE_PAGE = 16;
+/** Pages followed for one write, so one write re-issues at most REISSUE_PAGE × MAX_REISSUE_PAGES grants. */
+const MAX_REISSUE_PAGES = 64;
+const HEX64_RE = /^[0-9a-f]{64}$/;
+
+/** An own data property of a JSON value, never a prototype-chain lookup. */
+function ownField(o: unknown, k: string): unknown {
+  return o !== null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k)
+    ? (o as Record<string, unknown>)[k]
+    : undefined;
+}
+
+/**
+ * The `staleShares` page of an endpoint response, structurally. Nothing in it is trusted; every grant is verified
+ * before it is used. `after` is where the next page starts: the endpoint's cursor when it is a recipient id, or, when
+ * the page lists more grants than this client handles in one page, the recipient of the last grant it handles, so
+ * the grants it dropped are listed again on the next page. `stuck` is set when there is more to read and no usable
+ * cursor to read it with.
+ */
+function staleGrantsPage(r: unknown): { grants: unknown[]; after: string | null; stuck: boolean } | undefined {
+  const page = ownField(r, 'staleShares');
+  const grants = ownField(page, 'grants');
+  if (!Array.isArray(grants)) return undefined;
+  const cursor = (v: unknown): string | null => (typeof v === 'string' && HEX64_RE.test(v) ? v : null);
+  if (grants.length <= REISSUE_PAGE) return { grants, after: cursor(ownField(page, 'after')), stuck: false };
+  const after = cursor(ownField(grants[REISSUE_PAGE - 1], 'recipient'));
+  return { grants: grants.slice(0, REISSUE_PAGE), after, stuck: after === null };
 }
 
 export interface RecalledCell {
@@ -2190,6 +2255,8 @@ export class SaihmProClient {
   private readonly identity: ClientIdentity;
   private readonly agentIdHashHex: string;
   private readonly seq: SeqState;
+  /** Grants this process revoked, keyed JSON [cellId, recipientHex]: never re-issued, whatever the endpoint lists. */
+  private readonly revokedGrants = new Set<string>();
   private readonly recallCache: RecallCache;
   private readonly requestTimeoutMs: number;
   private tier: string | undefined;
@@ -3488,7 +3555,10 @@ export class SaihmProClient {
     // having been exhaustive, which is why it stays.
     const rawShardId: unknown = r?.shardId;
     const shardId = typeof rawShardId === 'string' ? rawShardId : '';
+    // After the write, its marks and its cache entry: the grants it left on the previous version. Never throws.
+    const shares = await this.reissueStaleShares(cellId, env, r);
     return {
+      ...(shares ? { shares } : {}),
       cellId,
       seq: seq.toString(10),
       commitmentHash: toHex(env.publicMeta.commitmentHash),
@@ -4021,7 +4091,12 @@ export class SaihmProClient {
     if (grant.expiryEpoch !== undefined && grant.expiryEpoch !== null) {
       params.expiryEpoch = grant.expiryEpoch.toString(10);
     }
-    return this.call('saihm_share', params);
+    // The record is public (two public keys and a self-signature) and already verified against the pin above. An
+    // endpoint that supports re-issuing keeps it, so this grant can be re-issued after a later write of the cell;
+    // one that does not ignores the field.
+    const result: ShareResult = await this.call('saihm_share', { ...params, recipientRecord: grant.recipientRecord });
+    this.revokedGrants.delete(JSON.stringify([grant.cellId, toHex(recipientPinnedAgentIdHash)]));
+    return result;
   }
 
   /** Revoke a prior grant to `recipientHex` for `cellId` (deletes the share envelope). */
@@ -4029,7 +4104,135 @@ export class SaihmProClient {
     cellId: string,
     recipientHex: string,
   ): Promise<RevokeResult> {
+    // Recorded before the call: a revocation whose response was lost must still stop a later re-issue.
+    this.revokedGrants.add(JSON.stringify([cellId, recipientHex.toLowerCase()]));
     return this.call('saihm_revoke_share', { cellId, recipient: recipientHex });
+  }
+
+  /**
+   * Re-issue the grants a write left on the previous version. The endpoint lists them (`staleShares`), and nothing in
+   * the list is trusted:
+   *  - a grant is re-issued only when its share is signed by THIS identity for this cell and names that recipient, so
+   *    an endpoint cannot add a recipient to the list;
+   *  - the new share is built by `shareCell`, which refuses a recipient record that does not verify against the
+   *    recipient, so an endpoint cannot substitute keys;
+   *  - a grant this process revoked is not re-issued.
+   * The new shares wrap the key of `env`, the version just written, and name its commitment, so an endpoint that has
+   * a newer write refuses them. Never throws: the write is already stored, and what could not be re-issued is reported.
+   */
+  private async reissueStaleShares(
+    cellId: string,
+    env: ReturnType<typeof sealCell>,
+    written: unknown,
+  ): Promise<ShareReissueReport | undefined> {
+    const first = staleGrantsPage(written);
+    if (!first) return undefined;
+    let page: { grants: unknown[]; after: string | null; stuck: boolean } = first;
+    const report: ShareReissueReport = { reissued: 0, notReissued: [], incomplete: false };
+    const commitment = toHex(env.publicMeta.commitmentHash);
+    const handled = new Set<string>();
+    for (let n = 0; ; n++) {
+      if (n === MAX_REISSUE_PAGES) {
+        report.incomplete = true;
+        break;
+      }
+      const wires: unknown[] = [];
+      const built: string[] = [];
+      for (const g of page.grants) {
+        const p = this.prepareReissue(cellId, env, g);
+        if (p.recipient !== null) {
+          if (handled.has(p.recipient)) continue;
+          handled.add(p.recipient);
+        }
+        if (p.skip !== undefined) report.notReissued.push({ recipient: p.recipient, reason: p.skip });
+        else {
+          wires.push(p.wire);
+          built.push(p.recipient);
+        }
+      }
+      const after: string | null = page.after;
+      const more = after !== null || page.stuck;
+      // The next page comes back with a re-issue request, so a page with nothing to send ends the walk.
+      if (wires.length === 0) {
+        report.incomplete = more;
+        break;
+      }
+      let res: unknown;
+      try {
+        res = await this.call<unknown>('saihm_share', {
+          rewrap: true, cellId, commitment, shareWires: wires, ...(after ? { after } : {}),
+        });
+      } catch {
+        for (const recipient of built) report.notReissued.push({ recipient, reason: 'unavailable' });
+        report.incomplete = more;
+        break;
+      }
+      const accepted = new Set<string>();
+      const results = ownField(res, 'results');
+      if (Array.isArray(results)) {
+        for (const x of results) {
+          const recipient = ownField(x, 'recipient');
+          if (ownField(x, 'ok') === true && typeof recipient === 'string') accepted.add(recipient);
+        }
+      }
+      for (const recipient of built) {
+        if (accepted.has(recipient)) report.reissued++;
+        else report.notReissued.push({ recipient, reason: 'refused' });
+      }
+      if (!more) break;
+      const next: { grants: unknown[]; after: string | null; stuck: boolean } | undefined =
+        after === null ? undefined : staleGrantsPage(res);
+      // A next page must move forward: an endpoint that repeats a page, moves back or sends none ends the walk.
+      if (!next || after === null || (next.after !== null && next.after <= after)) {
+        report.incomplete = true;
+        break;
+      }
+      page = next;
+    }
+    return report;
+  }
+
+  /** One listed grant: a new share for the version just written, or the reason there is none. */
+  private prepareReissue(
+    cellId: string,
+    env: ReturnType<typeof sealCell>,
+    g: unknown,
+  ): { wire: unknown; recipient: string; skip?: undefined } | { wire?: undefined; recipient: string | null; skip: ShareReissueSkip } {
+    const listed = ownField(g, 'recipient');
+    let share;
+    try {
+      share = decodeShareEnvelope(ownField(g, 'share') as WireShareEnvelope);
+    } catch {
+      return { recipient: null, skip: 'unverified' };
+    }
+    if (
+      typeof listed !== 'string' ||
+      !HEX64_RE.test(listed) ||
+      share.cellId !== cellId ||
+      !ctEqual(share.sharerAgentIdHash, this.identity.agentIdHash) ||
+      toHex(share.recipientAgentIdHash) !== listed ||
+      !verifyShareSig(share, this.identity.mldsaPubKey)
+    ) {
+      return { recipient: null, skip: 'unverified' };
+    }
+    // From here the recipient is authenticated: this identity signed a grant of this cell to it.
+    const recipient = listed;
+    if (this.revokedGrants.has(JSON.stringify([cellId, recipient]))) return { recipient, skip: 'revoked' };
+    const record = ownField(g, 'recipientRecord');
+    if (record === null || record === undefined) return { recipient, skip: 'no_record' };
+    try {
+      const next = shareCell({
+        envelope: env,
+        sharerKek: this.identity.kek,
+        sharerMldsaSecretKey: this.identity.mldsaSecretKey,
+        sharerAgentIdHash: this.identity.agentIdHash,
+        recipientRecord: decodeIdentityRecord(record as WireIdentityRecord),
+        recipientPinnedAgentIdHash: share.recipientAgentIdHash,
+      });
+      return { wire: encodeShareEnvelope(next), recipient };
+    } catch {
+      return { recipient, skip: 'unverified' };
+    }
   }
 
   /**

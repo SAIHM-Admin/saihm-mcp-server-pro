@@ -18,4 +18,6 @@ export type {
   SharedAnnouncement,
   RecallWithShared,
   SaihmProClientOpts,
+  ShareReissueReport,
+  ShareReissueSkip,
 } from './client.js';

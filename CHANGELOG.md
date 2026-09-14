@@ -2,6 +2,41 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-09-14
+
+Shared memories stay readable after they are updated. No new tools and no
+removed tools; `saihm_remember` returns three new fields.
+
+### Fixed
+
+- **Updating a shared memory no longer locks its recipients out.** Every save
+  encrypts a memory under a new key, and a share carries the key of the version
+  that was current when it was made. Updating a shared memory therefore left
+  every recipient unable to open it, and neither side was told. When the
+  endpoint reports that a save left shares on the previous version, the client
+  now issues each of those recipients a new share for the version it just saved.
+  Before re-issuing a share, it checks that:
+  - the share was made by this identity, for that memory and that recipient;
+  - the recipient's keys belong to the recipient;
+  - the share was not revoked in this session.
+
+  So an endpoint cannot add a recipient or substitute keys. A share that cannot
+  be re-issued is reported, and the save itself still succeeds. One save
+  re-issues at most 1,024 shares; if the endpoint lists more, or the client
+  stops early for another reason, the report says so.
+
+### Added
+
+- **`saihm_remember` reports re-issued shares.** When a save left shares on the
+  previous version, the result carries `sharesReissued`, `sharesNotReissued` and
+  `sharesIncomplete`, and the text adds a line with the counts (and
+  `shares-unexamined=some` when the client stopped before examining every listed
+  share). The tool description now says so. Shares made with an earlier version
+  of the client cannot be re-issued automatically: share the memory again once
+  with `saihm_share`.
+- `saihm_share` also sends the recipient's identity record (public keys and
+  their self-signature), so the endpoint can keep it for a later re-issue.
+
 ## [0.7.1] — 2026-09-13
 
 A fix for the recall cache and a clearer install step. No new tools, no removed
@@ -1221,6 +1256,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.8.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.8.0
 [0.7.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.1
 [0.7.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.0
 [0.6.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.6.1

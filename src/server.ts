@@ -225,7 +225,7 @@ server.registerTool(
   {
     title: 'Remember',
     description:
-      'Store information in SAIHM persistent memory. Encryption happens in this process and the key never leaves it, so the server holds ciphertext it cannot read. Use this when a fact, decision, or piece of context should outlive the current session. Pass an existing cellId to update that cell instead of adding a new one. Returns the cell id that saihm_forget takes.',
+      'Store information in SAIHM persistent memory. Encryption happens in this process and the key never leaves it, so the server holds ciphertext it cannot read. Use this when a fact, decision, or piece of context should outlive the current session. Pass an existing cellId to update that cell instead of adding a new one; when the endpoint reports that the update left shares of the cell on the previous version, they are re-issued for the new version and the result counts them, and a share that was not re-issued needs saihm_share again. Returns the cell id that saihm_forget takes.',
     inputSchema: {
       content: z.string().describe('Information to remember'),
       cellId: z
@@ -238,6 +238,12 @@ server.registerTool(
       seq: z.string(),
       shardId: z.string(),
       commitmentHash: z.string(),
+      // LOCAL: what this client counted while re-issuing the grants a write left on the previous version (see
+      // RememberResult.shares); all three are null when the write left none. Nullable and always present, so adding them widens the
+      // contract without making a previously valid response invalid (the SDK publishes additionalProperties: false).
+      sharesReissued: z.number().nullable(),
+      sharesNotReissued: z.number().nullable(),
+      sharesIncomplete: z.boolean().nullable(),
     },
     annotations: {
       title: 'Remember',
@@ -265,6 +271,11 @@ server.registerTool(
       // The two halves can still differ in LENGTH — that is what the marker announces — but they can
       // no longer disagree about whether the value is usable at all.
       const shardId = boundedOrMarker(r.shardId);
+      // The counts and the flag are this client's own (grants it re-issued, grants it could not, whether it stopped
+      // before examining every listed grant); nothing here is endpoint text.
+      const sharesReissued = r.shares ? r.shares.reissued : null;
+      const sharesNotReissued = r.shares ? r.shares.notReissued.length : null;
+      const sharesIncomplete = r.shares ? r.shares.incomplete : null;
       return ok(
         // `cellId`, `seq` and `commitmentHash` are the CLIENT's, though not all from one source:
         // `cellId` is caller-supplied or client-generated, `seq` is this client's monotonic counter,
@@ -278,7 +289,12 @@ server.registerTool(
         // the announcement list: this line is a RECEIPT for a write the agent explicitly requested,
         // so a memory-shaped line minted inside it arrives with the agent's own intent behind it.
         `REMEMBERED [${labelSafe(safeScalar(r.cellId))}] seq=${labelSafe(safeScalar(r.seq))} ` +
-          `shard=${labelSafe(safeScalar(shardId))} commit=${labelSafe(shortScalar(r.commitmentHash))}`,
+          `shard=${labelSafe(safeScalar(shardId))} commit=${labelSafe(shortScalar(r.commitmentHash))}` +
+          // Only when the write left grants on the previous version, on its own line so it reads as a report, in pure
+          // `key=value` pairs with the two-space separator `saihm_status` uses for its local report line.
+          (sharesReissued === null || sharesNotReissued === null
+            ? ''
+            : `\n  shares-reissued=${labelSafe(safeScalar(String(sharesReissued)))}  shares-not-reissued=${labelSafe(safeScalar(String(sharesNotReissued)))}${sharesIncomplete ? '  shares-unexamined=some' : ''}`),
         {
           cellId: r.cellId,
           seq: String(r.seq),
@@ -288,6 +304,9 @@ server.registerTool(
           // here while the announcement channel was capped on both. Bound applied above, once.
           shardId,
           commitmentHash: r.commitmentHash,
+          sharesReissued,
+          sharesNotReissued,
+          sharesIncomplete,
         },
       );
     } catch (e) {

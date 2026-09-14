@@ -436,7 +436,7 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'if a fourth occurrence appeared unfenced. Reported only because the predicate cannot see ' +
     'through a call boundary to the fence on the other side',
 };
-const SAFESCALAR_SITES_PIN = 24; // +1: `saihm_status`'s local seq-state degradation token
+const SAFESCALAR_SITES_PIN = 26; // +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts
 const RENDER_HELPER_EXPORTS: string[] = [
   'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
   'MAX_JOIN_FIELD_CHARS', 'MAX_PATH_FIELD_CHARS', 'MAX_PATH_MESSAGE_CHARS', 'MAX_SCALAR_CHARS',
@@ -1104,6 +1104,10 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     },
     'client.ts': {
       MAX_ERROR_CODE_CHARS: 64,
+      // Share re-issue after a write: grants per request and per page (the endpoint's page size), and pages followed per
+      // write. Not render budgets; they bound how much one write can re-issue.
+      REISSUE_PAGE: 16,
+      MAX_REISSUE_PAGES: 64,
       // The recall cache's cross-process write lock (two sessions of one identity on one cache file). Not render
       // budgets: how long a save or a forget waits for another live session, when a lock is abandoned, and how long
       // an empty lock (created but not yet written) is treated as being written.
@@ -3189,6 +3193,9 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       seq: "this client's monotonic counter",
       shardId: 'CAPPED HERE (boundedOrMarker)',
       commitmentHash: 'read off the envelope this process sealed',
+      sharesReissued: 'CLIENT-ORIGIN: grants this client re-issued after the write, counted locally',
+      sharesNotReissued: 'CLIENT-ORIGIN: grants this client could not re-issue, counted locally',
+      sharesIncomplete: 'CLIENT-ORIGIN: whether this client stopped before examining every listed grant',
     },
     saihm_recall: {
       count: 'client-computed from the opened cells',
@@ -4796,7 +4803,9 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // seen by both. Its sibling `localCacheResidual` is rendered in the identical shape and contributes
   // the identical pair, which is what makes this a RISE from one added site rather than a predicate
   // that started matching something new.
-  const EXAMINED_SPANS_PIN = 84;
+  // Raised by `saihm_remember`'s two local share re-issue counts, rendered in one conditional part of its `+` chain:
+  // the template arm counts each of the two values and the concatenation arm counts the part once.
+  const EXAMINED_SPANS_PIN = 87;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

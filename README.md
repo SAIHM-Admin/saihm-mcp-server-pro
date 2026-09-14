@@ -272,7 +272,8 @@ console.log(cell?.plaintext); // 'remember this'
 // Recall everything (client-side keyword filter; the endpoint has no plaintext to filter on).
 const matches = await saihm.recall('this');
 
-// Update an existing cell (a fresh monotonic sequence is issued automatically).
+// Update an existing cell (a fresh monotonic sequence is issued automatically). When the endpoint reports
+// shares of the cell left on the previous version, `shares` in the result reports their re-issue.
 await saihm.remember('new contents', { cellId });
 
 // Forget — crypto-shred.
