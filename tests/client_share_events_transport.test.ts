@@ -8,7 +8,7 @@ import { strict as assert } from 'node:assert';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -97,13 +97,60 @@ test('a shared read that fails to open marks the share stale; a verified read ma
     const read = { sharerPinnedAgentIdHashHex: sharer, sharerRecord: encodeIdentityRecord(A.identityRecord), cellId: 'doc' };
     await assert.rejects(client.recallShared(read), (e: unknown) => (e as { code?: string }).code === 'undecryptable');
     assert.deepEqual([entry()?.status, entry()?.senderVerified], ['stale', false]);
+    // The file follows the map: wait until it shows the stale share, so no write is still pending.
+    const mapFile = join(process.env.SAIHM_ERASURE_FEED_DIR!, 'tenants', toHex(B.agentIdHash), 'share-states.json');
+    const fileEntry = () => { try { return JSON.parse(readFileSync(mapFile, 'utf8')).entries.find((e: { cellId: string }) => e.cellId === 'doc'); } catch { return undefined; } };
+    const until = Date.now() + 5000;
+    while (fileEntry()?.status !== 'stale' && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(fileEntry()?.status, 'stale');
     content = encodeEnvelope(v1);
     const cell = await client.recallShared(read);
     assert.equal(cell?.plaintext, 'one');
     assert.equal(entry()?.senderVerified, true);
+    // Stopping right after a change still writes it.
+    await client.stopShareEvents();
+    assert.equal(fileEntry()?.senderVerified, true);
   } finally {
     await client.stopShareEvents();
     server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test('the info route: a non-success answer is tried again within seconds; a route that does not exist parks the feed', async () => {
+  for (const status of [503, 404]) {
+    let infos = 0;
+    const server: Server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        if (req.method === 'GET' && req.url === '/mcp/info') {
+          infos++;
+          if (infos === 1 || status === 404) { res.writeHead(status, { 'content-type': 'application/json' }); return res.end('{}'); }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ events: CAPS }));
+        }
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const client = new SaihmProClient(base + '/mcp', 'Bearer t', new Uint8Array(32).fill(73), { tier: 'PRO', paymentMethod: 'stripe' });
+    try {
+      client.startShareEvents();
+      if (status === 503) {
+        const end = Date.now() + 6000;
+        while (infos < 2 && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+        assert.equal(infos, 2, 'retried after the 503, well within a day');
+        assert.equal(client.shareStates()?.stopped, null);
+      } else {
+        await new Promise((r) => setTimeout(r, 300));
+        assert.deepEqual([infos, client.shareStates()?.stopped, client.shareStates()?.complete], [1, 'unsupported', false]);
+      }
+    } finally {
+      await client.stopShareEvents();
+      server.closeAllConnections();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   }
 });

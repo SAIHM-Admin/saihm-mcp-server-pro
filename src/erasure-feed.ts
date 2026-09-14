@@ -58,6 +58,19 @@ import { homedir } from 'node:os';
 /** The feed's own filename inside a tenant directory. Not exported: the consumer hard-codes it. */
 const FEED_FILENAME = 'erasures.ndjson';
 
+/** The share map another process reads (share-states-file.ts), in the same tenant directory. */
+export const SHARE_STATES_FILENAME = 'share-states.json';
+
+/**
+ * Whether a tenant directory's entries make it this package's: empty, holding the erasure feed or the share map, or
+ * holding only what a share map write leaves while it runs (its lock and temporary file). The share map lives beside
+ * the feed, so a directory it created first must not read as some other store's.
+ */
+export function tenantDirIsOurs(entries: readonly string[]): boolean {
+  return entries.length === 0 || entries.includes(FEED_FILENAME) || entries.includes(SHARE_STATES_FILENAME)
+    || entries.every((e) => e.startsWith(`${SHARE_STATES_FILENAME}.`));
+}
+
 /** Max bytes for one serialized line INCLUDING its terminating newline. */
 export const MAX_FEED_LINE_BYTES = 1024;
 
@@ -171,7 +184,7 @@ export function assertTenantDirUnshared(root: string, agentIdHashHex: string): v
   } catch {
     return; // No directory yet - this feed is the one about to create it.
   }
-  if (entries.length === 0 || entries.includes(FEED_FILENAME)) return;
+  if (tenantDirIsOurs(entries)) return;
   throw new ErasureFeedError(
     `the feed directory ${JSON.stringify(dir)} already holds ${entries.length} other ` +
       `entr${entries.length === 1 ? 'y' : 'ies'} and no ${FEED_FILENAME}, so it belongs to some ` +

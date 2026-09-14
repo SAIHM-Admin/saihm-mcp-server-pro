@@ -100,6 +100,7 @@ import {
   SeqHighWaterMark,
 } from '@saihm/client-pro';
 import { ShareEventsFeed, type ShareEventsTransport, type ShareStates } from './share-events.js';
+import { shareStatesPath, writeShareStates } from './share-states-file.js';
 import { safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
 import {
   MAX_FEED_CELL_ID_CHARS,
@@ -833,6 +834,11 @@ export interface RecalledCell {
    * endpoint's `publicMeta` echo, which nothing on this path authenticates.
    */
   commitmentHash: string;
+  /**
+   * A shared read only: the grant the endpoint says served the read (hex), when it sends one. Not authenticated: it is
+   * for comparing a copy with its `shareStates` entry.
+   */
+  grant?: string;
 }
 
 /**
@@ -1984,6 +1990,8 @@ class SeqState {
 // not observe that update until it re-reads the cell — the same single-writer contract the seq store
 // already carries; document + serialize same-cell writes across clients if you need both to land.
 const RECALL_CACHE_LOCK_WAIT_MS = 5_000;
+/** The share map file is rewritten at least this often while the feed runs, so its `asOf` stays near the truth. */
+const SHARE_STATES_WRITE_MS = 60_000;
 const RECALL_CACHE_LOCK_STALE_MS = 30_000;
 const RECALL_CACHE_LOCK_MALFORMED_GRACE_MS = 1_000;
 const LOCK_WAIT_CELL = new Int32Array(new SharedArrayBuffer(4));
@@ -2264,6 +2272,7 @@ export class SaihmProClient {
   private readonly revokedGrants = new Set<string>();
   /** The share events feed, when started (SAIHM_EVENTS=1). Memory only: a new map and `since` at each start. */
   private shareFeed?: ShareEventsFeed;
+  private shareStatesWriter?: { soon: () => void; stop: () => void };
   private lastFeedRenewAt = -Infinity;
   private readonly recallCache: RecallCache;
   private readonly requestTimeoutMs: number;
@@ -4308,7 +4317,9 @@ export class SaihmProClient {
       found?: boolean;
       wire?: WireShareEnvelope;
       contentWire?: WireEnvelope;
+      grant?: unknown;
     };
+    const servedBy = typeof res.grant === 'string' && /^[0-9a-f]{64}$/.test(res.grant) ? res.grant : undefined;
     if (!res.found || !res.wire || !res.contentWire) return null; // no live grant / content unavailable
 
     // 3) Authenticate the grant + unwrap the content DEK with this agent's ML-KEM secret.
@@ -4415,6 +4426,7 @@ export class SaihmProClient {
         plaintext,
         seq: env.seq.toString(10),
         commitmentHash: toHex(env.publicMeta.commitmentHash),
+        ...(servedBy !== undefined ? { grant: servedBy } : {}),
       };
     } finally {
       dek.fill(0); // scrub the unwrapped DEK regardless of outcome
@@ -4443,7 +4455,9 @@ export class SaihmProClient {
         try {
           const res = await keepAliveFetch(new URL('info', base).toString(), { method: 'GET', signal: r.signal });
           const text = await readBodyCapped(res, 65_536, 'events_info');
-          if (!res.ok) return null;
+          // An endpoint without the info route offers no feed. Any other non-success is no answer yet: the feed retries.
+          if (res.status === 404) return null;
+          if (!res.ok) throw new Error(`events info answered ${res.status}`);
           return (JSON.parse(text) as { events?: unknown }).events ?? null;
         } finally {
           r.done();
@@ -4478,13 +4492,30 @@ export class SaihmProClient {
       // not answers with the full listing, which the feed reads for shares only and never opens.
       listing: async () => this.call<unknown>('saihm_recall', { sharesOnly: true }),
     };
-    this.shareFeed = new ShareEventsFeed({ transport });
+    // The map for other processes: written soon after a change, at least once a minute, and once more when the feed
+    // stops. A root that cannot be resolved means no file, which asserts nothing.
+    let path: string | undefined;
+    try { path = shareStatesPath(this.agentIdHashHex); } catch { path = undefined; }
+    let pending: ReturnType<typeof setTimeout> | undefined;
+    const write = (): void => {
+      pending = undefined;
+      if (path === undefined || !this.shareFeed) return;
+      try { writeShareStates(path, this.shareFeed.snapshot()); } catch { /* a lost lock or a full disk: the next change or minute tries again */ }
+    };
+    const every = setInterval(write, SHARE_STATES_WRITE_MS);
+    every.unref();
+    this.shareStatesWriter = {
+      soon: () => { if (pending === undefined && path !== undefined) { pending = setTimeout(write, 250); pending.unref(); } },
+      stop: () => { clearInterval(every); if (pending !== undefined) clearTimeout(pending); write(); },
+    };
+    this.shareFeed = new ShareEventsFeed({ transport, onChange: () => this.shareStatesWriter?.soon() });
     this.shareFeed.start();
   }
 
   /** Stop the share events feed, including a poll in flight, so nothing keeps the process running. */
   async stopShareEvents(): Promise<void> {
     await this.shareFeed?.stop();
+    this.shareStatesWriter?.stop();
   }
 
   /** The share map from the events feed, or undefined when the feed is not running. */

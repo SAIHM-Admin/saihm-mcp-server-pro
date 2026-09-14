@@ -395,6 +395,8 @@ const RENDER_SITES_PIN: Record<string, number> = {
   'erasure-feed.ts': 0,
   // 0 - the share events feed renders nothing; its caller surfaces the map as structured data.
   'share-events.ts': 0,
+  // 0 - the share map file writer renders nothing: it writes a file, and its caller swallows a failure.
+  'share-states-file.ts': 0,
   'index.ts': 0,
   // 0 by design - the fences themselves render nothing; they return values their callers render.
   'render_fence.ts': 0,
@@ -1113,6 +1115,8 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       // How often the share events feed may renew a rejected token. Not a render budget: it keeps a token that keeps
       // failing from sending the feed to the onboarding route more than four times an hour.
       FEED_RENEW_INTERVAL_MS: 900000,
+      // How often the share map file is rewritten while the feed runs, so its `asOf` stays within a minute.
+      SHARE_STATES_WRITE_MS: 60000,
       // The recall cache's cross-process write lock (two sessions of one identity on one cache file). Not render
       // budgets: how long a save or a forget waits for another live session, when a lock is abandoned, and how long
       // an empty lock (created but not yet written) is treated as being written.
@@ -1193,7 +1197,12 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     'share-events.ts': {
       DAY_MS: 86_400_000, DEFAULT_RETENTION_S: 604_800, MAX_ENTRIES: 4096, MAX_CELL_ID_BYTES: 4096, MAX_SEEN: 65536,
       RECONCILE_RETRY_MS: 60000, RECONCILE_RETRY_MAX_MS: 3600000, RECONCILE_SPACING_MS: 10000,
+      INFO_RETRY_MS: 5000, INFO_RETRY_MAX_MS: 900000,
     },
+    // The share map file's lock bounds, the recall cache's shape with a shorter wait: how long a writer blocks the event
+    // loop for a live holder before giving up (the next change or the minute write tries again), when a held lock counts
+    // as abandoned, and the grace for a lock file still being written.
+    'share-states-file.ts': { LOCK_WAIT_MS: 500, LOCK_STALE_MS: 30000, LOCK_MALFORMED_GRACE_MS: 1000 },
     'index.ts': {},
     // Budgets, but not exports: `server.ts` exports nothing at all and calls `main()` at module
     // scope, so importing it to read them off would start a server. They are derived from its SOURCE
@@ -2041,6 +2050,8 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     // {} - the share events feed calls no fence: it renders nothing, and its snapshot is surfaced
     // as structured data by its caller.
     'share-events.ts': {},
+    // {} - the share map file writer calls no fence: it renders nothing.
+    'share-states-file.ts': {},
     'index.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
@@ -2216,6 +2227,13 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // an observation about the census, not a gap in it: the open is what creates or extends the
     // file, and it is the call whose failure names a path.
     'erasure-feed.ts:fd': 1,
+    // SEVEN, none touching the seq/cell cache. They write the share map another process reads,
+    // `<root>/tenants/<agentIdHash>/share-states.json`, which this package never reads back as state.
+    // `writeShareStates`: the tenant directory (mkdirSync), the temporary file (writeFileSync `wx`), the rename over the
+    // map, and the unlink of its own temporary file when the rename fails. `withLock`: the lock file (writeFileSync
+    // `wx`), the unlink of an abandoned lock, and the unlink of its own lock on release.
+    'share-states-file.ts:writeShareStates': 4,
+    'share-states-file.ts:withLock': 3,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
@@ -2683,7 +2701,7 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // `erasure-feed.ts: 0` - it reaches no `persist()`. It writes a DIFFERENT artifact through its
     // own `node:fs` calls, censused in `FS_WRITES` above; there is nothing here for a wrapper to
     // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
-    { 'client.ts': 5, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0 },
+    { 'client.ts': 5, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -2784,7 +2802,9 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // erasure is reported, so a crash leaves a line with no erasure (recoverable) rather than an
     // erasure with no line (not). A tmp-then-rename arm appearing here would mean the file had
     // started being rewritten as a whole, which is a different artifact than this one.
-    { 'client.ts': 3, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0 },
+    // `share-states-file.ts: 1` - the share map is replaced whole, a temporary file renamed over it, and the arm unlinks its
+    // own temporary file when the rename fails.
+    { 'client.ts': 3, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
 });
@@ -3667,6 +3687,8 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     // {} - the share events feed holds no caller-chosen value: it parses operator answers into a map
     // that its caller returns as structured data, and renders nothing itself.
     'share-events.ts': {},
+    // {} - the share map file writer reads no variable itself; the root comes from the erasure feed's resolver.
+    'share-states-file.ts': {},
     'index.ts': {},
     'render_fence.ts': {},
     'server.ts': {

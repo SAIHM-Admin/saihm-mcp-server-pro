@@ -95,6 +95,7 @@ function buildShare(sharerSeed: number, cellId: string, plaintext: string, seq =
   return {
     sharer: A,
     reply: { found: true, wire: encodeShareEnvelope(share), contentWire: encodeEnvelope(envelope) },
+    commitment: toHex(envelope.publicMeta.commitmentHash),
   };
 }
 
@@ -379,8 +380,8 @@ test('saihm_recall shared-read: record/cellId WITHOUT the sharer pin fails loud 
 });
 
 test('saihm_recall shared-read SUCCESS: a real grant opens, and the branch emits its declared keys', async () => {
-  const { sharer, reply } = buildShare(70, 'cellSharedOK', 'shared payload OK');
-  const mock = startMock(reply);
+  const { sharer, reply, commitment } = buildShare(70, 'cellSharedOK', 'shared payload OK');
+  const mock = startMock({ ...reply, grant: 'b2'.repeat(32) });
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   const d = startServer(mock.base() + '/mcp');
   try {
@@ -404,14 +405,37 @@ test('saihm_recall shared-read SUCCESS: a real grant opens, and the branch emits
     // omitting either turns a successful shared read into a hard JSON-RPC error, which callFull
     // would report above. Assert the values, not merely that the call survived.
     assert.equal(r.structured.count, 1);
+    // The version read and the grant the endpoint says served it, named as in `shareStates` entries.
     assert.deepEqual(r.structured.memories, [
-      { cellId: 'cellSharedOK', seq: '1', plaintext: 'shared payload OK' },
+      { cellId: 'cellSharedOK', seq: '1', plaintext: 'shared payload OK', commitment, grant: 'b2'.repeat(32) },
     ]);
     assert.deepEqual(r.structured.shared, []);
     assert.equal(r.structured.sharedTruncated, false);
   } finally {
     d.proc.kill();
     await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('saihm_recall shared-read: no grant from the endpoint, or one that is not 64 lowercase hex, leaves the key out', async () => {
+  const { sharer, reply, commitment } = buildShare(71, 'cellNoGrant', 'payload');
+  for (const variant of [reply, { ...reply, grant: 'B2'.repeat(32) }, { ...reply, grant: 'b2'.repeat(31) }, { ...reply, grant: 7 }]) {
+    const mock = startMock(variant);
+    await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+    const d = startServer(mock.base() + '/mcp');
+    try {
+      await handshake(d);
+      const r = await callFull(d, 3, 'saihm_recall', {
+        sharerPinnedAgentIdHashHex: toHex(sharer.agentIdHash),
+        sharerRecord: encodeIdentityRecord(sharer.identityRecord),
+        cellId: 'cellNoGrant',
+      });
+      assert.equal(r.isError, false, `shared-read errored: ${r.text}`);
+      assert.deepEqual(r.structured.memories, [{ cellId: 'cellNoGrant', seq: '1', plaintext: 'payload', commitment }], JSON.stringify(variant.grant));
+    } finally {
+      d.proc.kill();
+      await new Promise<void>((r) => mock.server.close(() => r()));
+    }
   }
 });
 

@@ -51,7 +51,10 @@ export interface ListingSnapshot {
 }
 
 export interface ShareEventsTransport {
-  /** The `events` object from the info route as sent, or null when there is none. The feed validates it. */
+  /**
+   * The `events` object from the info route as sent, or null when the route answered without one. The feed validates
+   * it. Throws when there is no answer to go by: a network error, or a non-success status other than 404.
+   */
   info(signal: AbortSignal): Promise<unknown>;
   /** One poll of the events route at `path`, which the transport resolves against the endpoint's own origin. */
   poll(path: string, body: PollBody, timeoutMs: number, signal: AbortSignal): Promise<PollAnswer>;
@@ -76,9 +79,26 @@ export interface ShareStateEntry {
   readonly copiesInvalidBefore: string | null;
 }
 
+/** Why the feed stopped polling: the operator offers no feed, the tier has none, or the identity was erased. */
+export type FeedStopped = 'unsupported' | 'tier' | 'erased';
+
+export interface ShareStateCounts {
+  readonly live: number;
+  readonly stale: number;
+  readonly ended: number;
+  readonly erased: number;
+}
+
 export interface ShareStates {
   readonly since: string | null;
   readonly complete: boolean;
+  /** When the map was last known current: the latest answered poll or completed reconciliation. Null until the first. */
+  readonly asOf: string | null;
+  /** Why the feed stopped polling, or null while it follows or is starting. */
+  readonly stopped: FeedStopped | null;
+  /** When this process started the feed; null before it started. */
+  readonly startedAt: string | null;
+  readonly counts: ShareStateCounts;
   readonly entries: readonly ShareStateEntry[];
 }
 
@@ -121,6 +141,9 @@ const RECONCILE_RETRY_MS = 60_000;
 const RECONCILE_RETRY_MAX_MS = 3_600_000;
 /** Reconciliations are coalesced: after a complete one, the next waits at least this long. */
 const RECONCILE_SPACING_MS = 10_000;
+/** An info request that got no answer is retried after this, doubling up to the maximum, with jitter. */
+const INFO_RETRY_MS = 5_000;
+const INFO_RETRY_MAX_MS = 900_000;
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 type Entry = Mutable<ShareStateEntry> & { changedAt: string };
@@ -276,8 +299,11 @@ export class ShareEventsFeed {
   private readonly seen = new Map<string, number>();
   private abort: AbortController | undefined;
   private running: Promise<void> | undefined;
+  private asOf: string | null = null;
+  private startedAt: string | null = null;
+  private headerKey = '';
   /** Why the loop stopped, when it did: `unsupported`, `tier`, `erased`. */
-  stopped: string | null = null;
+  stopped: FeedStopped | null = null;
 
   constructor(opts: ShareEventsFeedOptions) {
     this.transport = opts.transport;
@@ -305,8 +331,22 @@ export class ShareEventsFeed {
   snapshot(): ShareStates {
     this.expireTombstones();
     const entries: ShareStateEntry[] = [];
-    this.entries.forEach((e) => entries.push(publicEntry(e)));
-    return { since: this.since, complete: !this.capped && !this.pendingReconcile && this.since !== null, entries };
+    let live = 0, stale = 0, ended = 0, erased = 0;
+    this.entries.forEach((e) => {
+      entries.push(publicEntry(e));
+      if (e.status === 'live') live++;
+      else if (e.status === 'stale') stale++;
+      else if (e.status === 'ended') ended++;
+      else erased++;
+    });
+    return {
+      since: this.since, complete: this.isComplete(), asOf: this.asOf, stopped: this.stopped, startedAt: this.startedAt,
+      counts: { live, stale, ended, erased }, entries,
+    };
+  }
+
+  private isComplete(): boolean {
+    return !this.capped && !this.pendingReconcile && this.since !== null;
   }
 
   /** The client read the cell and checked the sharer's signature against a pinned record. */
@@ -323,6 +363,7 @@ export class ShareEventsFeed {
 
   start(): void {
     if (this.running) return;
+    if (this.startedAt === null) this.startedAt = new Date(this.now()).toISOString();
     this.abort = new AbortController();
     this.running = this.loop(this.abort.signal).catch(() => undefined).finally(() => { this.running = undefined; });
   }
@@ -338,19 +379,34 @@ export class ShareEventsFeed {
   private async loop(signal: AbortSignal): Promise<void> {
     let networkBackoff = 1_000;
     let authBackoff = 1_000;
+    let infoBackoff = INFO_RETRY_MS;
     while (!signal.aborted) {
+      this.noteHeader();
       if (!this.caps) {
-        let raw: unknown = null;
-        try { raw = await this.transport.info(signal); } catch { raw = null; }
+        let raw: unknown;
+        try {
+          raw = await this.transport.info(signal);
+        } catch {
+          // No answer to go by (network, or an operator not answering yet): try again soon, not in a day.
+          if (signal.aborted) break;
+          await this.sleep(infoBackoff / 2 + Math.floor(this.random() * (infoBackoff / 2)), signal);
+          infoBackoff = Math.min(INFO_RETRY_MAX_MS, infoBackoff * 2);
+          continue;
+        }
         if (signal.aborted) break;
+        infoBackoff = INFO_RETRY_MS;
         this.caps = capabilityFrom(raw);
         if (!this.caps) {
+          // An answer that offers no feed: the map is not followed until a later reconciliation completes.
           this.stopped = 'unsupported';
+          this.pendingReconcile = true;
+          this.noteHeader();
           await this.sleep(DAY_MS, signal);
           continue;
         }
         this.stopped = null;
         if (this.operator !== this.caps.operator) this.restartFor(this.caps.operator);
+        this.noteHeader();   // before the first poll, which can wait the whole long poll
       }
       const caps = this.caps;
       const waitMs = this.cursor === null ? 0 : caps.maxWaitMs;
@@ -380,6 +436,7 @@ export class ShareEventsFeed {
         }
         this.apply(Array.isArray(body.events) ? body.events : []);
         this.cursor = body.cursor;
+        this.asOf = new Date(this.now()).toISOString();
         if (body.gap === true) this.pendingReconcile = true;
         const due = this.pendingReconcile || this.now() - this.lastReconcile >= DAY_MS;
         if (due && this.now() >= this.nextReconcileAt) await this.reconcile(signal);
@@ -388,8 +445,12 @@ export class ShareEventsFeed {
         continue;
       }
       if (answer.status === 400 && body.error === 'bad_cursor') { this.cursor = null; this.pendingReconcile = true; continue; }
-      if (answer.status === 402) { this.stopped = 'tier'; this.caps = null; await this.sleep(DAY_MS, signal); continue; }
-      if (answer.status === 410) { this.stopped = 'erased'; break; }
+      if (answer.status === 402) {
+        this.stopped = 'tier'; this.caps = null; this.pendingReconcile = true; this.noteHeader();
+        await this.sleep(DAY_MS, signal);
+        continue;
+      }
+      if (answer.status === 410) { this.stopped = 'erased'; this.pendingReconcile = true; break; }
       if (answer.status === 401) {
         // The transport renews the token; a token that keeps failing backs off to a minute.
         await this.sleep(authBackoff + Math.floor(this.random() * authBackoff), signal);
@@ -403,6 +464,15 @@ export class ShareEventsFeed {
       // The operator stopped offering the feed: discover again, so a feed that was switched off is not polled forever.
       if (answer.status === 503 && body.error === 'events_unavailable') this.caps = null;
     }
+    this.noteHeader();
+  }
+
+  /** Tells the host when `since`, `complete` or `stopped` changed, as it is told of map changes. */
+  private noteHeader(): void {
+    const key = `${this.since}|${this.isComplete()}|${this.stopped}`;
+    if (key === this.headerKey) return;
+    this.headerKey = key;
+    this.changed();
   }
 
   /** Another operator's events for this URL: its cursor means nothing here, so start over and reconcile. */
@@ -543,6 +613,7 @@ export class ShareEventsFeed {
       }
       this.pendingReconcile = false;
       if (this.since === null) this.since = nowIso;
+      this.asOf = nowIso;
       this.reconcileRetryMs = RECONCILE_RETRY_MS;
       this.nextReconcileAt = now + RECONCILE_SPACING_MS;
     } else {

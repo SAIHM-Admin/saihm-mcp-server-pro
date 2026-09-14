@@ -355,11 +355,23 @@ server.registerTool(
         .string()
         .optional()
         .describe('The shared cell id to read. Required when reading a shared cell.'),
+      shareEntries: z
+        .boolean()
+        .optional()
+        .describe('With the share events feed on, also return every entry of the share map; without it, only its summary.'),
     },
     outputSchema: {
       count: z.number(),
       memories: z.array(
-        z.object({ cellId: z.string(), seq: z.string(), plaintext: z.string() }),
+        z.object({
+          cellId: z.string(),
+          seq: z.string(),
+          plaintext: z.string(),
+          // A shared read only: the commitment of the version read, and the grant the endpoint says served it (when it
+          // sends one), named as in `shareStates` entries so a copy compares with its entry exactly.
+          commitment: z.string().optional(),
+          grant: z.string().optional(),
+        }),
       ),
       // MUST be declared, and MUST be emitted by every branch — both halves are load-bearing, for
       // different reasons. DECLARED: this SDK's output validation only throws on failure (it discards
@@ -388,10 +400,15 @@ server.registerTool(
       sharedTruncated: z.boolean(),
       // The share events map (SAIHM_EVENTS=1), separate from `shared`: absent when the feed is not running. Its entries
       // carry public identifiers only, and `senderVerified` is true only after this client checked the sharer's signature.
+      // Times are ISO-8601 UTC with milliseconds. `entries` is present only when the call passed `shareEntries: true`.
       shareStates: z
         .object({
           since: z.string().nullable(),
           complete: z.boolean(),
+          asOf: z.string().nullable(),
+          stopped: z.enum(['unsupported', 'tier', 'erased']).nullable(),
+          startedAt: z.string().nullable(),
+          counts: z.object({ live: z.number(), stale: z.number(), ended: z.number(), erased: z.number() }),
           entries: z.array(
             z.object({
               sharer: z.string(),
@@ -407,7 +424,7 @@ server.registerTool(
               endedBy: z.enum(['event', 'reconciliation']).nullable(),
               copiesInvalidBefore: z.string().nullable(),
             }),
-          ),
+          ).optional(),
         })
         .optional(),
     },
@@ -419,7 +436,7 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId }) => {
+  async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId, shareEntries }) => {
     try {
       // Shared-read branch: read a single cell another agent shared TO this agent. Presence of the
       // sharer pin selects this branch; the sharer record + cellId are then mandatory. The endpoint
@@ -447,7 +464,13 @@ server.registerTool(
             sharedTruncated: false,
           });
         }
-        const mem = { cellId: cell.cellId, seq: String(cell.seq), plaintext: cell.plaintext };
+        const mem = {
+          cellId: cell.cellId,
+          seq: String(cell.seq),
+          plaintext: cell.plaintext,
+          commitment: cell.commitmentHash,
+          ...(cell.grant !== undefined ? { grant: cell.grant } : {}),
+        };
         // A FOREIGN plaintext, rendered so it cannot be read as one of the agent's OWN memories.
         //
         // This content is authenticated — `recallShared` verifies the envelope's ML-DSA signature
@@ -655,7 +678,17 @@ server.registerTool(
                   `  [${labelSafe(safeScalar(c.cellId))}] seq=${labelSafe(safeScalar(c.seq))} | ${c.plaintext}`,
               ),
             ];
-      const shareStates = getClient().shareStates();
+      // The summary on every recall while the feed runs; the entries only when asked for.
+      const states = getClient().shareStates();
+      const shareStates = states && {
+        since: states.since,
+        complete: states.complete,
+        asOf: states.asOf,
+        stopped: states.stopped,
+        startedAt: states.startedAt,
+        counts: states.counts,
+        ...(shareEntries === true ? { entries: states.entries } : {}),
+      };
       return ok([...lines, ...sharedLines].join('\n'), {
         count: cells.length,
         memories,
@@ -1518,6 +1551,13 @@ async function main(): Promise<void> {
   if (verb === undefined || verb === '') {
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    // With the feed on, follow shares from the start rather than from the first memory tool call. A client that cannot
+    // boot yet stays unbuilt, and the first tool call reports why, as it always has.
+    if (process.env.SAIHM_EVENTS === '1') {
+      setImmediate(() => {
+        try { getClient(); } catch { /* reported on first use */ }
+      });
+    }
     return;
   }
   if (verb === 'join') {

@@ -391,3 +391,90 @@ test('listingFrom vouches only for what it holds', () => {
   assert.deepEqual(mixed, { complete: true, entries: [{ sharer: S, cellId: 'c', scope: null, expiryEpoch: null, grant: null, seq: null, commitment: null, stale: null }] });
   assert.equal(listingFrom({ error: 'x' }, 4096), null);
 });
+
+const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+test('asOf is null until the first answer, then the time of the latest answered poll or completed reconciliation', async () => {
+  const sc = scripted([ok([], { gap: true }), ok([])], [listing([])]);
+  const listed = sc.transport.listing;
+  sc.transport.listing = async () => { sc.advance(5_000); return listed(); };   // a reconciliation takes 5 s
+  const asOfs: Array<string | null> = [];
+  let feed!: ShareEventsFeed;
+  feed = sc.make({ onChange: () => asOfs.push(feed.snapshot().asOf) });
+  assert.deepEqual([feed.snapshot().asOf, feed.snapshot().startedAt], [null, null]);
+  await run(feed, sc.finished);
+  const s = feed.snapshot();
+  const t = (sec: number): string => new Date(Date.UTC(2026, 8, 14, 10, 0, sec)).toISOString();
+  assert.ok(asOfs.includes(t(35)), `the completed reconciliation, not the poll before it: ${asOfs}`);
+  // The poll that ended the script failed on the network: asOf stays at the last answer, and the map stays complete.
+  assert.deepEqual([s.asOf, s.complete, s.startedAt], [t(65), true, t(0)]);
+  for (const v of [s.asOf, s.since, s.startedAt]) assert.match(String(v), ISO_MS);
+  feed.start();
+  await feed.stop();
+  assert.equal(feed.snapshot().startedAt, t(0), 'startedAt is the first start');
+});
+
+test('complete turns false when polling stops, for the tier or a withdrawn feed, until a later reconciliation completes', async () => {
+  const sc = scripted([
+    ok([], { gap: true }),
+    { status: 402, body: { error: 'share_tier_required' } },
+    ok([]),
+    { status: 503, body: { error: 'events_unavailable' } },
+    ok([]),
+  ], [listing([]), listing([]), listing([])]);
+  const offers: unknown[] = [CAPS, CAPS, null, CAPS];
+  sc.transport.info = async () => (offers.length ? offers.shift() : CAPS);
+  const seen: string[] = [];
+  let feed!: ShareEventsFeed;
+  feed = sc.make({ onChange: () => { const s = feed.snapshot(); const k = `${s.stopped}:${s.complete}`; if (seen.at(-1) !== k) seen.push(k); } });
+  await run(feed, sc.finished);
+  assert.deepEqual(seen, ['null:false', 'null:true', 'tier:false', 'null:false', 'null:true', 'unsupported:false', 'null:false', 'null:true']);
+});
+
+test('an erased identity stops the feed with complete false, and the host is told', async () => {
+  const sc = scripted([ok([], { gap: true }), { status: 410, body: { error: 'tenant_erased' } }], [listing([])]);
+  const seen: string[] = [];
+  let feed!: ShareEventsFeed;
+  feed = sc.make({ onChange: () => { const s = feed.snapshot(); seen.push(`${s.stopped}:${s.complete}`); } });
+  feed.start();
+  await new Promise((r) => setTimeout(r, 50));
+  await feed.stop();
+  const s = feed.snapshot();
+  assert.deepEqual([s.stopped, s.complete, typeof s.asOf], ['erased', false, 'string']);
+  assert.equal(seen.at(-1), 'erased:false', `the stop reached the host: ${seen}`);
+});
+
+test('an incomplete reconciliation does not move asOf', async () => {
+  const sc = scripted([ok([], { gap: true })], [listing([{ sharer: S, cellId: 'doc' }], false)]);
+  const listed = sc.transport.listing;
+  sc.transport.listing = async () => { sc.advance(5_000); return listed(); };
+  const feed = sc.make();
+  await run(feed, sc.finished);
+  const s = feed.snapshot();
+  assert.deepEqual([s.asOf, s.complete], [new Date(Date.UTC(2026, 8, 14, 10, 0, 30)).toISOString(), false], 'the poll answer, not the listing after it');
+});
+
+test('an info request with no answer is retried soon, doubling to a cap, and the back-off starts over after an answer', async () => {
+  const sc = scripted([ok([], { gap: true }), { status: 503, body: { error: 'events_unavailable' } }, ok([])], [listing([]), listing([])]);
+  let n = 0;
+  sc.transport.info = async () => { n++; if (n <= 12 || n === 14) throw new Error('no answer'); return CAPS; };
+  const feed = sc.make();
+  await run(feed, sc.finished);
+  // Half the back-off plus a jittered half (random 0.5), from 5 s doubling to 15 min.
+  assert.deepEqual(sc.sleeps.slice(0, 12), [3750, 7500, 15000, 30000, 60000, 120000, 240000, 480000, 675000, 675000, 675000, 675000]);
+  assert.deepEqual(sc.sleeps.slice(12, 14), [15000, 3750], 'the 503 wait, then an info failure starts from 5 s again');
+  assert.deepEqual([feed.snapshot().stopped, feed.snapshot().complete], [null, true]);
+});
+
+test('counts follow the map', async () => {
+  const sc = scripted([
+    ok([], { gap: true }),
+    ok([
+      ev('share-created'), ev('share-created', { cellId: 'b' }), ev('share-stale', { cellId: 'b', seq: '2', commitment: C }),
+      ev('share-created', { cellId: 'c' }), ev('share-revoked', { cellId: 'c' }), ev('shared-cell-erased', { cellId: 'd' }), ev('share-created', { cellId: 'e' }),
+    ]),
+  ], [listing([])]);
+  const feed = sc.make();
+  await run(feed, sc.finished);
+  assert.deepEqual(feed.snapshot().counts, { live: 2, stale: 1, ended: 1, erased: 1 });
+});

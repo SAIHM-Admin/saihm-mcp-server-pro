@@ -2,6 +2,44 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-09-14
+
+Share events for consumers that read them from outside the recall result: a
+summary on every recall, entries on request, a file for other processes, and
+the time the map is as of. Opt-in as before (`SAIHM_EVENTS=1`); no new tools
+and no removed tools.
+
+### Changed
+
+- **`shareStates` in `saihm_recall` is a summary unless entries are asked
+  for.** Every recall that lists memories carries `since`, `complete`, `asOf`,
+  `stopped`, `startedAt` and `counts`; the entries are added only when the call
+  passes the new `shareEntries: true`. In 0.9.0 the entries came on every
+  recall.
+- **The feed starts with the server** when `SAIHM_EVENTS=1`, instead of at the
+  first memory tool call, so the first recall of a session is not an empty map.
+- **An endpoint that does not answer the feed's discovery request is asked
+  again within seconds**, backing off to 15 minutes, instead of being left for a
+  day. An endpoint that answers without offering a feed is still left for a day.
+- `complete` becomes false when the client stops following (no feed, no feed on
+  the plan, or the identity erased) and stays false until a later catch-up
+  completes.
+
+### Added
+
+- `asOf`: the time of the latest answer from the endpoint or completed catch-up.
+- `stopped` and `startedAt`, so a map with no `asOf` reads as starting or as
+  stopped.
+- `share-states.json` beside the erasure feed: the summary and every entry for
+  other processes, owner-only, replaced whole under a lock, and never read back.
+- A shared read returns `commitment` and, when the endpoint sends it, `grant`,
+  named as in `shareStates` entries.
+
+### Notes
+
+- Every time in `shareStates`, the file and the events is ISO-8601 UTC with
+  milliseconds.
+
 ## [0.9.0] — 2026-09-14
 
 Follow the shares made to you as they change, without listing them on every
@@ -1287,6 +1325,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.10.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.10.0
 [0.9.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.9.0
 [0.8.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.8.0
 [0.7.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.7.1
