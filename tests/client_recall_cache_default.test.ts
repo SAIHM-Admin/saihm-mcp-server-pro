@@ -216,3 +216,50 @@ test('a cell dropped at load still leaves the file when it is forgotten, though 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Capture what the client writes to stderr while `fn` runs. The notice is written synchronously at the top of a
+ *  recall, before any network work, so a recall that then fails still proves whether it was said. */
+function stderrDuring(fn: () => void): string {
+  const orig = process.stderr.write.bind(process.stderr);
+  let out = '';
+  (process.stderr as unknown as { write: (c: string) => boolean }).write = (c: string) => { out += c; return true; };
+  try { fn(); } finally { (process.stderr as unknown as { write: typeof orig }).write = orig; }
+  return out;
+}
+
+test('an identity with no cache is TOLD so, once, and only when it did not choose that', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-rc-notice-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'saihm-rc-notice-key-'));
+  try {
+    const keyFile = join(elsewhere, 'agent.key');
+    writeFileSync(keyFile, randomBytes(32).toString('hex'), { mode: 0o600 });
+
+    // Off by default because the key came from elsewhere: the subscriber is paying a full fetch on every recall
+    // and had no way to know. Said once — a line per recall would be noise, and noise is ignored.
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile }, () => {
+      const c = SaihmProClient.bootFromEnv();
+      const first = stderrDuring(() => { void c.recall().catch(() => undefined); });
+      const second = stderrDuring(() => { void c.recall().catch(() => undefined); });
+      assert.match(first, /^saihm: recall is fetching every memory on every call/);
+      assert.match(first, /SAIHM_RECALL_CACHE_PATH/);
+      assert.match(first, /plaintext at rest/, 'the trade is stated, not buried');
+      assert.equal(second, '', 'said twice');
+    });
+
+    // Nothing to tell: a cache is configured.
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile, SAIHM_RECALL_CACHE_PATH: join(elsewhere, 'c.json') }, () => {
+      const c = SaihmProClient.bootFromEnv();
+      assert.equal(stderrDuring(() => { void c.recall().catch(() => undefined); }), '');
+    });
+
+    // Turned off deliberately: someone who chose this does not need telling, and a notice they cannot act on
+    // teaches them to ignore the next one.
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile, SAIHM_RECALL_CACHE: '0' }, () => {
+      const c = SaihmProClient.bootFromEnv();
+      assert.equal(stderrDuring(() => { void c.recall().catch(() => undefined); }), '');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});

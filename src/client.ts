@@ -2276,6 +2276,8 @@ export class SaihmProClient {
   private shareStatesWriter?: { soon: () => void; stop: () => void };
   private lastFeedRenewAt = -Infinity;
   private readonly recallCache: RecallCache;
+  /** The uncached-recall notice is written at most once per process. */
+  private saidRecallIsUncached = false;
   private readonly requestTimeoutMs: number;
   private tier: string | undefined;
   // Self-onboard token cache (single-flight via authInFlight; never written to disk).
@@ -2598,6 +2600,31 @@ export class SaihmProClient {
     } finally {
       master.fill(0); // scrub the decoded master secret; the identity holds only derived material
     }
+  }
+
+  /**
+   * Say once, on the first recall, that this client is fetching every memory each time.
+   *
+   * The cache is deliberately off for an identity whose key did not come from the default file — that operator
+   * decided where state lives, and this cache holds plaintext at rest, so it is not switched on for them. What was
+   * missing is that nobody was TOLD: the difference is a recall that fetches only what changed against one that
+   * fetches everything, and a subscriber had no way to know which one they were paying for.
+   *
+   * To stderr, never stdout: stdout carries the tool protocol, and a line written there corrupts it.
+   *
+   * Silent when the cache was turned off deliberately (`SAIHM_RECALL_CACHE=0`): someone who chose that does not
+   * need telling, and a notice they cannot act on is noise that teaches them to ignore the next one.
+   */
+  private noticeIfRecallIsUncached(): void {
+    if (this.saidRecallIsUncached || this.recallCache.configured) return;
+    this.saidRecallIsUncached = true;
+    if (process.env.SAIHM_RECALL_CACHE === '0') return;
+    process.stderr.write(
+      'saihm: recall is fetching every memory on every call, because no recall cache is configured for this ' +
+      'identity. Point SAIHM_RECALL_CACHE_PATH at a file you own to fetch only what has changed since the last ' +
+      'recall. That file holds your memories as plaintext at rest, so it is your decision, not a default. ' +
+      'Set SAIHM_RECALL_CACHE=0 to keep it off and silence this.\n',
+    );
   }
 
   /** This client's public agent identifier (hex) = sha256(ML-DSA pubkey) = the JWT sub. */
@@ -3645,6 +3672,7 @@ export class SaihmProClient {
    * {@link recallShared} — that path, and only that path, authenticates the grant.
    */
   async recallWithShared(query?: string): Promise<RecallWithShared> {
+    this.noticeIfRecallIsUncached();
     const needle = query?.toLowerCase();
     const filter = (cells: RecalledCell[]): RecalledCell[] =>
       needle === undefined ? cells : cells.filter((c) => c.plaintext.toLowerCase().includes(needle));

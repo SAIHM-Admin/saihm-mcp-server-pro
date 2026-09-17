@@ -387,7 +387,10 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // host as tool results, which THIS sweep does not reach - it is keyed on `ok`/`std*.write` and
   // client.ts calls neither. The 1 is pinned so that scope stays a stated fact rather than an
   // impression: were it to fall to 0, the sweep would examine nothing here and still pass.
-  'client.ts': 1,
+  // 2 - the upgrade nag, and the notice that a recall is fetching every memory because no cache is configured.
+  // Both are fixed sentences to STDERR with no caller-chosen value in them; stdout carries the tool protocol and a
+  // line written there would corrupt it.
+  'client.ts': 2,
   // 0 - this module renders nothing. It THROWS, and the CALLER decides what to render: the blind
   // endpoint fails the forget, the MCP client folds the message into `feedResidual`. Pinned rather
   // than omitted so that an `ok(...)` or a `std*.write` added here - the shape that would let a feed
