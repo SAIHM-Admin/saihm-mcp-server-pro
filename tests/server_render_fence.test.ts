@@ -397,6 +397,10 @@ const RENDER_SITES_PIN: Record<string, number> = {
   'share-events.ts': 0,
   // 0 - the share map file writer renders nothing: it writes a file, and its caller swallows a failure.
   'share-states-file.ts': 0,
+  // 0 - the feed state file neither renders nor reports: a state it cannot read is simply not restored.
+  'feed-state-file.ts': 0,
+  // 0 - the lock renders nothing; it throws, and each caller decides what that costs.
+  'file-lock.ts': 0,
   'index.ts': 0,
   // 0 by design - the fences themselves render nothing; they return values their callers render.
   'render_fence.ts': 0,
@@ -1197,12 +1201,19 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     'share-events.ts': {
       DAY_MS: 86_400_000, DEFAULT_RETENTION_S: 604_800, MAX_ENTRIES: 4096, MAX_CELL_ID_BYTES: 4096, MAX_SEEN: 65536,
       RECONCILE_RETRY_MS: 60000, RECONCILE_RETRY_MAX_MS: 3600000, RECONCILE_SPACING_MS: 10000,
-      INFO_RETRY_MS: 5000, INFO_RETRY_MAX_MS: 900000,
+      INFO_RETRY_MS: 5000, INFO_RETRY_MAX_MS: 900000, HELD_POLL_BUDGET_MS: 1000, PERSIST_MIN_INTERVAL_MS: 1000,
     },
     // The share map file's lock bounds, the recall cache's shape with a shorter wait: how long a writer blocks the event
     // loop for a live holder before giving up (the next change or the minute write tries again), when a held lock counts
     // as abandoned, and the grace for a lock file still being written.
-    'share-states-file.ts': { LOCK_WAIT_MS: 500, LOCK_STALE_MS: 30000, LOCK_MALFORMED_GRACE_MS: 1000 },
+    'share-states-file.ts': { LOCK_WAIT_MS: 500 },
+    // The feed state file's bounds: the same short wait as the share map's, the ceilings a restored state may reach
+    // (the feed's own map and seen-id ceilings, so a file cannot make a process hold more than the feed would), and
+    // the size above which the file is refused unread.
+    'feed-state-file.ts': { LOCK_WAIT_MS: 500, MAX_RESTORED_ENTRIES: 4096, MAX_RESTORED_SEEN: 4096, MAX_STATE_BYTES: 8388608 },
+    // The lock's own bounds, held here now that both files take the same lock: when a held lock counts as abandoned,
+    // and the grace for a lock file still being written. The wait belongs to each caller, not to the lock.
+    'file-lock.ts': { LOCK_STALE_MS: 30000, LOCK_MALFORMED_GRACE_MS: 1000 },
     'index.ts': {},
     // Budgets, but not exports: `server.ts` exports nothing at all and calls `main()` at module
     // scope, so importing it to read them off would start a server. They are derived from its SOURCE
@@ -2052,6 +2063,10 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     'share-events.ts': {},
     // {} - the share map file writer calls no fence: it renders nothing.
     'share-states-file.ts': {},
+    // {} - the feed state file calls no fence: it reads and writes a file and renders nothing.
+    'feed-state-file.ts': {},
+    // {} - the lock calls no fence.
+    'file-lock.ts': {},
     'index.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
@@ -2233,7 +2248,15 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // map, and the unlink of its own temporary file when the rename fails. `withLock`: the lock file (writeFileSync
     // `wx`), the unlink of an abandoned lock, and the unlink of its own lock on release.
     'share-states-file.ts:writeShareStates': 4,
-    'share-states-file.ts:withLock': 3,
+    // FOUR, the share map writer's shape over a DIFFERENT artifact: `<root>/tenants/<agentIdHash>/feed-state.json`,
+    // which this package DOES read back — it holds the feed's position, so a process that starts again asks for what
+    // it missed instead of the whole listing. `writeFeedState`: the tenant directory (mkdirSync), the temporary file
+    // (writeFileSync `wx`), the rename over the state, and the unlink of its own temporary file when the rename fails.
+    // It reaches no seq/cell cache: the feed's map is the operator's public listing, never own-cell state.
+    'feed-state-file.ts:writeFeedState': 4,
+    // THREE, moved here whole from the share map writer when both files stopped keeping their own copy of the lock:
+    // the lock file (writeFileSync `wx`), the unlink of an abandoned lock, and the unlink of its own lock on release.
+    'file-lock.ts:withFileLock': 3,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
@@ -2701,7 +2724,7 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // `erasure-feed.ts: 0` - it reaches no `persist()`. It writes a DIFFERENT artifact through its
     // own `node:fs` calls, censused in `FS_WRITES` above; there is nothing here for a wrapper to
     // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
-    { 'client.ts': 5, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0 },
+    { 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -2804,7 +2827,9 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // started being rewritten as a whole, which is a different artifact than this one.
     // `share-states-file.ts: 1` - the share map is replaced whole, a temporary file renamed over it, and the arm unlinks its
     // own temporary file when the rename fails.
-    { 'client.ts': 3, 'erasure-feed.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1 },
+    // `feed-state-file.ts: 1` - the feed state is replaced whole the same way, and that arm unlinks its own temporary
+    // file when the rename fails. `file-lock.ts: 0` - the lock is created and removed, never renamed.
+    { 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
 });
@@ -3689,6 +3714,10 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'share-events.ts': {},
     // {} - the share map file writer reads no variable itself; the root comes from the erasure feed's resolver.
     'share-states-file.ts': {},
+    // {} - the feed state file reads no variable itself; its path comes from the erasure feed's resolver.
+    'feed-state-file.ts': {},
+    // {} - the lock reads no caller-chosen value; it is given a path and returns or throws.
+    'file-lock.ts': {},
     'index.ts': {},
     'render_fence.ts': {},
     'server.ts': {

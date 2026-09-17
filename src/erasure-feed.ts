@@ -61,14 +61,19 @@ const FEED_FILENAME = 'erasures.ndjson';
 /** The share map another process reads (share-states-file.ts), in the same tenant directory. */
 export const SHARE_STATES_FILENAME = 'share-states.json';
 
+/** The share feed's position and map across restarts. */
+export const FEED_STATE_FILENAME = 'feed-state.json';
+
+const OUR_FILENAMES: readonly string[] = [FEED_FILENAME, SHARE_STATES_FILENAME, FEED_STATE_FILENAME];
+
 /**
- * Whether a tenant directory's entries make it this package's: empty, holding the erasure feed or the share map, or
- * holding only what a share map write leaves while it runs (its lock and temporary file). The share map lives beside
- * the feed, so a directory it created first must not read as some other store's.
+ * Whether a tenant directory's entries make it this package's: empty, holding one of its files, or holding only what
+ * a write of one of them leaves while it runs (its lock and temporary file). They live beside each other under one
+ * root, and any of them may create the directory first, so whichever arrives first must not read as another store's.
  */
 export function tenantDirIsOurs(entries: readonly string[]): boolean {
-  return entries.length === 0 || entries.includes(FEED_FILENAME) || entries.includes(SHARE_STATES_FILENAME)
-    || entries.every((e) => e.startsWith(`${SHARE_STATES_FILENAME}.`));
+  return entries.length === 0 || entries.some((e) => OUR_FILENAMES.includes(e))
+    || entries.every((e) => OUR_FILENAMES.some((n) => e.startsWith(`${n}.`)));
 }
 
 /** Max bytes for one serialized line INCLUDING its terminating newline. */

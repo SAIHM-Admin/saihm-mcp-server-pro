@@ -104,6 +104,12 @@ export interface ShareStates {
 
 export interface PersistedFeed {
   readonly v: 1;
+  /** When the state was written. Absent in a state written before 0.11.0, which only costs the age check below. */
+  readonly savedAt?: string;
+  /** When the map was last reconciled, so a restart does not read as a day since the last one. */
+  readonly reconciledAt?: string;
+  /** Whether the saved map had already dropped entries at the cap; such a map is not one to resume from. */
+  readonly capped?: boolean;
   readonly operator: string | null;
   readonly cursor: string | null;
   readonly since: string | null;
@@ -142,6 +148,20 @@ const RECONCILE_RETRY_MAX_MS = 3_600_000;
 /** Reconciliations are coalesced: after a complete one, the next waits at least this long. */
 const RECONCILE_SPACING_MS = 10_000;
 /** An info request that got no answer is retried after this, doubling up to the maximum, with jitter. */
+/**
+ * How long the client waits out a held-back poll while a catch-up is owed, before asking for the listing instead.
+ * An operator holds a poll back by its minimum interval between polls of one identity, most often right after a
+ * quick restart. Waiting it out would make a restored position SLOWER than the cold start it replaced, and would
+ * leave a map that owes a catch-up owing it for the whole interval. The listing is the cold path's own cost, so
+ * falling back to it is never worse than not having the position at all.
+ */
+const HELD_POLL_BUDGET_MS = 1_000;
+/**
+ * The least time between two saves of the state. Every answer moves the cursor, so without this a busy feed would
+ * rewrite the whole state on each one. What a save skips is never lost: the events after the saved position arrive
+ * again and the ids already seen discard them.
+ */
+const PERSIST_MIN_INTERVAL_MS = 1_000;
 const INFO_RETRY_MS = 5_000;
 const INFO_RETRY_MAX_MS = 900_000;
 
@@ -301,6 +321,10 @@ export class ShareEventsFeed {
   private running: Promise<void> | undefined;
   private asOf: string | null = null;
   private startedAt: string | null = null;
+  /** A restored map this process has not confirmed yet: usable to answer from, not yet a complete map. */
+  private warm = false;
+  private restoredAt: number | null = null;
+  private lastPersistAt = -Infinity;
   private headerKey = '';
   /** Why the loop stopped, when it did: `unsupported`, `tier`, `erased`. */
   stopped: FeedStopped | null = null;
@@ -324,6 +348,23 @@ export class ShareEventsFeed {
         if (entry) this.entries.set(keyOf(entry.sharer, entry.cellId), entry);
       }
       for (const [id, at] of saved.seen) this.rememberId(id, at);
+      // A restored cursor is a position in this operator's log, so the listing can wait for the first answer instead
+      // of being fetched again. The map is NOT complete until that answer comes: a previous process's map must not
+      // read as one this process confirmed.
+      // A map that had already dropped entries at the cap is not one to resume from: it is incomplete in a way no
+      // catch-up repairs, so it reconciles like a cold start and keeps its entries meanwhile.
+      this.capped = saved.capped === true;
+      if (this.since !== null && this.cursor !== null && !this.capped) {
+        this.pendingReconcile = false;
+        this.warm = true;
+        const t = typeof saved.savedAt === 'string' ? Date.parse(saved.savedAt) : NaN;
+        this.restoredAt = Number.isNaN(t) ? null : t;
+        // Without this the daily reconciliation is due at once — `lastReconcile` starts at minus infinity — and the
+        // restored cursor buys nothing. A state that does not say when it reconciled (one written before 0.11.0)
+        // therefore still reconciles, which is the safe way round.
+        const r = typeof saved.reconciledAt === 'string' ? Date.parse(saved.reconciledAt) : NaN;
+        if (!Number.isNaN(r)) this.lastReconcile = r;
+      }
     }
   }
 
@@ -346,7 +387,7 @@ export class ShareEventsFeed {
   }
 
   private isComplete(): boolean {
-    return !this.capped && !this.pendingReconcile && this.since !== null;
+    return !this.capped && !this.pendingReconcile && !this.warm && this.since !== null;
   }
 
   /** The client read the cell and checked the sharer's signature against a pinned record. */
@@ -372,6 +413,8 @@ export class ShareEventsFeed {
   async stop(): Promise<void> {
     this.abort?.abort();
     await this.running;
+    // The last position, whatever the interval above would have said: this is the save a restart reads.
+    this.persist(true);
   }
 
   // ── the loop ──
@@ -406,10 +449,19 @@ export class ShareEventsFeed {
         }
         this.stopped = null;
         if (this.operator !== this.caps.operator) this.restartFor(this.caps.operator);
+        // A restore older than the operator keeps events for holds a cursor it will certainly refuse. One rejected
+        // poll per restart is nothing here and a great deal in aggregate, so reconcile without asking.
+        if (this.warm && this.restoredAt !== null && this.now() - this.restoredAt > this.caps.retentionS * 1000) {
+          this.cursor = null;
+          this.warm = false;
+          this.pendingReconcile = true;
+        }
+        this.restoredAt = null;
         this.noteHeader();   // before the first poll, which can wait the whole long poll
       }
       const caps = this.caps;
-      const waitMs = this.cursor === null ? 0 : caps.maxWaitMs;
+      // A warm process asks for what it missed and gets it at once; only a confirmed map waits on a long poll.
+      const waitMs = this.cursor === null || this.warm ? 0 : caps.maxWaitMs;
       let answer: PollAnswer;
       try {
         answer = await this.transport.poll(caps.path, { v: 1, cursor: this.cursor, waitMs, max: caps.maxEvents }, waitMs + 10_000, signal);
@@ -437,6 +489,7 @@ export class ShareEventsFeed {
         this.apply(Array.isArray(body.events) ? body.events : []);
         this.cursor = body.cursor;
         this.asOf = new Date(this.now()).toISOString();
+        this.warm = false;
         if (body.gap === true) this.pendingReconcile = true;
         const due = this.pendingReconcile || this.now() - this.lastReconcile >= DAY_MS;
         if (due && this.now() >= this.nextReconcileAt) await this.reconcile(signal);
@@ -460,6 +513,17 @@ export class ShareEventsFeed {
       authBackoff = 1_000;
       // 429, 503 and anything else: wait what the operator asked for (or 10 s), plus jitter up to the same amount.
       const base = retryAfterMs ?? (answer.retryAfterS !== undefined ? Math.min(answer.retryAfterS * 1000, DAY_MS) : 10_000);
+      // The spacing is the same one the answered path respects, so a client that keeps being held back does not ask
+      // for the listing every time.
+      if ((this.warm || this.pendingReconcile) && base > HELD_POLL_BUDGET_MS && this.now() >= this.nextReconcileAt) {
+        // `pendingReconcile` first: a listing that does not arrive must leave the map incomplete, not complete by
+        // the mere fact that the warm flag was dropped.
+        this.warm = false;
+        this.pendingReconcile = true;
+        await this.reconcile(signal);
+        this.noteHeader();
+        if (signal.aborted) break;
+      }
       await this.sleep(base + Math.floor(this.random() * base), signal);
       // The operator stopped offering the feed: discover again, so a feed that was switched off is not polled forever.
       if (answer.status === 503 && body.error === 'events_unavailable') this.caps = null;
@@ -479,6 +543,7 @@ export class ShareEventsFeed {
   private restartFor(operator: string): void {
     this.operator = operator;
     this.cursor = null;
+    this.warm = false;
     this.pendingReconcile = true;
   }
 
@@ -528,8 +593,15 @@ export class ShareEventsFeed {
             break;
           }
           cur.status = ev.kind === 'share-stale' ? 'stale' : 'live';
-          cur.seq = matching(ev.seq, DIGITS);
-          cur.commitment = matching(ev.commitment, HEX64);
+          {
+            // The pair moves together or not at all: a new sequence stated under the old commitment would read as a
+            // version a consumer could compare, and it is not one. Both are required on these kinds (format §4), so
+            // a conforming operator never takes this branch; when one does, the write is not lost, it is reconciled.
+            const seq = matching(ev.seq, DIGITS);
+            const commitment = matching(ev.commitment, HEX64);
+            if (seq !== null && commitment !== null) { cur.seq = seq; cur.commitment = commitment; }
+            else this.pendingReconcile = true;
+          }
           if (cur.grant === null) cur.grant = grant;
           cur.changedAt = at;
           changed = true;
@@ -644,10 +716,15 @@ export class ShareEventsFeed {
     this.capped = true;
   }
 
-  private persist(): void {
+  private persist(force = false): void {
     if (!this.store) return;
+    const now = this.now();
+    if (!force && now - this.lastPersistAt < PERSIST_MIN_INTERVAL_MS) return;
+    this.lastPersistAt = now;
     this.store.save({
-      v: 1, operator: this.operator, cursor: this.cursor, since: this.since,
+      v: 1, savedAt: new Date(now).toISOString(), capped: this.capped,
+      ...(Number.isFinite(this.lastReconcile) ? { reconciledAt: new Date(this.lastReconcile).toISOString() } : {}),
+      operator: this.operator, cursor: this.cursor, since: this.since,
       entries: [...this.entries.values()], seen: [...this.seen.entries()],
     });
   }

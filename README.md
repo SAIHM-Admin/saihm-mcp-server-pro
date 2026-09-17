@@ -243,7 +243,8 @@ working defaults.
 | `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. Defaults to `$SAIHM_HOME/recall.<id>.json` for the self-join identity; setting it turns the cache on for any key source. `SAIHM_RECALL_CACHE=0` still turns it off. |
 | `SAIHM_STATE_DIR` | no | Where transient operator state (such as `checkout-url.txt`) is written. Does **not** relocate your identity or its bookkeeping. |
 | `SAIHM_ERASURE_FEED` | no | Controls the erasure feed — one line appended per `forget`, so a consumer can drop whatever it derived from that cell. **On by default**; set to `0` to write nothing. Writing the line can never fail an erasure: the erasure is what you asked for and the line is a notification about it, so a feed that can't be written is reported beside the result and the erasure still stands. |
-| `SAIHM_EVENTS` | no | Set to `1` to follow share events: from the moment the server starts, it long-polls the endpoint for shares made to you (new, updated, stale, ended, erased). `saihm_recall` then returns a summary as `shareStates` when it lists memories, beside `shared`, with every entry when the call passes `shareEntries: true`, and the map is written to `share-states.json` beside the erasure feed for other processes to read (see *Following shares* below). **Off by default.** The map is kept in memory, so it starts again when the server restarts; a sender is marked verified only after a shared memory is read and its signature checked. Endpoints that do not offer events are left alone. |
+| `SAIHM_EVENTS` | no | Set to `1` to follow share events: from the moment the server starts, it long-polls the endpoint for shares made to you (new, updated, stale, ended, erased). `saihm_recall` then returns a summary as `shareStates` when it lists memories, beside `shared`, with every entry when the call passes `shareEntries: true`, and the map is written to `share-states.json` beside the erasure feed for other processes to read (see *Following shares* below). **Off by default.** The map and the position in the feed survive a restart (see `SAIHM_SHARE_MAP_STORE`); a sender is marked verified only after a shared memory is read and its signature checked. Endpoints that do not offer events are left alone. |
+| `SAIHM_SHARE_MAP_STORE` | no | Where the share feed keeps its position between runs: `file` (the default) writes `feed-state.json` beside the erasure feed, so a restart asks the endpoint only for what it missed; `off` keeps everything in memory, and the client fetches the whole share listing at every start. A root that cannot be written falls back to memory on its own, so this needs no setting where there is nowhere to write. Only read when the feed is on. |
 | `SAIHM_ERASURE_FEED_DIR` | no | Overrides the feed's root. Defaults to `SAIHM_HOME`, then `~/.saihm`; the feed itself is at `<root>/tenants/<agentIdHash>/erasures.ndjson`, and the directory is created the first time a tool runs. Must be an **absolute** path — a relative one resolves against the working directory, so one identity would write to a different file depending on where the process started while a consumer reported the feed missing. Deliberately **not** `SAIHM_STATE_DIR`: a feed is identity-scoped, so it has to move with the identity or not at all, and a consumer refuses a line from an identity it is not watching. |
 
 *Note:* a master secret is required, from one source or the other — but setup
@@ -335,8 +336,12 @@ milliseconds (`YYYY-MM-DDTHH:MM:SS.sssZ`). To read it safely:
 - `stopped` says why the client stopped following: `unsupported` (the endpoint offers no feed), `tier` (the plan has
   none) or `erased` (the identity was erased). `complete` is then false until a later catch-up completes. `startedAt` is
   when this process started following, so a null `asOf` reads as starting or as stopped.
-- The map lives in memory and starts again, with a new `since`, when the process restarts. `saihm.stopShareEvents()`
-  ends the polling.
+- The map and the position in the feed survive a restart, so `since` carries over and a new process asks the endpoint
+  for what it missed rather than for the whole listing. `since` may therefore be EARLIER than `startedAt`: it is when
+  the map this process resumed was first complete, not when this process began. Before 0.11.0 `since` always followed
+  `startedAt`; do not use the two together to tell one run from another. A restored map is NOT complete until this process has had an
+  answer: `complete` is false and `asOf` null until then, which is exactly the state above in which nothing may be
+  concluded from a missing entry. `saihm.stopShareEvents()` ends the polling.
 
 For other processes, the client writes the summary and every entry to `<root>/tenants/<agentIdHash>/share-states.json`,
 beside the erasure feed and under the same root (`SAIHM_ERASURE_FEED_DIR`, then `SAIHM_HOME`, then `~/.saihm`). It is
@@ -346,6 +351,14 @@ reads it back. Several processes of one identity each keep their own map and may
 under a lock and only by a map whose `asOf` is not older, and its `since` is the writer's. Until a new process has its
 first answer, the file may still be an earlier process's. No file means no feed has run for that identity under that
 root; it asserts nothing.
+
+The position itself is kept in `<root>/tenants/<agentIdHash>/feed-state.json`, in the same directory and with the same
+owner-only modes, and this file the client does read back. Nothing in it is trusted: a state that is missing,
+unreadable, malformed, too large or older than the endpoint keeps events for is ignored, and the client starts cold as
+it always did. Set `SAIHM_SHARE_MAP_STORE=off` to keep the position in memory only; a root that cannot be written does
+the same without being asked. Several processes of one identity may each write the file, and each write holds a
+position and the map that goes with it together, so whichever was written last is a pair a later process can resume
+from.
 
 A shared read (`saihm_recall` with the sharer and cell) returns the `commitment` of the version it opened and, when the
 endpoint sends it, the `grant` that served the read, named as in the entries, so a copy compares with its entry exactly.

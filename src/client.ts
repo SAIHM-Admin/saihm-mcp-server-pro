@@ -99,7 +99,8 @@ import {
   ctEqual,
   SeqHighWaterMark,
 } from '@saihm/client-pro';
-import { ShareEventsFeed, type ShareEventsTransport, type ShareStates } from './share-events.js';
+import { ShareEventsFeed, type FeedStore, type ShareEventsTransport, type ShareStates } from './share-events.js';
+import { FileFeedStore, feedStatePath } from './feed-state-file.js';
 import { shareStatesPath, writeShareStates } from './share-states-file.js';
 import { safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
 import {
@@ -4508,7 +4509,14 @@ export class SaihmProClient {
       soon: () => { if (pending === undefined && path !== undefined) { pending = setTimeout(write, 250); pending.unref(); } },
       stop: () => { clearInterval(every); if (pending !== undefined) clearTimeout(pending); write(); },
     };
-    this.shareFeed = new ShareEventsFeed({ transport, onChange: () => this.shareStatesWriter?.soon() });
+    // Where the feed's position survives a restart. `off` keeps it in memory, and so does a root that cannot be
+    // resolved: a subscriber with nowhere to write is never broken by this and sets nothing. The cost of memory-only
+    // is the listing this client fetched at every start before 0.11.0.
+    let store: FeedStore | undefined;
+    if ((process.env.SAIHM_SHARE_MAP_STORE ?? 'file') !== 'off') {
+      try { store = new FileFeedStore(feedStatePath(this.agentIdHashHex)); } catch { store = undefined; }
+    }
+    this.shareFeed = new ShareEventsFeed({ transport, ...(store ? { store } : {}), onChange: () => this.shareStatesWriter?.soon() });
     this.shareFeed.start();
   }
 

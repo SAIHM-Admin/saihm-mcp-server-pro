@@ -478,3 +478,162 @@ test('counts follow the map', async () => {
   await run(feed, sc.finished);
   assert.deepEqual(feed.snapshot().counts, { live: 2, stale: 1, ended: 1, erased: 1 });
 });
+
+test('a restored state skips the listing: the first poll carries the cursor, does not wait, and completes on the answer', async () => {
+  let saved: PersistedFeed | undefined;
+  const store = { load: () => saved, save: (p: PersistedFeed) => { saved = JSON.parse(JSON.stringify(p)); } };
+  const first = scripted([ok([], { gap: true }), ok([ev('share-created', { scope: 'read', expiryEpoch: null })])], [listing([])]);
+  await run(first.make({ store }), first.finished);
+  assert.equal(first.listingCalls(), 1, 'the cold start fetched the listing');
+  assert.ok(saved?.cursor && saved.savedAt && saved.reconciledAt, JSON.stringify(saved));
+
+  const sc = scripted([ok([ev('shared-cell-updated', { seq: '2', commitment: C })])], [listing([])]);
+  const feed = sc.make({ store });
+  const before = feed.snapshot();
+  assert.deepEqual([before.complete, before.entries.length, before.asOf], [false, 1, null], 'restored, and not yet confirmed by this process');
+  await run(feed, sc.finished);
+  assert.equal(sc.listingCalls(), 0, 'the whole listing was never asked for');
+  assert.deepEqual([sc.polls[0].cursor === null, sc.polls[0].waitMs], [false, 0], 'the cursor was sent, and the catch-up answer not waited for');
+  const s = feed.snapshot();
+  assert.deepEqual([s.complete, s.entries.length, s.entries[0].seq], [true, 1, '2'], JSON.stringify(s));
+});
+
+test('a restored state older than the operator keeps events for drops its cursor instead of spending a poll on it', async () => {
+  let saved: PersistedFeed | undefined;
+  const store = { load: () => saved, save: (p: PersistedFeed) => { saved = JSON.parse(JSON.stringify(p)); } };
+  const first = scripted([ok([], { gap: true }), ok([ev('share-created', { scope: 'read', expiryEpoch: null })])], [listing([])]);
+  await run(first.make({ store }), first.finished);
+  saved = { ...saved!, savedAt: new Date(Date.UTC(2026, 7, 1)).toISOString() };
+
+  const sc = scripted([ok([])], [listing([{ sharer: S, cellId: 'doc', grant: G1 }])]);
+  await run(sc.make({ store }), sc.finished);
+  assert.equal(sc.polls[0].cursor, null, 'a cursor the operator would certainly refuse was not sent');
+  assert.equal(sc.listingCalls(), 1);
+});
+
+test('a state that does not say when it reconciled still reconciles, and one with no cursor is no warm start', async () => {
+  let saved: PersistedFeed | undefined;
+  const store = { load: () => saved, save: (p: PersistedFeed) => { saved = JSON.parse(JSON.stringify(p)); } };
+  const first = scripted([ok([], { gap: true }), ok([ev('share-created', { scope: 'read', expiryEpoch: null })])], [listing([])]);
+  await run(first.make({ store }), first.finished);
+  const complete = { ...saved! };
+
+  // A state written before 0.11.0: the cursor is still used, and the daily reconciliation is still due.
+  saved = { v: 1, operator: complete.operator, cursor: complete.cursor, since: complete.since, entries: complete.entries, seen: complete.seen };
+  const older = scripted([ok([])], [listing([{ sharer: S, cellId: 'doc', grant: G1 }])]);
+  await run(older.make({ store }), older.finished);
+  assert.deepEqual([older.polls[0].cursor === null, older.listingCalls()], [false, 1], 'the cursor was kept, the listing fetched');
+
+  // No cursor is no position, so there is nothing to resume from and the map is not warm.
+  saved = { ...complete, cursor: null };
+  const none = scripted([ok([])], [listing([{ sharer: S, cellId: 'doc', grant: G1 }])]);
+  const feed = none.make({ store });
+  assert.equal(feed.snapshot().complete, false);
+  await run(feed, none.finished);
+  assert.deepEqual([none.polls[0].cursor, none.polls[0].waitMs, none.listingCalls()], [null, 0, 1]);
+});
+
+test('an update whose version fields are unusable keeps the stated pair and reconciles, whether one fails or both', async () => {
+  const stated = [{ sharer: S, cellId: 'doc', grant: G1, seq: '2', commitment: C }];
+  const sc = scripted([
+    ok([], { gap: true }),
+    ok([ev('share-created', { scope: 'read', expiryEpoch: null }), ev('shared-cell-updated', { seq: '2', commitment: C })]),
+    ok([ev('shared-cell-updated', { seq: 'two', commitment: 'not-hex' })]),
+    ok([ev('shared-cell-updated', { seq: '3', commitment: 'not-hex' })]),
+  ], [listing([]), listing(stated), listing(stated)]);
+  const feed = sc.make();
+  await run(feed, sc.finished);
+  const e = feed.snapshot().entries[0];
+  assert.deepEqual([e.seq, e.commitment], ['2', C], 'neither half of the pair was lowered, and no new sequence was stated under the old commitment');
+  assert.equal(sc.listingCalls(), 3, 'each write no field of the map could show was reconciled rather than lost');
+});
+
+test('a warm start held back by the operator fetches the listing instead of waiting, and stays incomplete if that fails', async () => {
+  let saved: PersistedFeed | undefined;
+  const store = { load: () => saved, save: (p: PersistedFeed) => { saved = JSON.parse(JSON.stringify(p)); } };
+  const first = scripted([ok([], { gap: true }), ok([ev('share-created', { scope: 'read', expiryEpoch: null })])], [listing([])]);
+  await run(first.make({ store }), first.finished);
+  const state = { ...saved! };
+
+  // The operator's minimum interval between polls of one identity, which a quick restart runs into.
+  const held: PollAnswer = { status: 429, body: { retryAfterMs: 5000 } };
+  const sc = scripted([held, ok([])], [listing([{ sharer: S, cellId: 'doc', grant: G1 }])]);
+  const feed = sc.make({ store });
+  await run(feed, sc.finished);
+  assert.equal(sc.listingCalls(), 1, 'the listing answered while the poll was held back');
+  assert.equal(feed.snapshot().complete, true, 'complete without waiting out the interval');
+  assert.ok(sc.sleeps.some((ms) => ms >= 5000), 'and the interval was still honoured afterwards');
+
+  // The same, with no listing to be had: the map must not read as complete just because the warm flag was dropped.
+  saved = state;
+  const blind = scripted([held, ok([])], [null]);
+  const feed2 = blind.make({ store });
+  await run(feed2, blind.finished);
+  assert.deepEqual([feed2.snapshot().complete, feed2.snapshot().entries.length], [false, 1], 'incomplete, and the restored entries kept');
+});
+
+test('a map that had dropped entries at the cap is not resumed from, and the state is saved no faster than the interval', async () => {
+  let saved: PersistedFeed | undefined;
+  let saves = 0;
+  const store = { load: () => saved, save: (p: PersistedFeed) => { saves++; saved = JSON.parse(JSON.stringify(p)); } };
+  // Four answers a tenth of a second apart: every one moves the cursor, and the interval must hold most of them back.
+  const busy = scripted([
+    ok([], { gap: true }),
+    ok([ev('share-created', { scope: 'read', expiryEpoch: null })]),
+    ok([ev('shared-cell-updated', { seq: '2', commitment: C })]),
+    ok([ev('shared-cell-updated', { seq: '3', commitment: C })]),
+  ], [listing([])], { step: 100 });
+  await run(busy.make({ store }), busy.finished);
+  assert.ok(saves <= 2, `saved ${saves} times for four answers`);
+  assert.equal(saved?.entries[0]?.seq, '3', 'and the last position is saved when the feed stops');
+  assert.equal(saved?.capped, false);
+
+  // The same state, but the writer had already dropped entries: it is restored, and reconciled rather than resumed.
+  saved = { ...saved!, capped: true };
+  const sc = scripted([ok([])], [listing([{ sharer: S, cellId: 'doc', grant: G1, seq: '3', commitment: C }])]);
+  const feed = sc.make({ store });
+  assert.equal(feed.snapshot().entries.length, 1, 'the entries are still restored');
+  await run(feed, sc.finished);
+  assert.equal(sc.listingCalls(), 1, 'a capped map is not one to resume from');
+  assert.equal(feed.snapshot().complete, true);
+});
+
+test('held back with a catch-up owed: the listing answers instead, and only when the wait is worth replacing', async () => {
+  let saved: PersistedFeed | undefined;
+  const store = { load: () => saved, save: (p: PersistedFeed) => { saved = JSON.parse(JSON.stringify(p)); } };
+  const first = scripted([ok([], { gap: true }), ok([ev('share-created', { scope: 'read', expiryEpoch: null })])], [listing([])]);
+  await run(first.make({ store }), first.finished);
+  const state = { ...saved! };
+  const rows = [{ sharer: S, cellId: 'doc', grant: G1 }];
+
+  // The state names ANOTHER operator: the position means nothing here, the map owes a catch-up, and the first poll
+  // is held back. The catch-up must have happened by the time the script ends — and must leave the map COMPLETE.
+  saved = { ...state, operator: 'ab'.repeat(16) };
+  const other = scripted([{ status: 429, body: { retryAfterMs: 5000 } }], [listing(rows)]);
+  const feed = other.make({ store });
+  await run(feed, other.finished);
+  assert.equal(other.polls[0].cursor, null, "another operator's cursor was not sent");
+  assert.deepEqual([other.listingCalls(), feed.snapshot().complete], [1, true], 'reconciled while held back, and complete after it');
+
+  // A wait shorter than the budget is not worth replacing with the whole listing: it is simply waited out.
+  saved = state;
+  const brief = scripted([{ status: 503, body: { retryAfterMs: 200 } }, ok([])], [listing(rows)]);
+  const feed2 = brief.make({ store });
+  await run(feed2, brief.finished);
+  assert.deepEqual([brief.listingCalls(), feed2.snapshot().complete], [0, true], 'the short wait was taken, and the position still answered');
+  assert.ok(brief.sleeps.some((ms) => ms >= 200 && ms < 1000), JSON.stringify(brief.sleeps.slice(0, 5)));
+});
+
+test('a catch-up that fails while polls are held back is not retried on every one of them', async () => {
+  let saved: PersistedFeed | undefined;
+  const store = { load: () => saved, save: (p: PersistedFeed) => { saved = JSON.parse(JSON.stringify(p)); } };
+  const first = scripted([ok([], { gap: true }), ok([ev('share-created', { scope: 'read', expiryEpoch: null })])], [listing([])]);
+  await run(first.make({ store }), first.finished);
+
+  // Two held-back polls a tenth of a second apart, and a listing that cannot be had the first time. The second poll
+  // must NOT ask again: a client held back repeatedly would otherwise fetch the whole listing on each one.
+  const held: PollAnswer = { status: 429, body: { retryAfterMs: 5000 } };
+  const sc = scripted([held, held, ok([])], [null, listing([{ sharer: S, cellId: 'doc', grant: G1 }])], { step: 100 });
+  await run(sc.make({ store }), sc.finished);
+  assert.equal(sc.listingCalls(), 1, 'asked once, then left alone until the retry was due');
+});

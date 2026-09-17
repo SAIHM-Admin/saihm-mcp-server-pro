@@ -2,6 +2,55 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — 2026-09-17
+
+A restart no longer costs the whole share listing: the feed keeps its position
+and its map between runs and asks the endpoint only for what it missed. Still
+opt-in (`SAIHM_EVENTS=1`); no new tools and no removed tools.
+
+### Added
+
+- **The share feed's position and map survive a restart.** They are kept in
+  `feed-state.json`, beside the erasure feed and under the same root, owner-only
+  and replaced whole under a lock. A new process resumes from the position it
+  finds and asks for what it missed; before this it fetched the entire share
+  listing at every start. `since` carries over with it.
+- **A poll held back while a catch-up is owed asks for the listing instead of
+  waiting it out.** An operator holds a poll back by its minimum interval between
+  polls of one identity, most often right after a quick restart; waiting it out
+  would leave a map owing a catch-up for the whole interval, and would make a
+  restored position slower than no position at all. The listing keeps the spacing
+  it has on the answered path.
+- `SAIHM_SHARE_MAP_STORE`: `file` (the default) or `off` for memory only. A root
+  that cannot be written falls back to memory on its own, so an installation
+  with nowhere to write needs no setting and loses nothing it had.
+
+### Fixed
+
+- **An update event whose `seq` and `commitment` cannot be read no longer
+  lowers the version the map already states, and no longer passes unnoticed.**
+  The pair moves together or not at all — a new sequence stated under the old
+  commitment would read as a version a consumer could compare, and it is not
+  one — and a write that no field of the map can show now schedules a
+  catch-up instead of being lost until the next one. Both fields are required
+  on those events, so an endpoint that sends them as specified sees no change.
+
+### Notes
+
+- **A restored map is not a complete map.** Until the process has had an answer
+  of its own, `complete` is false and `asOf` is null, exactly as for a map that
+  is still catching up: a previous process's map never reads as one this process
+  confirmed, and nothing may be concluded from a missing entry. What is saved is
+  the work, not the assurance.
+- A state that is missing, unreadable, malformed, too large, written for another
+  operator, or older than the endpoint keeps events for is ignored, and the
+  client starts as it did before.
+- Several processes of one identity may each write the file. Each write holds a
+  position and the map that goes with it together, so the last write is a pair a
+  later process can resume from.
+- The tenant directory now holds `feed-state.json` beside `share-states.json`
+  and the erasure feed; each of the three may create the directory first.
+
 ## [0.10.0] — 2026-09-14
 
 Share events for consumers that read them from outside the recall result: a
@@ -1325,6 +1374,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.11.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.0
 [0.10.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.10.0
 [0.9.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.9.0
 [0.8.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.8.0

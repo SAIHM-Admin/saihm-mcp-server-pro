@@ -97,13 +97,16 @@ function shareMapFile(home: string) {
     const tenants = join(home, 'tenants');
     const dir = join(tenants, readdirSync(tenants)[0]);
     const f = join(dir, 'share-states.json');
-    return { doc: JSON.parse(readFileSync(f, 'utf8')), mode: statSync(f).mode & 0o777, dirMode: statSync(dir).mode & 0o777, names: readdirSync(dir) };
+    // Sorted: two files live here now, and a directory listing is in no particular order.
+    let stateMode: number | null = null;
+    try { stateMode = statSync(join(dir, 'feed-state.json')).mode & 0o777; } catch { stateMode = null; }
+    return { doc: JSON.parse(readFileSync(f, 'utf8')), mode: statSync(f).mode & 0o777, stateMode, dirMode: statSync(dir).mode & 0o777, names: readdirSync(dir).sort() };
   } catch {
     return null;
   }
 }
 
-async function session(extra: Record<string, string>, hooks: { beforeFirst?: (seen: Seen) => Promise<void>; afterFirst: (seen: Seen) => Promise<void> }) {
+async function session(extra: Record<string, string>, hooks: { beforeFirst?: (seen: Seen) => Promise<void>; afterFirst: (seen: Seen) => Promise<void>; expectFile?: boolean }) {
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   const home = mkdtempSync(join(tmpdir(), 'saihm-home-'));
@@ -117,7 +120,8 @@ async function session(extra: Record<string, string>, hooks: { beforeFirst?: (se
     await hooks.afterFirst(mock.seen);
     // With the feed on, the file follows the map while the process runs, not only when it stops.
     let during: ReturnType<typeof shareMapFile> = null;
-    if (extra.SAIHM_EVENTS === '1') {
+    // `expectFile: false` for a root nothing can be written under: the feed still runs, so the wait would never end.
+    if (extra.SAIHM_EVENTS === '1' && hooks.expectFile !== false) {
       await until(() => (during = shareMapFile(home))?.doc.counts.live === 1, 5000, 'the share map file to show the share');
     }
     const r = await d.rpc(3, 'tools/call', { name: 'saihm_recall', arguments: {} });
@@ -165,7 +169,9 @@ test('SAIHM_EVENTS=1: the feed starts with the server, recall carries the summar
 
   assert.equal(on.during?.doc.entries.length, 1, 'written while the process ran');
   assert.ok(on.file, 'the share map file is there after the process ended');
-  assert.deepEqual([on.file.mode, on.file.dirMode, on.file.names], [0o600, 0o700, ['share-states.json']], 'owner-only, and no lock or temporary file left');
+  // Both files, and nothing else: the feed state joined the share map in this directory in 0.11.0, and a lock or a
+  // temporary file left behind would show here too.
+  assert.deepEqual([on.file.mode, on.file.stateMode, on.file.dirMode, on.file.names], [0o600, 0o600, 0o700, ['feed-state.json', 'share-states.json']], 'owner-only, and no lock or temporary file left');
   assert.deepEqual(Object.keys(on.file.doc), ['v', 'since', 'complete', 'asOf', 'stopped', 'startedAt', 'counts', 'entries']);
   assert.deepEqual([on.file.doc.v, on.file.doc.since, on.file.doc.counts, on.file.doc.entries], [1, h.since, h.counts, [ENTRY]]);
 
@@ -174,4 +180,29 @@ test('SAIHM_EVENTS=1: the feed starts with the server, recall carries the summar
   assert.equal(off.file, null, 'no feed, no file');
   assert.equal(off.early.tenants, false, 'without the switch nothing is built before the first tool call');
   assert.equal(off.code, 0);
+});
+
+test('SAIHM_SHARE_MAP_STORE=off keeps the position in memory: the share map is still written, the state file is not', async () => {
+  const memoryOnly = await session({ SAIHM_EVENTS: '1', SAIHM_SHARE_MAP_STORE: 'off' }, {
+    beforeFirst: (seen) => until(() => seen.polls.length > 0, 10000, 'the feed to start before any tool call'),
+    afterFirst: (seen) => until(() => seen.held && seen.sharesOnly > 0, 10000, 'the feed to apply the event and wait'),
+  });
+  assert.ok(memoryOnly.file, 'the share map file is written as before');
+  assert.deepEqual(memoryOnly.file.names, ['share-states.json'], 'and nothing keeps the position');
+  assert.equal(memoryOnly.file.stateMode, null);
+  assert.equal(memoryOnly.code, 0, `exit ${memoryOnly.code}`);
+});
+
+test('a root the state cannot be written under costs the feed nothing: it runs, and only the position is lost', async () => {
+  // A relative root is refused by the path resolver, which is how every store failure reaches this code: the feed must
+  // start anyway, because a subscriber with nowhere to write is not a subscriber with no feed.
+  const unwritable = await session({ SAIHM_EVENTS: '1', SAIHM_ERASURE_FEED_DIR: 'not/absolute' }, {
+    expectFile: false,
+    beforeFirst: (seen) => until(() => seen.polls.length > 0, 10000, 'the feed to start anyway'),
+    afterFirst: (seen) => until(() => seen.held && seen.sharesOnly > 0, 10000, 'the feed to apply the event and wait'),
+  });
+  const h = unwritable.structured.shareStates;
+  assert.deepEqual([h?.complete, h?.stopped], [true, null], JSON.stringify(h));
+  assert.equal(unwritable.file, null, 'nothing was written anywhere');
+  assert.equal(unwritable.code, 0, `exit ${unwritable.code}`);
 });
