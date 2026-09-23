@@ -33,6 +33,8 @@ than overwriting it.
 }
 ```
 
+Host note (2026-09-23): From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which serves the identical service until 2026-12-31 and is then discontinued: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly.
+
 **`timeout` is required, not decorative.** Cline's default MCP start-up budget
 is 1.5 seconds. `npx` cannot resolve and launch a package that fast, and a
 server that misses the deadline is skipped **silently** — the tools simply never

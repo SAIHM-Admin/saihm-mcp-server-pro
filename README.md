@@ -43,6 +43,8 @@ existing `mcpServers` section:
 }
 ```
 
+> **Host note (2026-09-23).** From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which serves the identical service until 2026-12-31 and is then discontinued: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly.
+
 Restart the connection and say **"Recall my SAIHM memories."** You're running.
 
 Two details in that config are load-bearing:
@@ -230,7 +232,7 @@ working defaults.
 
 | Env | Required | Meaning |
 | --- | --- | --- |
-| `SAIHM_ENDPOINT_URL` | no | `https://…/mcp` (or `http://` for `127.0.0.1`/`localhost` only). **Defaults to `https://saihm.net/mcp`** — set it only to reach a different operator. |
+| `SAIHM_ENDPOINT_URL` | no | `https://…/mcp` (or `http://` for `127.0.0.1`/`localhost` only). **Defaults to `https://saihm.net/mcp`** — set it only to reach a different operator. Versions 0.11.1 and earlier defaulted to `saihm.coti.global`, which serves the identical service until 2026-12-31 and is then discontinued. |
 | `SAIHM_MASTER_SECRET_FILE` | see note | Path to a **mode-600** file holding the hex master secret. **The preferred way to supply a key**, because it keeps the key out of a config file that may be synced or shared. Takes precedence over `SAIHM_MASTER_SECRET_HEX`. |
 | `SAIHM_MASTER_SECRET_HEX` | see note | The master secret inline, ≥ 64 hex characters (≥ 32 bytes), high-entropy, client-held, never sent. Prefer the file form: anything inline lands in the config file itself. |
 | `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool — the one that answers *"Join SAIHM"*. **On by default**; set to `0` to remove it and expose only the canonical eight tools. |
