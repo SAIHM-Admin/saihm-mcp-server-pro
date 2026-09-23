@@ -2,6 +2,34 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.1] — 2026-09-23
+
+Diagnostics. No new tools, no removed tools, no schema change.
+
+### Added
+
+- **A recall without a cache now says so, once.** The cache stays off for an
+  identity whose key did not come from the default file: that operator chose
+  where state lives, and the cache holds memories as plaintext at rest, so it is
+  not turned on for them. What was missing is that nobody was told — a recall
+  without it fetches every memory every time, and a subscriber had no way to know
+  which they were paying for. The notice names the variable to set, is written to
+  stderr so it cannot corrupt the tool protocol on stdout, and stays silent for
+  anyone who turned the cache off deliberately with `SAIHM_RECALL_CACHE=0`.
+
+### Changed
+
+- **An unreachable endpoint now names the endpoint and the reason.** A refused
+  connection and a DNS failure previously produced the *same* message — typed
+  `network`, but naming neither the endpoint dialed nor the cause — so two
+  different problems read identically and neither suggested a next step. They
+  now report the scheme, host and path, plus the underlying code
+  (`ECONNREFUSED`, `ENOTFOUND`, and so on). Userinfo, query and fragment are
+  stripped before the URL is quoted: that value is operator-supplied, may carry
+  credentials or a token, and an error is read by an agent and kept in a
+  transcript. The typed `network` code and status are unchanged, so anything
+  matching on them is unaffected.
+
 ## [0.11.0] — 2026-09-17
 
 A restart no longer costs the whole share listing: the feed keeps its position
@@ -1374,6 +1402,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.11.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.1
 [0.11.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.0
 [0.10.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.10.0
 [0.9.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.9.0

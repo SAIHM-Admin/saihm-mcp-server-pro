@@ -1,6 +1,6 @@
 {
   "name": "@saihm/mcp-server-pro",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "mcpName": "io.github.SAIHM-Admin/saihm-mcp-server-pro",
   "description": "Free-to-start portable memory for AI agents: encrypted, shareable, provably erased. Join SAIHM. Ask your agent to \"Join SAIHM\".",
   "type": "module",

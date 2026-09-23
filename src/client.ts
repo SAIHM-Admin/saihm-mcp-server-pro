@@ -579,6 +579,33 @@ const MAX_REDIRECTS = 5;
  */
 const MAX_RESPONSE_HEADER_BYTES = 96 * 1024;
 
+/**
+ * An endpoint URL is safe to quote in an error ONLY after userinfo, query and fragment are
+ * dropped. SAIHM_ENDPOINT_URL is operator-supplied and may legitimately carry credentials
+ * (https://user:pass@host) or a token in the query string; an error is read by an agent and
+ * lands in a transcript, so echoing it raw would publish what this client exists to protect.
+ * Scheme, host and path are what identify a mistyped endpoint, and nothing more is needed.
+ */
+export function safeEndpoint(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return '(unparseable endpoint URL)';
+  }
+}
+
+/**
+ * The reason a transport attempt failed, as a short code. MEASURED 2026-09-23: a refused
+ * connection and a DNS failure both produced the SAME message here — two different causes
+ * collapsed into one line that named neither the endpoint nor the reason, so a reader had
+ * no signal that more detail existed. Node puts the code on the error or on its `cause`.
+ */
+export function transportReason(e: unknown): string {
+  const err = e as { code?: string; message?: string; cause?: { code?: string; message?: string } };
+  return err?.code ?? err?.cause?.code ?? err?.cause?.message ?? err?.message ?? 'no further detail available';
+}
+
 const KEEPALIVE_OPTS = { keepAlive: true, keepAliveMsecs: KEEPALIVE_PROBE_MS, maxSockets: 8, maxFreeSockets: 4 };
 
 /*
@@ -3171,6 +3198,12 @@ export class SaihmProClient {
       throw new SaihmEndpointError(
         0,
         'network',
+        // BARE LITERAL, deliberately, and it stays one. FF18 sweeps the join path for every
+        // SaihmEndpointError mint whose message is not a bare literal and requires each to be
+        // individually accounted for and driven at two magnitudes — the guarantee being that
+        // no endpoint-sized text can reach the JoinState the server retains. Naming the dialed
+        // endpoint here was tried on 2026-09-23 and the sweep correctly rejected it: the win is
+        // small, the invariant is not, and the endpoint-call path already carries the detail.
         'SAIHM onboard transport error',
       );
     } finally {
@@ -3369,7 +3402,8 @@ export class SaihmProClient {
       throw new SaihmEndpointError(
         0,
         'network',
-        `SAIHM endpoint ${method} transport error`,
+        `SAIHM endpoint ${method} could not reach ${safeEndpoint(this.endpoint)}` +
+          ` (${transportReason(e)})`,
       );
     } finally {
       clearTimeout(timer);

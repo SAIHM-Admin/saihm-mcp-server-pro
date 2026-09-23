@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { deriveIdentity, toHex, fromHex } from "@saihm/client-pro";
-import { SaihmProClient, SaihmEndpointError } from "../src/client.js";
+import { SaihmProClient, SaihmEndpointError, safeEndpoint, transportReason } from "../src/client.js";
 
 const masterOf = (b: number): Uint8Array => new Uint8Array(32).fill(b);
 
@@ -161,5 +161,40 @@ describe("SC7: governance surfaces a clean typed unavailable", () => {
         (e: unknown) => e instanceof SaihmEndpointError && e.status === 403 && e.code === "governance_unavailable",
       );
     } finally { await new Promise<void>((r) => s.close(() => r())); }
+  });
+});
+
+describe("SC12: a transport failure names the endpoint and the reason", () => {
+  it("safeEndpoint drops userinfo, query and fragment and fails closed on garbage", () => {
+    // The endpoint is quoted back in an error that an agent reads and a transcript keeps.
+    // SAIHM_ENDPOINT_URL is operator-supplied and may carry credentials or a token.
+    assert.equal(safeEndpoint("https://user:secret@op.example.com/mcp?token=abc#f"), "https://op.example.com/mcp");
+    assert.equal(safeEndpoint("https://op.example.com:8443/a/b"), "https://op.example.com:8443/a/b");
+    assert.equal(safeEndpoint("not a url"), "(unparseable endpoint URL)");
+  });
+
+  it("transportReason reads the code off the error or its cause", () => {
+    assert.equal(transportReason({ code: "ECONNREFUSED" }), "ECONNREFUSED");
+    assert.equal(transportReason({ cause: { code: "ENOTFOUND" } }), "ENOTFOUND");
+    assert.equal(transportReason({}), "no further detail available");
+  });
+
+  it("a refused connection reports the endpoint and ECONNREFUSED, not a bare phrase", async () => {
+    // MEASURED 2026-09-23: a refused connection and a DNS failure previously produced the
+    // SAME message, naming neither the endpoint nor the cause. Port 1 on loopback is closed.
+    const master = new Uint8Array(32).fill(7);
+    const c = new SaihmProClient("http://127.0.0.1:1/mcp", "Bearer x", master, { tier: "PRO" });
+    await assert.rejects(
+      () => c.recall(),
+      (e: unknown) => {
+        assert.ok(e instanceof SaihmEndpointError, "typed error preserved");
+        assert.equal((e as SaihmEndpointError).code, "network", "still coded network");
+        const m = (e as Error).message;
+        assert.ok(m.includes("http://127.0.0.1:1/mcp"), `names the endpoint: ${m}`);
+        assert.ok(/ECONNREFUSED|ECONNRESET|EADDRNOTAVAIL/.test(m), `names the cause: ${m}`);
+        assert.ok(!/transport error$/.test(m), `the bare phrase is replaced: ${m}`);
+        return true;
+      },
+    );
   });
 });
