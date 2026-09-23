@@ -160,7 +160,7 @@ const CONFIG_SCHEMA = {
     saihm_endpoint_url: {
       type: 'string',
       title: 'SAIHM operator endpoint URL',
-      description: 'Optional. Set only to point at a different SAIHM operator; defaults to https://saihm.coti.global/mcp.',
+      description: 'Optional. Set only to point at a different SAIHM operator; defaults to https://saihm.net/mcp.',
     },
   },
 };
@@ -203,7 +203,7 @@ const manifest = {
       title: CONFIG_SCHEMA.properties.saihm_endpoint_url.title,
       description: CONFIG_SCHEMA.properties.saihm_endpoint_url.description,
       required: false,
-      default: 'https://saihm.coti.global/mcp',
+      default: 'https://saihm.net/mcp',
     },
   },
   tools: tools.map((t) => ({ name: t.name, description: t.description })),

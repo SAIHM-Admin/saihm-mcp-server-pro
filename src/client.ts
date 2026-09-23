@@ -240,7 +240,7 @@ export const MAX_ANNOUNCEMENT_TOTAL_CHARS = 32 * 1024;
  * identity, so an unconfigured agent gets the join hint *before* any request,
  * and `saihm_join` needs explicit human approval before memory is activated.
  */
-export const DEFAULT_ENDPOINT = 'https://saihm.coti.global/mcp';
+export const DEFAULT_ENDPOINT = 'https://saihm.net/mcp';
 
 /**
  * Appended to every remaining bootFromEnv configuration error. A bare env-var

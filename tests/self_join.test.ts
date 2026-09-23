@@ -233,7 +233,7 @@ test('bootFromEnv: endpoint UNSET + valid secret => boots against the declared d
         DEFAULT_ENDPOINT,
         'unset endpoint must resolve to the hosted operator server.json declares',
       );
-      assert.equal(DEFAULT_ENDPOINT, 'https://saihm.coti.global/mcp');
+      assert.equal(DEFAULT_ENDPOINT, 'https://saihm.net/mcp');
     });
   } finally {
     rmSync(home, { recursive: true, force: true });

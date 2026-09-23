@@ -35,7 +35,7 @@ existing `mcpServers` section:
       "command": "npx",
       "args": ["-y", "@saihm/mcp-server-pro"],
       "env": {
-        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp"
+        "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp"
       },
       "timeout": 60
     }
@@ -219,7 +219,7 @@ never locks anyone to a single provider. Running your own endpoint means
 provisioning that storage yourself.
 
 Prefer not to run storage at all? The hosted operator at
-<https://saihm.coti.global> provides durable storage and is **non-custodial** —
+<https://saihm.net> provides durable storage and is **non-custodial** —
 because this client encrypts every cell locally, the hosted operator only ever
 stores ciphertext and never holds a key.
 
@@ -230,7 +230,7 @@ working defaults.
 
 | Env | Required | Meaning |
 | --- | --- | --- |
-| `SAIHM_ENDPOINT_URL` | no | `https://…/mcp` (or `http://` for `127.0.0.1`/`localhost` only). **Defaults to `https://saihm.coti.global/mcp`** — set it only to reach a different operator. |
+| `SAIHM_ENDPOINT_URL` | no | `https://…/mcp` (or `http://` for `127.0.0.1`/`localhost` only). **Defaults to `https://saihm.net/mcp`** — set it only to reach a different operator. |
 | `SAIHM_MASTER_SECRET_FILE` | see note | Path to a **mode-600** file holding the hex master secret. **The preferred way to supply a key**, because it keeps the key out of a config file that may be synced or shared. Takes precedence over `SAIHM_MASTER_SECRET_HEX`. |
 | `SAIHM_MASTER_SECRET_HEX` | see note | The master secret inline, ≥ 64 hex characters (≥ 32 bytes), high-entropy, client-held, never sent. Prefer the file form: anything inline lands in the config file itself. |
 | `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool — the one that answers *"Join SAIHM"*. **On by default**; set to `0` to remove it and expose only the canonical eight tools. |

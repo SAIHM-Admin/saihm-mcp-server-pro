@@ -2,6 +2,20 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.2] — 2026-09-23
+
+Project host. No new tools, no removed tools, no schema change.
+
+### Changed
+
+- **The default endpoint is now `https://saihm.net/mcp`.** An unset
+  `SAIHM_ENDPOINT_URL` resolves there, and the registry manifest declares the
+  same default. The previous host, `saihm.coti.global`, serves the identical
+  service indefinitely, so a configuration that names it keeps working
+  unchanged and nothing needs to be re-issued.
+- The README, the install notes, the registry manifest and the bundle manifest
+  describe the project at <https://saihm.net>.
+
 ## [0.11.1] — 2026-09-23
 
 Diagnostics. No new tools, no removed tools, no schema change.
@@ -1402,6 +1416,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.11.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.2
 [0.11.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.1
 [0.11.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.0
 [0.10.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.10.0

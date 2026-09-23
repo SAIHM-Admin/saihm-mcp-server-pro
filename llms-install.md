@@ -25,7 +25,7 @@ than overwriting it.
       "command": "npx",
       "args": ["-y", "@saihm/mcp-server-pro"],
       "env": {
-        "SAIHM_ENDPOINT_URL": "https://saihm.coti.global/mcp"
+        "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp"
       },
       "timeout": 60
     }

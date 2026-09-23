@@ -25,7 +25,7 @@ const masterOf = (b: number): Uint8Array => new Uint8Array(32).fill(b);
 describe("SC1: identity derivation", () => {
   it("agentIdHash is deterministic = the published record's hash; record shape is correct", () => {
     const master = masterOf(11);
-    const c = new SaihmProClient("https://saihm.coti.global/mcp", "Bearer x", master, { tier: "PRO" });
+    const c = new SaihmProClient("https://saihm.net/mcp", "Bearer x", master, { tier: "PRO" });
     assert.equal(c.agentIdHash, toHex(deriveIdentity(master).agentIdHash));
     assert.equal(c.identityRecord.mldsaPubKey.length, 1952 * 2); // hex of the 1952-byte ML-DSA-65 public key
   });
@@ -35,7 +35,7 @@ describe("SC2: endpoint URL hardening", () => {
   it("rejects non-loopback http; accepts https and loopback http", () => {
     const master = masterOf(21);
     assert.throws(() => new SaihmProClient("http://example.com/mcp", "Bearer x", master));
-    assert.doesNotThrow(() => new SaihmProClient("https://saihm.coti.global/mcp", "Bearer x", master));
+    assert.doesNotThrow(() => new SaihmProClient("https://saihm.net/mcp", "Bearer x", master));
     assert.doesNotThrow(() => new SaihmProClient("http://127.0.0.1:3001/mcp", "Bearer x", master));
   });
 });
@@ -55,7 +55,7 @@ describe("SC3: bootFromEnv validation", () => {
       // agent is pointed at saihm_join instead of a bare env-var dead end.
       assert.throws(() => SaihmProClient.bootFromEnv(), /Join SAIHM.*saihm_join/);
       rmSync(emptyHome, { recursive: true, force: true });
-      process.env.SAIHM_ENDPOINT_URL = "https://saihm.coti.global/mcp";
+      process.env.SAIHM_ENDPOINT_URL = "https://saihm.net/mcp";
       process.env.SAIHM_AUTH_HEADER = "Bearer test";
       process.env.SAIHM_MASTER_SECRET_HEX = "00"; // 1 byte
       assert.throws(() => SaihmProClient.bootFromEnv(), /decode to >= 32 bytes/);

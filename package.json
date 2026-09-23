@@ -1,6 +1,6 @@
 {
   "name": "@saihm/mcp-server-pro",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "mcpName": "io.github.SAIHM-Admin/saihm-mcp-server-pro",
   "description": "Free-to-start portable memory for AI agents: encrypted, shareable, provably erased. Join SAIHM. Ask your agent to \"Join SAIHM\".",
   "type": "module",
@@ -59,7 +59,7 @@
   ],
   "license": "Apache-2.0",
   "author": "SAIHM",
-  "homepage": "https://saihm.coti.global",
+  "homepage": "https://saihm.net",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SAIHM-Admin/saihm-mcp-server-pro.git"
