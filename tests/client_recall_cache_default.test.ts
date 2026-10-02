@@ -28,6 +28,8 @@ const KEYS = [
   'SAIHM_RECALL_CACHE_PATH',
   'SAIHM_ERASURE_FEED',
   'SAIHM_ERASURE_FEED_DIR',
+  'SAIHM_IDENTITY',
+  'SAIHM_IDENTITY_PASSPHRASE',
 ] as const;
 
 function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {

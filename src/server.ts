@@ -23,14 +23,18 @@
  *   npx -y @saihm/mcp-server-pro join
  * Upgrade FREE -> monthly paid, same key/memories (one-off — requires SAIHM_TIER=FREE):
  *   npx -y @saihm/mcp-server-pro upgrade [PRO|PRO_FAST|ENTERPRISE|ENTERPRISE_FAST]
+ * Carry an existing identity to another machine or a hosted agent environment (one-off; writes a
+ * token and its passphrase to a mode-600 file, prints neither):
+ *   npx -y @saihm/mcp-server-pro export-identity
  *
  * Boot from env (self-onboard): SAIHM_ENDPOINT_URL, SAIHM_MASTER_SECRET_HEX,
  *   SAIHM_TIER, SAIHM_PAYMENT_METHOD. Advanced/legacy: SAIHM_AUTH_HEADER (static).
+ *   Or an exported identity: SAIHM_IDENTITY + SAIHM_IDENTITY_PASSPHRASE.
  */
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, join as pathJoin } from 'node:path';
+import { basename, dirname, join as pathJoin } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -52,11 +56,30 @@ import {
 } from './render_fence.js';
 
 import { z } from 'zod';
+import { deriveIdentity, toHex } from '@saihm/client-pro';
+import {
+  generatePassphrase,
+  sealIdentityToken,
+  pathHoldsIdentitySecret,
+  IdentityTokenError,
+  IDENTITY_ENV,
+  PASSPHRASE_ENV,
+} from './identity-token.js';
 import {
   SaihmProClient,
   selfJoinEnabled,
   ensureSelfJoinIdentityEnv,
   identityKeyFile,
+  identityTokenConfigured,
+  identityTokenSet,
+  displayableKeyPath,
+  displayablePlan,
+  nodeErrorCode,
+  selfJoinWouldMint,
+  ephemeralHomeSignal,
+  resolveIdentityFromEnv,
+  defaultIdentityPath,
+  markPathBearing,
   MAX_ANNOUNCEMENT_FIELD_CHARS,
   type FreeDevicePrompt,
   type FreeEntitlementResult,
@@ -86,8 +109,11 @@ const server = new McpServer(
       // sitting inert (funnel audit 2026-09-11, F5). Conditional because under SAIHM_SELF_JOIN=0 there is no
       // saihm_join tool to point at.
       (selfJoinEnabled()
-        ? ' If a memory tool answers that there is no SAIHM memory yet on this device, tell the operator in one line: "SAIHM memory is installed but not active yet. Say \'Join SAIHM\' to activate the free memory." Then wait; call saihm_join only when they ask.'
-        : ''),
+        ? ' If a memory tool answers that there is no SAIHM memory yet on this device, tell the operator: "SAIHM memory is installed but not active yet. Already have a SAIHM identity? Run export-identity where it lives and set the two values it writes in this environment\'s settings instead of joining. New to SAIHM? Say \'Join SAIHM\' to start a new, empty memory." Then wait; call saihm_join only when they ask.'
+        : '') +
+      // Unconditional: a token arrives the same way whether or not self-join is on, and the operators who
+      // run with it off are the ones most likely to be bringing one.
+      ' Never ask for SAIHM_IDENTITY or its passphrase in the chat, and never write either into a file.',
   },
 );
 
@@ -137,15 +163,185 @@ function fail(e: unknown) {
  * inline case gets its own sentence naming the variable the caller actually set.
  */
 function freeJoinFailureGuidance(): string {
+  // A machine whose token IS set has nothing to bring here: the block below would send its operator to
+  // export and set the very values already in place. An unexpanded `${...}` is not a token, and the
+  // error above already says what to do about it.
+  if (identityTokenSet())
+    return (process.env.SAIHM_IDENTITY ?? '').includes('$')
+      ? ''
+      : '\n\nThis machine uses the identity in SAIHM_IDENTITY, so a join here activates that identity\n' +
+          'and creates nothing new. Try again once the error above is resolved.\n';
   const keyFile = identityKeyFile();
+  // Shown only when it has the shape of a path: this text follows a FAILED join, which is exactly when
+  // the setting may hold a key pasted into the wrong field.
+  const shown = keyFile === null ? null : displayableKeyPath(keyFile);
   return (
     '\n\nAlready activated SAIHM free on another machine or account?\n' +
     '  The free tier is one activation per identity. Do not activate again —\n' +
-    '  copy the key from that machine and point SAIHM_MASTER_SECRET_FILE at it.\n' +
+    '  bring that identity here: run `npx -y @saihm/mcp-server-pro export-identity`\n' +
+    '  on that machine, then set SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE in this\n' +
+    "  environment's settings (never in a chat or a repository file) and start a new session.\n" +
+    // Each arm names only what is actually set: a passphrase alone is not "the token", and a machine
+    // with no inline secret is not told it supplied one.
     (keyFile
-      ? `  This machine's key file: ${safePathField(keyFile, MAX_PATH_FIELD_CHARS)}\n`
-      : '  This machine uses the key you supplied inline in SAIHM_MASTER_SECRET_HEX.\n')
+      ? shown !== null
+        ? `  This machine's key file: ${safePathField(shown, MAX_PATH_FIELD_CHARS)}\n`
+        : keyFile === defaultIdentityPath()
+          ? // The key this machine's join created: SAIHM_MASTER_SECRET_FILE was set to it here, not by the operator.
+            process.env.SAIHM_HOME
+            ? "  This machine's key file is free-identity.key under SAIHM_HOME, whose path has the shape of a key, so it is not shown.\n"
+            : "  This machine's key file is free-identity.key in ~/.saihm, whose path has the shape of a key, so it is not shown.\n"
+          : '  SAIHM_MASTER_SECRET_FILE holds what looks like a key rather than a path; it is not shown.\n'
+      : process.env.SAIHM_MASTER_SECRET_HEX
+        ? '  This machine uses the key you supplied inline in SAIHM_MASTER_SECRET_HEX.\n'
+        : '')
   );
+}
+
+/**
+ * The join's answer where SAIHM_HOME has the shape of a key, passphrase or token: no key file is ever
+ * created under it, so its path never has to be shown - the refusal export-identity gives as well.
+ */
+const KEY_SHAPED_HOME_JOIN_REFUSAL =
+  'SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory, so no key is ' +
+  'created there. Fix SAIHM_HOME, then join again.';
+
+/**
+ * The join's answer where it would MINT while SAIHM_TIER is set to anything but FREE, or `null`: a free join
+ * starts a FREE identity. Minted under a paid tier, the key failed activation and stayed, and every later
+ * join took it for the paid identity configured here ("nothing to join"). The value is never named.
+ */
+function mintTierRefusal(): string | null {
+  // READ AS THE CLIENT READS IT: `FREE` exactly, or empty or unset for the default. A padded ` FREE ` (or one of
+  // spaces only) passed a trimmed test here, minted, and the client then failed it as a paid tier with no payment method.
+  const raw = process.env.SAIHM_TIER;
+  if (raw === undefined || raw === '' || raw === 'FREE') return null;
+  const typed = raw.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return typed === 'FREE' || typed === ''
+    ? 'SAIHM_TIER is set, but not to FREE exactly: set it to FREE, or leave it unset, then join again.'
+    : 'SAIHM_TIER names a plan other than FREE, but there is no identity here yet, and a free join starts a ' +
+        'FREE one. Leave SAIHM_TIER unset (or set FREE) to join free; for a paid plan, join free first, then run ' +
+        '`npx -y @saihm/mcp-server-pro upgrade <plan>`. If your paid identity is on another machine, run ' +
+        "`npx -y @saihm/mcp-server-pro export-identity` there instead and set the two values it writes in this " +
+        "environment's settings.";
+}
+
+/** A path under SAIHM_HOME as a reply may show it: withheld, as every key-file setting is, when it has the shape of a key. */
+function shownPath(p: string, what = 'the key file'): string {
+  return displayableKeyPath(p) ?? `${what} (its path has the shape of a key, so it is not shown)`;
+}
+
+/**
+ * The answer to a join where the tier configured here settles it, or `null` to go on. An identity
+ * already on a PAID plan has nothing to join: the free activation is for the FREE tier, and running it
+ * there failed with "set SAIHM_TIER=FREE" - advice that would boot a paid identity at the free tier.
+ * `ready` is false where that plan cannot onboard as configured - no payment method and no static
+ * auth header, which every memory tool would then fail on - and for FREE written in another case,
+ * which the client takes for a paid label and answers with a demand for a payment method. One
+ * resolution for the tool and the verb.
+ *
+ * The plan is NAMED only when it is one this package knows: SAIHM_TIER is typed by hand, and a key or
+ * passphrase pasted into it must not come back in a reply an agent repeats.
+ */
+function tierJoinAnswer(): { text: string; ready: boolean } | null {
+  if (selfJoinWouldMint()) return null;
+  let tier: string | undefined;
+  let paymentMethod: string | undefined;
+  let tierFrom: string | undefined;
+  try {
+    const id = resolveIdentityFromEnv();
+    id.master.fill(0);
+    tier = id.tier;
+    paymentMethod = id.paymentMethod;
+    tierFrom = id.tierFrom;
+  } catch {
+    return null; // a broken configuration is reported by the flow that follows, as before
+  }
+  if (tier === undefined || tier === 'FREE') return null;
+  // A plan name written in another case or with spaces, or a blank, is a slip, not a plan: say which name
+  // was meant. The client takes any other label for a paid one, so left alone it would demand a payment
+  // method, or onboard under a name the endpoint does not have.
+  const typed = tier.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (typed === '' || typed === 'FREE')
+    return {
+      ready: false,
+      text: 'SAIHM_TIER is set, but not to a plan name: for the free plan set it to FREE exactly, or leave it unset, then join again.',
+    };
+  const plan = displayablePlan(typed);
+  // A label this version does not know is neither called a plan nor said to work: a slip of FREE and a plan
+  // given by name elsewhere read the same from here, so the answer covers both and is not a success.
+  if (plan === null)
+    return {
+      ready: false,
+      // Where the plan came from the token, the variable to blame is not set here: say where it came from.
+      text:
+        tierFrom === 'SAIHM_IDENTITY'
+          ? 'The plan carried in SAIHM_IDENTITY is not one this version knows. Export the identity again with SAIHM_TIER set to its plan, or set SAIHM_TIER here to override it; if it names a plan you were given, there is nothing to join.'
+          : 'SAIHM_TIER is not a plan name this version knows. For the free plan set it to FREE, or leave it unset, then join again; if it names a plan you were given, there is nothing to join.',
+    };
+  if (plan !== tier)
+    return {
+      ready: false,
+      text: `SAIHM_TIER is set, but not exactly to a plan name: set it to ${safeScalar(plan)}, as plan names are written. There is nothing to join.`,
+    };
+  const on = `This environment has a SAIHM identity, configured for the ${safeScalar(plan)} plan. `;
+  if (!paymentMethod && !process.env.SAIHM_AUTH_HEADER)
+    return {
+      ready: false,
+      text: on + "There is nothing to join, but SAIHM_PAYMENT_METHOD is not set, and the memory tools need it on this plan: set it where this server's other SAIHM_* values are set.",
+    };
+  return { ready: true, text: on + 'There is nothing to join: the memory tools use it as it is.' };
+}
+
+/**
+ * What `saihm_join` answers, instead of minting, when nothing says the operator wants a NEW identity.
+ *
+ * A join is the one call in this package that creates an identity, and an identity cannot be merged
+ * or moved after the fact: memories written under a second key stay under it. Every earlier release
+ * minted on the first call, so an operator whose memory lived on another machine - the common case in
+ * a hosted agent's fresh session - was handed a second, empty one before anyone asked. The question
+ * costs a new user one exchange; not asking cost an existing user their memory in that environment.
+ */
+const JOIN_EXISTING_IDENTITY_QUESTION: string = [
+  'Not joining yet. A join creates a NEW, EMPTY memory, so first ask the operator:',
+  '  "Do you already have a SAIHM identity - on another machine, or from an earlier session?"',
+  '',
+  'And: "Does this environment keep its home directory between sessions?" If not - a hosted or cloud',
+  'session that starts fresh - do not join here: join on a machine you keep, then bring the identity',
+  'here as below.',
+  '',
+  'If they have one: do not join. On the machine that has it, run',
+  '  npx -y @saihm/mcp-server-pro export-identity',
+  "and set the two values it writes, SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE, in this",
+  "environment's settings (environment variables or secrets). Then start a new session - a hosted",
+  'environment reads its variables when a session starts - or, on your own machine, restart this',
+  'server. Never paste either value into this chat or into a file in the repository.',
+  'If they have none and this home is kept: call saihm_join again with newIdentity: true.',
+].join('\n');
+
+/**
+ * The refusal to mint where the home directory is marked temporary. `temporaryHomeVariable` is one of
+ * the fixed NAMES `ephemeralHomeSignal` checks - never a value anyone set.
+ *
+ * THE ONLY WAY PAST IT IS THE OPERATOR'S. An override taken as a tool input would let the agent being
+ * refused clear the gate with a boolean it chose itself, and a hasty or prompted one would.
+ * `SAIHM_EPHEMERAL_HOME=0` lives in the environment's settings, which the agent does not write, so the
+ * text addresses the operator.
+ */
+function ephemeralJoinRefusal(temporaryHomeVariable: string): string {
+  return [
+    `Not joining here: ${temporaryHomeVariable} is set, which marks this environment's home directory as`,
+    'temporary. A memory key created here is lost when the session ends, and the free activation is',
+    'one per person, so it would be spent on a key nobody can keep. Tell the operator:',
+    '',
+    '  - Already have a SAIHM identity? Run `npx -y @saihm/mcp-server-pro export-identity` where it',
+    "    lives, set SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE in this environment's settings",
+    '    (never in this chat or a file in the repository), and start a new session.',
+    '  - New to SAIHM? Join on a machine you keep (`npx -y @saihm/mcp-server-pro free-join`), then',
+    '    run export-identity there and set its two values here, as above.',
+    '  - If this environment really does keep its home directory between sessions, set',
+    "    SAIHM_EPHEMERAL_HOME=0 in its settings and start a new session.",
+  ].join('\n');
 }
 
 /** {@link fail}, plus the free-join guidance. Used only by `saihm_join`. */
@@ -1122,10 +1318,12 @@ function joinPendingText(s: JoinState): string {
   // twelve-line note on why lines must not be forgeable. At PATH_MAX the fence costs nothing.
   // `null` means the secret is INLINE in SAIHM_MASTER_SECRET_HEX and there is no file to name. It
   // used to arrive as the string `(SAIHM_MASTER_SECRET_HEX)` and render as a path, twice over.
-  const keyPath = s.keyPath === null ? null : safePathField(s.keyPath, MAX_PATH_FIELD_CHARS);
+  const keyPath = s.keyPath === null ? null : safePathField(shownPath(s.keyPath), MAX_PATH_FIELD_CHARS);
   const keyNote =
     keyPath === null
-      ? 'Your memory key is the SAIHM_MASTER_SECRET_HEX value you supplied — keep it safe; it is the only key to your memory and cannot be recovered.'
+      ? identityTokenSet()
+        ? 'Your memory key is the SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE pair you supplied — keep it safe; it is the only key to your memory and cannot be recovered.'
+        : 'Your memory key is the SAIHM_MASTER_SECRET_HEX value you supplied — keep it safe; it is the only key to your memory and cannot be recovered.'
       : s.createdKey
         ? `A new memory key was created and saved to ${keyPath} — keep this file safe; it is the only key to your memory and cannot be recovered.`
         : // UNDELIMITED, and last on the line. This read `... memory key (${keyPath}).` and the
@@ -1166,8 +1364,10 @@ function joinSuccessText(s: JoinState): string {
     // WITH, and it is the same fence `sharer=` already uses for the same kind of value.
     `  identity: ${hexOrMarker((s.result as FreeEntitlementResult).agentIdHash)}`,
     s.keyPath === null
-      ? '  key: the SAIHM_MASTER_SECRET_HEX value you supplied (the only key to your memory; keep it safe — it cannot be recovered)'
-      : `  key file: ${safePathField(s.keyPath, MAX_PATH_FIELD_CHARS)} (the only key to your memory; keep it safe — it cannot be recovered)`,
+      ? identityTokenSet()
+        ? '  key: the SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE pair you supplied (the only key to your memory; keep it safe — it cannot be recovered)'
+        : '  key: the SAIHM_MASTER_SECRET_HEX value you supplied (the only key to your memory; keep it safe — it cannot be recovered)'
+      : `  key file: ${safePathField(shownPath(s.keyPath), MAX_PATH_FIELD_CHARS)} (the only key to your memory; keep it safe — it cannot be recovered)`,
     'Your SAIHM memory tools are ready to use now.',
   ].join('\n');
 }
@@ -1178,8 +1378,15 @@ if (selfJoinEnabled()) {
     {
       title: 'Join SAIHM (activate free memory)',
       description:
-        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, call saihm_join again to finish; the memory tools then work. No payment and no website visit.',
-      inputSchema: {},
+        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory: first ask whether they already have a SAIHM identity (from another machine or an earlier session) - if so, do not join; they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Pass newIdentity: true once they confirm they want a new one here. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, call saihm_join again to finish; the memory tools then work. No payment and no website visit.',
+      inputSchema: {
+        newIdentity: z
+          // NULL READS AS UNSET: clients that fill every field send null for one not chosen, and the field this
+          // release added failed their every join with an input error, where the tool had taken any arguments.
+          // Mapped before validation, so the advertised schema stays a plain boolean; any other type still errs.
+          .preprocess((v) => (v === null ? undefined : v), z.boolean().optional())
+          .describe('true once the user confirms they have no SAIHM identity to bring here and want a new, empty memory'),
+      },
       annotations: {
         title: 'Join SAIHM (activate free memory)',
         readOnlyHint: false,
@@ -1188,7 +1395,7 @@ if (selfJoinEnabled()) {
         openWorldHint: true,
       },
     },
-    async () => {
+    async ({ newIdentity }) => {
       try {
         // Resume an in-flight or finished flow (the human approves between two calls).
         if (joinState) {
@@ -1208,6 +1415,23 @@ if (selfJoinEnabled()) {
           }
           if (joinState?.prompt) return ok(joinPendingText(joinState));
           return ok('Still getting your activation ready — ask me to "Join SAIHM" again in a few seconds.');
+        }
+
+        // AN IDENTITY ALREADY ON A PAID PLAN has nothing to join; FREE written in another case is told so.
+        const tierAnswer = tierJoinAnswer();
+        if (tierAnswer !== null) return ok(tierAnswer.text);
+
+        // ASK BEFORE MINTING, and only then: a join that would ACTIVATE an identity already here (a key
+        // file from an earlier join, a configured secret or token) creates nothing and is not gated.
+        // The temporary-home refusal comes first because it answers the question too - on such a
+        // machine the right move for an existing user and a new one is the same: not here.
+        if (selfJoinWouldMint()) {
+          const temporary = ephemeralHomeSignal();
+          if (temporary !== null) return ok(ephemeralJoinRefusal(temporary));
+          if (newIdentity !== true) return ok(JOIN_EXISTING_IDENTITY_QUESTION);
+          if (pathHoldsIdentitySecret(defaultIdentityPath())) return ok(KEY_SHAPED_HOME_JOIN_REFUSAL);
+          const tierRefusal = mintTierRefusal();
+          if (tierRefusal !== null) return ok(tierRefusal);
         }
 
         // Fresh flow: ensure an identity, boot a FREE client, run the device flow in the background.
@@ -1355,7 +1579,7 @@ function checkoutUrlBlock(fenced: string, savedTo: string): string[] {
     '  ' + fenced,
     '  --- END CHECKOUT URL ---',
     '',
-    ...(savedTo ? ['  Also written to: ' + safePathField(savedTo, MAX_PATH_FIELD_CHARS), ''] : []),
+    ...(savedTo ? ['  Also written to: ' + safePathField(shownPath(savedTo, 'the checkout file'), MAX_PATH_FIELD_CHARS), ''] : []),
   ];
 }
 
@@ -1384,8 +1608,10 @@ async function runJoin(): Promise<void> {
       // `saihm_join` has a generated key FILE and no such variable, and this told them to protect
       // the wrong thing while never naming the file they must actually back up.
       keyFile
-        ? `  Back up ${safePathField(keyFile, MAX_PATH_FIELD_CHARS)} — it is`
-        : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is',
+        ? `  Back up ${safePathField(shownPath(keyFile), MAX_PATH_FIELD_CHARS)} — it is`
+        : identityTokenSet()
+          ? '  Keep the SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE pair safe — it is'
+          : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is',
       '  the only key to your memory and cannot be recovered. After payment, start the server',
       '  normally (drop the "join" argument) and it connects automatically.',
       '',
@@ -1410,6 +1636,45 @@ async function runFreeJoin(): Promise<void> {
   // Called for its SIDE EFFECT - it mints the key file and points SAIHM_MASTER_SECRET_FILE at it
   // - and no longer for its return value. What to TELL the operator is resolved once, by
   // `identityKeyFile()`, so this verb and `join` cannot drift apart again.
+  // The tool's temporary-home refusal, on the verb. An agent in a hosted session follows the README
+  // into a shell as readily as into the tool, and the key it would mint dies with that session all
+  // the same. No "already have one?" question here: a human typing this verb has already answered it.
+  // No flag past it either - the same `SAIHM_EPHEMERAL_HOME=0` the tool needs, set by whoever owns the
+  // environment.
+  if (selfJoinEnabled() && selfJoinWouldMint()) {
+    const temporary = ephemeralHomeSignal();
+    if (temporary !== null) {
+      process.stderr.write(ephemeralJoinRefusal(temporary) + '\n');
+      process.exitCode = 1;
+      return;
+    }
+  }
+  // The tool's answer for a paid identity, on the verb: nothing to join, and not a failure - unless the
+  // plan cannot onboard as configured, which is.
+  const tierAnswer = tierJoinAnswer();
+  if (tierAnswer !== null) {
+    if (tierAnswer.ready) process.stdout.write(tierAnswer.text + '\n');
+    else {
+      process.stderr.write(tierAnswer.text + '\n');
+      process.exitCode = 1;
+    }
+    return;
+  }
+  // The tool's refusal for a SAIHM_HOME with the shape of a key, on the verb: no key is created there.
+  if (selfJoinEnabled() && selfJoinWouldMint() && pathHoldsIdentitySecret(defaultIdentityPath())) {
+    process.stderr.write('saihm: not joined - ' + KEY_SHAPED_HOME_JOIN_REFUSAL + '\n');
+    process.exitCode = 1;
+    return;
+  }
+  // The tool's refusal of a free join under a paid SAIHM_TIER, on the verb: nothing is minted.
+  if (selfJoinEnabled() && selfJoinWouldMint()) {
+    const tierRefusal = mintTierRefusal();
+    if (tierRefusal !== null) {
+      process.stderr.write('saihm: not joined - ' + tierRefusal + '\n');
+      process.exitCode = 1;
+      return;
+    }
+  }
   if (selfJoinEnabled()) ensureSelfJoinIdentityEnv();
   const c = SaihmProClient.bootFromEnv();
   const r = await c.acquireFreeEntitlement({
@@ -1453,11 +1718,194 @@ async function runFreeJoin(): Promise<void> {
       // who supplied SAIHM_MASTER_SECRET_FILE still has a FILE to back up. Reading env directly
       // covers that case too, so the only caller told to keep the HEX var is one who set it.
       keyFile
-        ? `  Back up ${safePathField(keyFile, MAX_PATH_FIELD_CHARS)} — it is the only key to your`
-        : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your',
+        ? `  Back up ${safePathField(shownPath(keyFile), MAX_PATH_FIELD_CHARS)} — it is the only key to your`
+        : identityTokenSet()
+          ? '  Keep the SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE pair safe — it is the only key to your'
+          : '  Keep SAIHM_MASTER_SECRET_HEX safe — it is the only key to your',
       '  memory and cannot be recovered. Start the server normally (drop the "free-join" argument)',
       '  and it connects automatically. Upgrading to a paid plan later attaches to THIS same key —',
       '  your memories persist.',
+      '',
+    ].join('\n'),
+  );
+}
+
+/**
+ * Export the identity this server would boot as a passphrase-sealed token, for a machine or a hosted
+ * agent environment that cannot hold the key file - typically one configured only through
+ * environment variables or secrets, with a home directory discarded at session end.
+ *
+ * The token and its GENERATED passphrase go to ONE mode-600 file under the SAIHM home, and only the
+ * file's location is printed. Neither value reaches stdout or stderr: an agent may be the one running
+ * this, and its transcript is not a safe place for either. The summary names the identity and tier
+ * the token carries, so the operator can confirm it is the memory they mean before using it.
+ *
+ * It never mints. Resolution is the same function boot uses, so it exports exactly the identity the
+ * server here boots; with no identity configured there is nothing to export, and it says so rather
+ * than creating one to export.
+ */
+function runExportIdentity(): void {
+  // WHAT BOOT WOULD READ: a token or a secret variable, or the default key file while self-join is
+  // on. Not `selfJoinWouldMint()`, which answers a different question - under SAIHM_SELF_JOIN=0 a
+  // default key file exists and is never read, and the "nothing configured" error boot raises then
+  // tells the reader to set the values this very verb writes.
+  const configured =
+    identityTokenConfigured() ||
+    Boolean(process.env.SAIHM_MASTER_SECRET_FILE || process.env.SAIHM_MASTER_SECRET_HEX) ||
+    (selfJoinEnabled() && existsSync(defaultIdentityPath()));
+  if (!configured) {
+    process.stderr.write(
+      [
+        'saihm: nothing to export - no SAIHM identity is configured here.',
+        'Run export-identity where your memory lives, with the same SAIHM_* values your MCP client',
+        'gives the server there (SAIHM_MASTER_SECRET_FILE, SAIHM_MASTER_SECRET_HEX or SAIHM_IDENTITY).',
+        'Under SAIHM_SELF_JOIN=0 the default key file is not read: point SAIHM_MASTER_SECRET_FILE at it.',
+        '',
+      ].join('\n'),
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // A SAIHM_HOME WITH THE SHAPE OF A KEY is refused before anything is written under it: every location
+  // this verb prints is inside it, and an export the operator cannot be told the location of is no export.
+  if (pathHoldsIdentitySecret(defaultIdentityPath())) {
+    process.stderr.write(
+      'saihm: not exported - SAIHM_HOME holds what looks like a key, passphrase or token rather than a\n' +
+        'directory. Fix SAIHM_HOME, then export again.\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const id = resolveIdentityFromEnv();
+  // A TIER SLIP is refused before it is sealed: FREE or a plan name in another case or with spaces, or a
+  // blank, travels in the token to where SAIHM_TIER is not set, and there the join blames a variable
+  // nobody set. The plan meant is named; the value is not.
+  const tierTyped = id.tier === undefined ? null : id.tier.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  if (tierTyped !== null && tierTyped !== id.tier && (tierTyped === '' || displayablePlan(tierTyped) !== null)) {
+    id.master.fill(0);
+    process.stderr.write(
+      tierTyped === ''
+        ? "saihm: not exported - the tier is blank: set SAIHM_TIER to your plan's name, or leave it unset for FREE, then export again.\n"
+        : `saihm: not exported - the tier is not exactly a plan name: set SAIHM_TIER to ${safeScalar(tierTyped)}, then export again.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // A PLAN NAME THIS VERSION DOES NOT KNOW is refused too: sealed, it was called "a paid tier" here, and at
+  // the destination the join blamed SAIHM_TIER, which is not set there.
+  if (tierTyped !== null && tierTyped !== '' && displayablePlan(tierTyped) === null) {
+    id.master.fill(0);
+    process.stderr.write(
+      'saihm: not exported - the tier is not a plan name this version knows: set SAIHM_TIER to FREE, PRO,\n' +
+        'PRO_FAST, ENTERPRISE or ENTERPRISE_FAST, then export again.\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const passphrase = generatePassphrase();
+  let agentIdHash: string;
+  let token: string;
+  try {
+    agentIdHash = toHex(deriveIdentity(id.master).agentIdHash);
+    token = sealIdentityToken(
+      { secretHex: toHex(id.master), tier: id.tier, paymentMethod: id.paymentMethod },
+      agentIdHash,
+      passphrase,
+    );
+  } catch (e) {
+    // The token's own refusals (a value it cannot carry) as every other refusal of this verb reads.
+    if (!(e instanceof IdentityTokenError)) throw e;
+    process.stderr.write('saihm: not exported - ' + e.message + '\n');
+    process.exitCode = 1;
+    return;
+  } finally {
+    id.master.fill(0);
+  }
+  const dir = pathJoin(dirname(defaultIdentityPath()), 'exports');
+  // Milliseconds in the name, so two exports in one second do not collide on `wx`.
+  const stamp = new Date().toISOString().replace(/[-:.]/g, '');
+  const file = pathJoin(dir, `identity-${agentIdHash.slice(0, 16)}-${stamp}.env`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // A DIRECTORY THAT IS NOT YOURS ALONE is refused before anything is written into it. `mkdir`'s
+    // mode applies only to a directory it creates: an `exports` that already existed - open to
+    // others, owned by someone else, or a link to somewhere that is - would take the file, and
+    // whoever controls it could swap the token for their own before it is copied out. The file is
+    // 0600 either way; what this protects is that the file you copy is the one written here.
+    if (process.platform !== 'win32') {
+      const st = lstatSync(dir);
+      if (!st.isDirectory() || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0)
+        throw new Error(
+          `the export directory is not private to you: ${displayableKeyPath(dir) ?? 'the exports folder under SAIHM_HOME'}. It must be a directory you own ` +
+            'with mode 700 (not a link). Fix it with chmod 700, or remove it. Nothing was exported.',
+        );
+    }
+    // `wx`: an export never overwrites anything, least of all an earlier export of another identity.
+    writeFileSync(file, `${IDENTITY_ENV}=${token}\n${PASSPHRASE_ENV}=${passphrase}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    });
+  } catch (e) {
+    // Node names the path in its own message: widened only where that path may be shown.
+    if (displayableKeyPath(file) === null && typeof (e as { code?: unknown } | null)?.code === 'string')
+      throw new Error(
+        `the export could not be written (${nodeErrorCode(e)}): its folder under SAIHM_HOME has the shape of a ` +
+          'key, so it is not shown. Nothing was exported.',
+      );
+    throw markPathBearing(e);
+  }
+  // Named only when it is a plan this package knows, and the source only when it has the shape of a path:
+  // both are typed by hand into fields beside the secret ones.
+  const plan = id.tier === undefined ? null : displayablePlan(id.tier);
+  const tierShown = plan !== null ? safeScalar(plan) : 'not shown (it is not a plan name this version knows)';
+  const sourceShown = displayableKeyPath(id.source);
+  process.stdout.write(
+    [
+      '',
+      `SAIHM identity exported: ${agentIdHash.slice(0, 16)}…${agentIdHash.slice(-6)}` +
+        (id.tier ? `, tier ${tierShown}` : '') +
+        '.',
+      `  from:  ${sourceShown !== null ? safePathField(sourceShown, MAX_PATH_FIELD_CHARS) : 'a key file whose path has the shape of a key (not shown)'}`,
+      // Shown only where its path may be; otherwise the file's own name, which has no such shape, and where it is.
+      displayableKeyPath(file) !== null
+        ? `  file:  ${safePathField(file, MAX_PATH_FIELD_CHARS)} (readable only by you)`
+        : `  file:  ${safePathField(basename(file), MAX_PATH_FIELD_CHARS)} in the exports folder under SAIHM_HOME, whose path has the shape of a key, so it is not shown (readable only by you)`,
+      '',
+      'This is the identity, and the tier, that a server started from THIS shell would use. If your',
+      'MCP client gives the server its own SAIHM_* values (a key file path, SAIHM_TIER,',
+      'SAIHM_PAYMENT_METHOD), run export-identity again with the same values set.',
+      ...(id.tierFrom === 'none'
+        ? [
+            'This token carries no tier, because SAIHM_TIER is not set here: where it is used, it boots FREE',
+            '(where self-join is on) unless SAIHM_TIER is set there. If this identity is on a paid plan,',
+            'set SAIHM_TIER and SAIHM_PAYMENT_METHOD as your MCP client does, and export again.',
+          ]
+        : []),
+      ...(id.tierFrom === 'default'
+        ? [
+            'The tier is FREE only because SAIHM_TIER is not set here: if this identity is on a paid plan,',
+            'set SAIHM_TIER and SAIHM_PAYMENT_METHOD as your MCP client does, and export again.',
+          ]
+        : []),
+      '',
+      'The file holds two lines. Set both, as environment variables or secrets, in the settings of the',
+      'environment where this identity should run - a hosted agent environment, or the environment',
+      'your MCP client starts the server from:',
+      `  ${IDENTITY_ENV}              the token; useless without the passphrase`,
+      `  ${PASSPHRASE_ENV}   the passphrase; store it as a secret`,
+      '',
+      ...(id.tier !== undefined && id.tier !== 'FREE' && id.paymentMethod === undefined
+        ? [
+            'This token carries a paid tier but no payment method: set SAIHM_PAYMENT_METHOD as your MCP',
+            'client does, and export again.',
+            '',
+          ]
+        : []),
+      'Together they ARE your identity: anyone holding both can read, change and erase your memory.',
+      'Never paste them into a chat or write them into a config file in a repository. Keep a copy in',
+      'a password manager, then delete the file. Where they are set, do not "Join SAIHM": the memory',
+      'tools use this identity as soon as the server starts. Agents: do not open or print the file -',
+      'tell the operator where it is.',
       '',
     ].join('\n'),
   );
@@ -1527,17 +1975,22 @@ const CLI_USAGE: string = [
   `@saihm/mcp-server-pro ${PACKAGE_VERSION}`,
   '',
   'Usage:',
-  '  npx -y @saihm/mcp-server-pro                 run as an MCP server over stdio (default)',
-  '  npx -y @saihm/mcp-server-pro free-join       join the free tier — nothing to configure',
-  '  npx -y @saihm/mcp-server-pro join            join a paid tier directly',
-  '  npx -y @saihm/mcp-server-pro upgrade [TIER]  move a free identity to a monthly paid tier',
+  '  npx -y @saihm/mcp-server-pro                  run as an MCP server over stdio (default)',
+  '  npx -y @saihm/mcp-server-pro free-join        join the free tier — nothing to configure',
+  '  npx -y @saihm/mcp-server-pro join             join a paid tier directly',
+  '  npx -y @saihm/mcp-server-pro upgrade [TIER]   move a free identity to a monthly paid tier',
+  '  npx -y @saihm/mcp-server-pro export-identity  carry your identity to another machine or a',
+  '                                                hosted agent environment',
   '',
   'Environment:',
-  '  free-join  nothing — it generates and stores your key for you',
-  '  join       SAIHM_MASTER_SECRET_HEX or SAIHM_MASTER_SECRET_FILE, plus SAIHM_TIER',
-  '             and SAIHM_PAYMENT_METHOD',
-  '  upgrade    your key, and SAIHM_TIER=FREE. TIER defaults to PRO and can also be',
-  '             given as SAIHM_UPGRADE_TIER',
+  '  free-join        nothing — it generates and stores your key for you',
+  '  join             SAIHM_MASTER_SECRET_HEX or SAIHM_MASTER_SECRET_FILE (or SAIHM_IDENTITY and',
+  '                   SAIHM_IDENTITY_PASSPHRASE), plus SAIHM_TIER and SAIHM_PAYMENT_METHOD',
+  '  upgrade          your key, and SAIHM_TIER=FREE. TIER defaults to PRO and can also be',
+  '                   given as SAIHM_UPGRADE_TIER',
+  '  export-identity  the identity a server started from this shell boots - run it with the',
+  '                   SAIHM_* values your MCP client sets; it writes SAIHM_IDENTITY and',
+  '                   SAIHM_IDENTITY_PASSPHRASE to a file readable only by you',
   '',
   'Options:',
   '  -h, --help     show this message',
@@ -1584,6 +2037,10 @@ async function main(): Promise<void> {
   }
   if (verb === 'upgrade') {
     await runUpgrade();
+    return;
+  }
+  if (verb === 'export-identity') {
+    runExportIdentity();
     return;
   }
   if (verb === '-h' || verb === '--help' || verb === 'help') {

@@ -33,6 +33,8 @@ than overwriting it.
 }
 ```
 
+Host note (2026-09-23): From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which serves the identical service until 2026-12-31 and is then discontinued: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly.
+
 **`timeout` is required, not decorative.** Cline's default MCP start-up budget
 is 1.5 seconds. `npx` cannot resolve and launch a package that fast, and a
 server that misses the deadline is skipped **silently** — the tools simply never
@@ -55,33 +57,51 @@ without side effects, `saihm_status` is read-only.
 ## Step 3 — tell the user (always)
 
 Once the tools appear, tell the user that memory is installed but not yet
-activated, and that saying **"Join SAIHM"** activates it. Do this whether or
-not they asked: they cannot ask for something they do not know exists. Say it
-once, in your own words, and do not call `saihm_join` yourself.
+activated. If they already have a SAIHM identity, they bring it rather than
+joining (see point 3 below); if they are new, saying **"Join SAIHM"** activates
+it. Do this whether or not they asked: they cannot ask for something they do
+not know exists. Say it once, in your own words, and do not call `saihm_join`
+yourself.
 
 ## Step 4 — activation (only when the user says "Join SAIHM")
 
-When they do, call `saihm_join`. It generates a
-32-byte master secret locally at `~/.saihm/free-identity.key` (mode 600) and
-returns a one-time device sign-in link plus a short code; the user opens the
-link, enters the code, and approves. That step confirms a unique person. The
-secret never leaves the machine.
+When they do, confirm they have no identity to bring, then call `saihm_join`
+with `newIdentity: true` (without it, a tool call that would create a key asks
+that question instead). It
+generates a 32-byte master secret locally at `~/.saihm/free-identity.key`
+(mode 600) and returns a one-time device sign-in link plus a short code; the
+user opens the link, enters the code, and approves. That step confirms a
+unique person. The secret never leaves the machine.
 
 Three things to tell the user, in your own words:
 
 1. **`saihm_join` is one-time.** It claims a lifetime free grant for this
    device identity. Do not call it speculatively, in a loop, or to test that
-   the install worked.
+   the install worked. Ask first whether they already have a SAIHM identity:
+   a join creates a NEW, EMPTY memory, so pass `newIdentity: true` only once
+   they confirm they want one. In a hosted or cloud session that starts fresh
+   each time, do not join there either: they join on a machine they keep, then
+   bring that identity in (point 3). Where it can tell that the home directory is
+   discarded when the session ends (the host marks a hosted or CI session, or
+   `SAIHM_EPHEMERAL_HOME` is set), it refuses to create a key; only the
+   environment's owner can override that.
 2. **`~/.saihm/free-identity.key` is the only copy of their key.** Advise
    backing it up. If it is lost, no one — including SAIHM — can open their
    cells. That is the point of the design, and it is not recoverable.
 
-3. **A second computer.** Offer sharing first: a separate identity on the second
-   machine plus `saihm_share` (which takes an optional `expiryEpoch`) keeps work
-   and personal apart, and a share can be revoked where a copied key cannot. If
-   they want the SAME memory on both, the key file has to be on both — placed
-   before the server starts, and without running `saihm_join` there, since that
-   mints an unrelated identity with an empty memory.
+3. **A second computer, or a hosted agent.** Offer sharing first: a separate
+   identity on the second machine plus `saihm_share` (which takes an optional
+   `expiryEpoch`) keeps work and personal apart, and a share can be revoked where
+   a copied key cannot. If they want the SAME memory there, have them run
+   `npx -y @saihm/mcp-server-pro export-identity` on the machine that holds the
+   key, with the same `SAIHM_*` settings their MCP client uses there (on a paid
+   plan, `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`), and set the two values it
+   writes, `SAIHM_IDENTITY` and `SAIHM_IDENTITY_PASSPHRASE`, in the other
+   environment's own variables or secrets settings, then start a new session (a
+   key file placed before the server starts also works where files can be
+   copied). Never run `saihm_join` there: it mints an unrelated identity with an
+   empty memory. Never ask them to paste either value into the chat, never
+   write either into a file, and never open or print the export file.
 
 Set `SAIHM_SELF_JOIN=0` to suppress `saihm_join` and expose only the canonical
 eight tools.
@@ -102,4 +122,4 @@ table: see `README.md`.
 | --- | --- |
 | No tools appear, no error | `timeout` too low — see step 1 |
 | Tools appear, calls fail | `SAIHM_ENDPOINT_URL` unreachable |
-| Tool calls report no identity | `saihm_join` not yet run |
+| Tool calls report no identity | New user: `saihm_join` not yet run. Second machine or hosted session: `SAIHM_IDENTITY` and its passphrase not set there (point 3) |

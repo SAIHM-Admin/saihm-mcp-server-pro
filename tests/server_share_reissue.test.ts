@@ -83,7 +83,7 @@ interface Driver {
 
 function startServer(endpoint: string): Driver {
   const proc = spawn(TSX, [SERVER], {
-    env: { ...process.env, SAIHM_ENDPOINT_URL: endpoint, SAIHM_MASTER_SECRET_HEX: MASTER_HEX, SAIHM_HOME: HOME, SAIHM_TIER: 'PRO', SAIHM_PAYMENT_METHOD: 'stripe', SAIHM_SELF_JOIN: '0' },
+    env: { ...process.env, SAIHM_IDENTITY: undefined, SAIHM_IDENTITY_PASSPHRASE: undefined, SAIHM_ENDPOINT_URL: endpoint, SAIHM_MASTER_SECRET_HEX: MASTER_HEX, SAIHM_HOME: HOME, SAIHM_TIER: 'PRO', SAIHM_PAYMENT_METHOD: 'stripe', SAIHM_SELF_JOIN: '0' },
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: resolve(HERE, '..'),
   });

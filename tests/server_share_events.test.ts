@@ -61,7 +61,7 @@ function startMock(): { server: Server; seen: Seen; base: () => string } {
 
 function startServer(endpoint: string, home: string, extra: Record<string, string>) {
   const proc: ChildProcess = spawn(TSX, [SERVER], {
-    env: { ...process.env, SAIHM_ENDPOINT_URL: endpoint, SAIHM_MASTER_SECRET_HEX: '44'.repeat(32), SAIHM_HOME: home, SAIHM_AUTH_HEADER: 'Bearer test', SAIHM_TIER: 'PRO', SAIHM_SELF_JOIN: '0', SAIHM_EVENTS: '', ...extra },
+    env: { ...process.env, SAIHM_IDENTITY: undefined, SAIHM_IDENTITY_PASSPHRASE: undefined, SAIHM_ENDPOINT_URL: endpoint, SAIHM_MASTER_SECRET_HEX: '44'.repeat(32), SAIHM_HOME: home, SAIHM_AUTH_HEADER: 'Bearer test', SAIHM_TIER: 'PRO', SAIHM_SELF_JOIN: '0', SAIHM_EVENTS: '', ...extra },
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: resolve(HERE, '..'),
   });

@@ -2,6 +2,172 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-10-02
+
+Bring an existing identity anywhere. No protocol tool added or removed; the
+`saihm_join` bootstrap tool gains one optional input.
+
+### Added
+
+- **`export-identity`.** `npx -y @saihm/mcp-server-pro export-identity` seals the
+  identity a server started from the same shell would boot — its key, plus the
+  tier and payment method it onboards with — under a passphrase it generates, and
+  writes the two resulting values to a mode-600 file: `SAIHM_IDENTITY` and
+  `SAIHM_IDENTITY_PASSPHRASE`. Neither value is printed. The summary names the
+  identity and, when it is a plan this version knows, the tier. It warns when the
+  tier is only the default (a paid identity exported from a shell without
+  `SAIHM_TIER`), when there is no tier at all (`SAIHM_SELF_JOIN=0` without
+  `SAIHM_TIER`), or when a paid tier has no payment method, so each can be fixed by
+  exporting again before the token is used. It never creates an identity: with none configured it says there is
+  nothing to export. It refuses an `exports` directory that is not private to you,
+  a `SAIHM_HOME` shaped like a key, a tier or payment method shaped like a
+  passphrase, and a tier that is blank or a plan name written in another case or
+  with spaces.
+- **`SAIHM_IDENTITY` + `SAIHM_IDENTITY_PASSPHRASE`.** Set both and the server boots
+  that identity in memory, with no key file and no join — on another computer, or
+  in a hosted agent environment that starts fresh each session and takes its
+  configuration only as environment variables or secrets. Non-empty `SAIHM_TIER` /
+  `SAIHM_PAYMENT_METHOD` values override the ones the token carries.
+  - The token is one line of URL-safe characters and must be copied exactly; the
+    passphrase survives case changes, dashes and spaces. Both survive surrounding
+    quotes, reflowed whitespace and a pasted `NAME=value` line.
+  - A token EXCLUDES the master-secret variables: configuring both is an error
+    naming both, never a silent pick.
+  - A token that does not open, a passphrase without its token, and an unexpanded
+    `${...}` reference are each a typed error naming the variable to fix — never a
+    fall-through to another identity, never a new key.
+- **The join asks first.** `saihm_join` creates nothing until it is called with
+  `newIdentity: true`; without it, it answers with the questions that were never
+  asked — *already have a SAIHM identity?* and *does this environment keep its home
+  directory?* — and how to bring an identity instead. A join that activates an
+  identity already present is not gated.
+- **No key is minted in a temporary home.** Where a host marks a hosted or CI
+  session (`CLAUDE_CODE_REMOTE`, `GITHUB_ACTIONS` or `CI`), or
+  `SAIHM_EPHEMERAL_HOME` is set to anything but `0`/`false`/`no`/`off`, both
+  `saihm_join` and `free-join` refuse to create a key. Nothing an agent passes to
+  `saihm_join` overrides that; `SAIHM_EPHEMERAL_HOME=0` in the environment does, and
+  `free-join` reads it from its own environment. An identity already on a paid plan
+  is told there is nothing to join, by `saihm_join` and `free-join` alike, or what is
+  missing when its payment method is not set.
+- **HTTP proxies.** An `https://` endpoint is reached through the proxy in
+  `https_proxy`, or `HTTPS_PROXY` if that is unset, by a CONNECT tunnel with the
+  endpoint's certificate verified end to end. `HTTP_PROXY` is not used for https,
+  as with npm and curl. `NO_PROXY` is honoured, loopback (`127.0.0.0/8`, `::1`,
+  `localhost`, `*.localhost`) never uses a proxy, proxy errors name the variable that
+  was read, and proxy credentials are never printed. Only an `http://` proxy URL is
+  supported. A
+  network that inspects TLS presents its own certificate, so its CA certificate, from
+  the network's administrator, must be saved to a file named by
+  `NODE_EXTRA_CA_CERTS`; the error says so.
+
+### Changed
+
+- **A boot with no identity says what it checked** — the token, both secret
+  variables and the default key file — leads with the import path before the join,
+  and tells the agent never to ask for either value in the chat.
+- **Errors about a configured but broken key no longer suggest joining.** An
+  unreadable, empty or malformed key file or secret is now reported as what it is;
+  following the old "Join SAIHM" hint minted a second identity while the first sat
+  unread. An empty default key file is reported as holding no secret, not as absent.
+- **A key pasted where a path belongs is not echoed.** When `SAIHM_MASTER_SECRET_FILE`
+  holds anything shaped like a master secret, a passphrase or a token — whole, split
+  by whitespace, a key cut short, or inside a pasted line — the messages that would name
+  it say so without repeating it. A path under a `SAIHM_HOME` of that shape is not
+  printed where a key is created, exported or refused (a key file left there by an
+  older version can still be named), a `SAIHM_ENDPOINT_URL` of that shape is not
+  echoed when it is not a URL at all, and a tier is named only when it is a plan this
+  version knows.
+- **A refused onboard says why.** The endpoint's `reason` is shown beside its
+  error code, and for the two reasons a configuration causes the message names what
+  to set: a paid identity booted at the default `FREE` tier is told to set
+  `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`.
+- **An unreachable endpoint names the fix for hosted environments**: allow the
+  endpoint's host in the environment's network settings, or set `HTTPS_PROXY`
+  where traffic must go through a proxy. Where a proxy is set, the message adds that
+  proxy and `NO_PROXY` to check, a proxy URL this transport cannot use is named as
+  such, and so is a certificate this machine does not trust (a network that inspects
+  TLS), with `NODE_EXTRA_CA_CERTS` as the fix.
+- **An empty `SAIHM_TIER` counts as unset**, as an empty `SAIHM_PAYMENT_METHOD`
+  already did, so a `${SAIHM_TIER:-}` reference in a shared MCP config no longer
+  breaks a free identity's boot.
+- **A call queued behind busy connections ends at its own timeout**, as it was
+  reported, rather than after a connection freed up.
+- **A join on an identity with no key file names what the user actually set** —
+  the inline secret or the token pair — in its backup advice.
+- The registry manifest declares `SAIHM_IDENTITY`, `SAIHM_IDENTITY_PASSPHRASE`,
+  `SAIHM_TIER`, `SAIHM_PAYMENT_METHOD` and `SAIHM_EPHEMERAL_HOME`. The README and
+  install notes cover a second computer and hosted agent environments without a
+  file copy.
+- **The README links the six-minute video overview and the SAIHM manual**
+  ([saihm.net/overview](https://saihm.net/overview), [saihm.net/manual](https://saihm.net/manual)).
+
+### Compatibility
+
+The protocol tools, their schemas and the public API of `index.js` do not change.
+These narrower things do:
+
+- **`saihm_join` needs `newIdentity: true` to create a key.** Called without it
+  where a key would be created, it returns the question instead, as a normal
+  (non-error) result. An agent that relays the result and calls again after the
+  user answers needs no change; a script that called it once to mint must pass
+  the flag. Activating a key already present is unchanged.
+- **`saihm_join` and `free-join` refuse in a temporary home** — under
+  `CLAUDE_CODE_REMOTE=true`, `GITHUB_ACTIONS=true` or a truthy `CI`, or with
+  `SAIHM_EPHEMERAL_HOME` set — and `free-join` then exits 1. Set
+  `SAIHM_EPHEMERAL_HOME=0` where that home does persist.
+- **Some error messages change**, as listed above. Consumers matching on a
+  message should match on the variable name it carries, which is unchanged.
+- **An empty `SAIHM_TIER` no longer fails a boot** while self-join is on; it means
+  the default, `FREE`.
+- **With self-join off and no `SAIHM_TIER`, the error asks for the tier first.** A
+  free identity was told to set a payment method, which it does not need.
+- **`HTTPS_PROXY` is now honoured.** A machine that sets `https_proxy` or
+  `HTTPS_PROXY` and reached the endpoint directly before now goes through that
+  proxy; `HTTP_PROXY` alone changes nothing. A proxy URL this transport cannot use
+  (`socks5://`, `https://`) now fails every call with an error naming the setting,
+  where it went direct before. Add the endpoint's host to `NO_PROXY` to keep the
+  direct route, or unset the variable.
+- **`free-join` on an identity already on a paid plan** now exits 0 saying there is
+  nothing to join, where it failed with `not_free_tier` before. Without the plan's
+  payment method, or with `SAIHM_TIER` blank, mistyped or not a plan name this version knows, it exits 1 and says
+  so. `saihm_join` gives the same answers as a normal result where it returned a tool
+  error, and the server's MCP instructions text has changed.
+- **A `SAIHM_HOME` that holds a key, passphrase or token** — bare, quoted, or inside a
+  pasted config line — is now refused. The server does not start under it, so nothing
+  is written there (a relative one used to become a folder in the working directory),
+  and `saihm_join`, `free-join` (exit 1) and `export-identity` refuse it, where a key
+  used to be created under it. `SAIHM_STATE_DIR` is held to the same rule. A folder is
+  refused when its name holds what reads as a passphrase (twenty capital letters and
+  digits, or four dash-separated groups of five with a digit or in capitals), a token,
+  or 48 or more hex digits in a row (some container paths do), so the server does not
+  start under one. Temporary folders, timestamps and other names are not refused.
+- **A plan or payment field that holds a secret stops the server.** `SAIHM_TIER` or
+  `SAIHM_PAYMENT_METHOD` shaped like a key, passphrase or token is refused with a
+  message naming the variable, where the value used to be sent to the endpoint.
+- **A free join under a paid `SAIHM_TIER` is refused before anything is created.** With
+  no identity yet, the join says a free join starts a FREE identity, and points a paid
+  plan to joining free and then running `upgrade`, or to `export-identity` for an
+  identity on another machine; it used to create a key that failed activation, which
+  every later join then took for the paid identity. A free join now reads `SAIHM_TIER`
+  as the server does: `FREE` exactly, or empty or unset for the default; a padded
+  ` FREE ` used to pass here, create a key, and then fail as a paid plan.
+- **`export-identity` refuses a plan name this version does not know** and lists the
+  names it knows, where it used to seal it; a token that carries one is named as the
+  source in the join's answer. A paid identity is now told it is "configured for" its
+  plan, not that it is on it.
+- **The temporary-home refusal is a normal result**, like the question, not a
+  tool error. Onboard and network error messages are longer: they now carry the
+  endpoint's reason or a remedy.
+
+### Security
+
+- The token holds the master secret under authenticated encryption, keyed from a
+  generated 100-bit passphrase through a memory-hard function; its clear label is
+  bound to the ciphertext. The token alone does not open the identity. The token
+  **and** its passphrase are the identity, exactly as the key file is: where both
+  sit in one environment, anything that can read that environment can use the
+  identity, and there is still no revocation short of moving to a new identity.
+
 ## [0.11.2] — 2026-09-23
 
 Project host. No new tools, no removed tools, no schema change.
@@ -1416,6 +1582,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.12.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.0
 [0.11.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.2
 [0.11.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.1
 [0.11.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.0

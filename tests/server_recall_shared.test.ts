@@ -185,6 +185,9 @@ interface Driver {
 function startServer(endpoint: string): Driver {
   const env = {
     ...process.env,
+    // Never a token from the runner's shell: it would exclude the secret below and fail every boot.
+    SAIHM_IDENTITY: undefined,
+    SAIHM_IDENTITY_PASSPHRASE: undefined,
     SAIHM_ENDPOINT_URL: endpoint,
     SAIHM_MASTER_SECRET_HEX: MASTER_HEX,
     // Isolated because the sequence-state default derives from SAIHM_HOME, not SAIHM_STATE_DIR.

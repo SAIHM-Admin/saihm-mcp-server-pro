@@ -124,6 +124,8 @@ test('GATE: ensureSelfJoinIdentityEnv sweeps only when SAIHM_SWEEP_STALE_TEMPS=1
     process.env.HOME = home;
     delete process.env.SAIHM_MASTER_SECRET_FILE;
     delete process.env.SAIHM_MASTER_SECRET_HEX;
+    delete process.env.SAIHM_IDENTITY;
+    delete process.env.SAIHM_IDENTITY_PASSPHRASE;
     delete process.env.SAIHM_SWEEP_STALE_TEMPS;
 
     // Gate OFF: mint once to learn the real key path, then strand an aged orphan beside it.

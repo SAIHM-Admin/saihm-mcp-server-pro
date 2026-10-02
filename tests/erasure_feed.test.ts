@@ -41,6 +41,7 @@ import {
   resolveFeedRoot,
 } from '../src/erasure-feed.js';
 import type { ErasureFeedRecord } from '../src/erasure-feed.js';
+import { generatePassphrase } from '../src/identity-token.js';
 
 const ID = 'a'.repeat(64);
 const AT = '2026-09-11T00:00:00.000Z';
@@ -454,4 +455,17 @@ test('appended lines are byte-exact across multi-byte content and repeated appen
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('a relative feed root is named, and echoed only when it does not have the shape of a secret', () => {
+  const pass = generatePassphrase();
+  assert.throws(
+    () => resolveFeedRoot({ SAIHM_HOME: pass } as NodeJS.ProcessEnv),
+    (e: unknown) =>
+      e instanceof ErasureFeedError &&
+      /SAIHM_HOME must be an ABSOLUTE path; got a value with the shape of a key, passphrase or token \(not shown\)/.test(e.message) &&
+      !e.message.includes(pass),
+  );
+  // Positive control: an ordinary relative path is still shown, so the reader can see what to fix.
+  assert.throws(() => resolveFeedRoot({ SAIHM_HOME: 'relative/dir' } as NodeJS.ProcessEnv), /got "relative\/dir"/);
 });

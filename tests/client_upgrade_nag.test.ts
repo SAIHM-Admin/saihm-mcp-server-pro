@@ -24,7 +24,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 
@@ -118,6 +118,7 @@ interface Mock {
   checkoutCount: () => number;
   checkoutBodies: () => ReadonlyArray<Record<string, unknown>>;
   rememberCount: () => number;
+  requestCount: () => number;
 }
 
 async function withMock(
@@ -131,9 +132,11 @@ async function withMock(
   let checkouts = 0;
   let remembers = 0;
   let onboards = 0;
+  let requests = 0;
   const hardCap = new Set(opts.hardCap ?? []);
 
   const server: Server = createServer((req, res) => {
+    requests += 1;
     const url = (req.url ?? '').split('?')[0];
     const send = (status: number, body: unknown): void => {
       res.writeHead(status, { 'content-type': 'application/json' });
@@ -257,6 +260,7 @@ async function withMock(
       checkoutCount: () => checkouts,
       checkoutBodies: () => checkoutBodies,
       rememberCount: () => remembers,
+      requestCount: () => requests,
     });
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
@@ -1063,7 +1067,44 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       const ref = new SaihmProClient(m.base + '/mcp', undefined, masterOf(70), { tier: 'FREE' });
       assert.ok(stdout.includes(ref.agentIdHash), 'CLI prints the derived agentIdHash');
       assert.equal(m.checkoutCount(), 1);
+      assert.ok(m.requestCount() >= 1, 'the request counter sees the checkout');
       assert.equal(m.checkoutBodies()[0].tier, 'PRO', 'the CLI target tier reaches checkout');
+    });
+  });
+
+  it('`upgrade` refuses a SAIHM_HOME with the shape of a key: never printed, and nothing written under it', async () => {
+    await withMock(async (m) => {
+      const base = mkdtempSync(pathJoin(tmpdir(), 'saihm-un-kh-'));
+      const shaped = randomBytes(32).toString('hex');
+      mkdirSync(pathJoin(base, shaped), { recursive: true, mode: 0o700 });
+      try {
+        const env = cliEnv({
+          SAIHM_ENDPOINT_URL: m.base + '/mcp',
+          SAIHM_MASTER_SECRET_HEX: MASTER70_HEX,
+          SAIHM_HOME: pathJoin(base, shaped),
+          // Unset, as on a machine that never set it: the checkout file then lands under SAIHM_HOME.
+          SAIHM_STATE_DIR: '',
+          SAIHM_TIER: 'FREE',
+        });
+        // Since batch 7 boot refuses such a home before anything is written under it (security R6 F1): the checkout
+        // file landed in it, its location withheld. The intent stands - the home is never printed - and now
+        // nothing is written there either.
+        await assert.rejects(
+          () => pexec(tsxBin, [serverPath, 'upgrade', 'PRO'], { cwd: projectRoot, env, timeout: 30_000 }),
+          (e: unknown) => {
+            const err = e as { code?: number; stdout?: string; stderr?: string };
+            assert.equal(err.code, 1);
+            assert.match(err.stderr ?? '', /SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory, so nothing is written there/);
+            assert.ok(!`${err.stdout}${err.stderr}`.includes(shaped), 'the key-shaped SAIHM_HOME is not printed');
+            return true;
+          },
+        );
+        const { readdirSync } = await import('node:fs');
+        assert.deepEqual(readdirSync(pathJoin(base, shaped)), [], 'no checkout file is written under it');
+        assert.equal(m.requestCount(), 0, 'refused before any network');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
     });
   });
 
@@ -1114,7 +1155,7 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
     });
   });
 
-  it('`free-join` on a non-FREE identity exits non-zero (not_free_tier) before any network', async () => {
+  it('`free-join` on an identity already on a paid plan exits 0, saying there is nothing to join, before any network', async () => {
     await withMock(async (m) => {
       const env = cliEnv({
         SAIHM_ENDPOINT_URL: m.base + '/mcp',
@@ -1124,21 +1165,15 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
         SAIHM_TIER: 'PRO',
         SAIHM_PAYMENT_METHOD: 'stripe',
       });
-      await assert.rejects(
-        () =>
-          pexec(tsxBin, [serverPath, 'free-join'], {
-            cwd: projectRoot,
-            env,
-            timeout: 30_000,
-          }),
-        (e: unknown) => {
-          const err = e as { code?: number; stderr?: string };
-          assert.equal(err.code, 1);
-          assert.match(err.stderr ?? '', /FREE tier/, 'free-join refuses a paid identity');
-          return true;
-        },
-      );
-      assert.equal(m.challengeCount(), 0);
+      const { stdout } = await pexec(tsxBin, [serverPath, 'free-join'], {
+        cwd: projectRoot,
+        env,
+        timeout: 30_000,
+      });
+      // "configured for the PRO plan" since batch 7: the plan set here, which the join does not check with the endpoint.
+      assert.match(stdout, /has a SAIHM identity, configured for the PRO plan\./, 'free-join names the paid plan');
+      assert.match(stdout, /nothing to join/, 'and says there is nothing to do');
+      assert.equal(m.requestCount(), 0, 'answered before any network');
     });
   });
 });

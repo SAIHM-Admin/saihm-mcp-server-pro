@@ -44,7 +44,7 @@ describe("SC3: bootFromEnv validation", () => {
   it("rejects missing / short / non-hex master; accepts a valid env", () => {
     const save = { ...process.env };
     try {
-      for (const k of ["SAIHM_ENDPOINT_URL", "SAIHM_AUTH_HEADER", "SAIHM_MASTER_SECRET_HEX", "SAIHM_MASTER_SECRET_FILE", "SAIHM_SELF_JOIN", "SAIHM_TIER", "SAIHM_SEQ_STATE_PATH"]) delete process.env[k];
+      for (const k of ["SAIHM_ENDPOINT_URL", "SAIHM_AUTH_HEADER", "SAIHM_MASTER_SECRET_HEX", "SAIHM_MASTER_SECRET_FILE", "SAIHM_SELF_JOIN", "SAIHM_TIER", "SAIHM_SEQ_STATE_PATH", "SAIHM_IDENTITY", "SAIHM_IDENTITY_PASSPHRASE"]) delete process.env[k];
       // SAIHM_HOME is pinned to an empty temp dir so this asserts the *unconfigured*
       // path regardless of whether the machine running the suite happens to have a
       // real ~/.saihm/free-identity.key (which would otherwise boot successfully).

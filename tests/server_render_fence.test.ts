@@ -407,10 +407,25 @@ const RENDER_SITES_PIN: Record<string, number> = {
   'index.ts': 0,
   // 0 by design - the fences themselves render nothing; they return values their callers render.
   'render_fence.ts': 0,
-  // 18 `ok(...)` + 6 `stdout.write` + 3 `stderr.write`. The third `stderr.write` is the `free-join`
+  // 0 - the identity token module renders nothing. It THROWS typed errors whose text is its own and
+  // carries no value, and returns what it opened; its callers decide what reaches anyone.
+  'identity-token.ts': 0,
+  // 23 `ok(...)` + 8 `stdout.write` + 12 `stderr.write`. The third `stderr.write` is the `free-join`
   // failure guidance, written BEFORE the rethrow so it survives whatever `main` does with the
-  // error, and to stderr so a caller piping stdout still sees it.
-  'server.ts': 27,
+  // error, and to stderr so a caller piping stdout still sees it. The identity-token release added
+  // five: the join's "already have an identity?" answer and its temporary-home refusal (`ok`), the
+  // export summary (`stdout`), and two refusals on stderr - `free-join` in a temporary home, and
+  // `export-identity` with nothing configured to export. Then one more `ok`: `saihm_join`'s answer to
+  // an identity already on a paid plan, that there is nothing to join. Then two more: that answer on
+  // the `free-join` verb (`stdout`, since it is not a failure), and `export-identity` refusing a
+  // SAIHM_HOME with the shape of a key (`stderr`). Then three more: the join tool refusing such a
+  // SAIHM_HOME before it mints (`ok`), and on `free-join` the tier answer's failure arm (`stderr`) and
+  // that same SAIHM_HOME refusal (`stderr`). And one more: `export-identity` refusing a tier slip
+  // (`stderr`). Then four more, each fixed text naming no value: the join's refusal to start a FREE identity
+  // under a paid SAIHM_TIER, on the tool (`ok(tierRefusal)`) and on `free-join` (`stderr`); and on
+  // `export-identity`, refusing a plan name this version does not know (`stderr`) and relaying the token's own
+  // refusal of a value it cannot carry with the verb's prefix (`stderr`).
+  'server.ts': 43,
 };
 // Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. The bar for an
 // entry is a sentence explaining why a delimiter, a label or a newline cannot reach it - no count is
@@ -435,6 +450,37 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'creates is disclosed on the sharedLines block in the same handler. Note what bounds it: every ' +
     'OTHER field on that line is fenced and labelSafe-d, so plaintext cannot forge a neighbouring ' +
     'pair - it can only be itself',
+  'server.ts:temporaryHomeVariable':
+    "inside `ephemeralJoinRefusal`: the NAME of the variable that marked the home temporary, taken " +
+    'from the fixed list `ephemeralHomeSignal` checks. A name we wrote, never a value anyone set',
+  'server.ts:JOIN_EXISTING_IDENTITY_QUESTION':
+    'a module constant of string literals: the question `saihm_join` asks before minting. Nothing ' +
+    'interpolated, so no caller- or endpoint-chosen value can reach it',
+  "server.ts:ephemeralJoinRefusal(temporary) + '\\n'":
+    'the temporary-home refusal on the free-join verb. `temporary` is the NAME of a variable from ' +
+    'the fixed list `ephemeralHomeSignal` checks, never its value',
+  "server.ts:tierAnswer.text + '\\n'":
+    'the free-join verb\'s tier answer, on stdout when the plan is ready and stderr when it is not, ' +
+    'from `tierJoinAnswer`: fixed text whose one value is a plan name from the package\'s own list ' +
+    'of known plans, `safeScalar`-fenced besides',
+  "server.ts:'saihm: not joined - ' + KEY_SHAPED_HOME_JOIN_REFUSAL + '\\n'":
+    'the free-join refusal for a SAIHM_HOME with the shape of a key: a fixed prefix and a fixed ' +
+    'constant. The refusal exists so that the value is never printed, and it is not',
+  "server.ts:'saihm: not joined - ' + tierRefusal + '\\n'":
+    'the free-join refusal to start a FREE identity under a paid SAIHM_TIER: a fixed prefix and ' +
+    '`mintTierRefusal()`, which returns one of two fixed sentences. It names the variable, never its value',
+  "server.ts:'saihm: not exported - ' + e.message + '\\n'":
+    'export-identity relaying the refusal of the token module itself, of a value no token can carry: `e` ' +
+    'is an `IdentityTokenError` - anything else is rethrown - whose message is fixed text naming a variable ' +
+    'from a fixed list, never a value. It is the text `failText` rendered for it before, now with the prefix ' +
+    'every other refusal of this verb carries',
+  'server.ts:tierAnswer.text':
+    'the saihm_join tool\'s tier answer, from `tierJoinAnswer`: fixed text whose one value is a plan ' +
+    'name from the package\'s own list of known plans, `safeScalar`-fenced besides',
+  'server.ts:`SAIHM identity exported: ${agentIdHash.slice(0, 16)}…${agen':
+    'the export summary. `agentIdHash` is derived locally from the exported key by `toHex` - ' +
+    'lowercase hex and nothing else - and the tier beside it is a known plan name, `safeScalar`-fenced, ' +
+    'or a fixed sentence saying it is not shown',
   'server.ts:CLI_USAGE':
     'a static usage block: string literals plus PACKAGE_VERSION, which has its own entry above. No ' +
     'interpolation reaches it from outside the module',
@@ -447,7 +493,7 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'if a fourth occurrence appeared unfenced. Reported only because the predicate cannot see ' +
     'through a call boundary to the fence on the other side',
 };
-const SAFESCALAR_SITES_PIN = 26; // +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts
+const SAFESCALAR_SITES_PIN = 30; // +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts; +1: `export-identity`'s tier in its summary; +1: `saihm_join`'s paid-plan answer; +2: the plan name meant, in the join's tier answer and in `export-identity`'s refusal of a tier slip
 const RENDER_HELPER_EXPORTS: string[] = [
   'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
   'MAX_JOIN_FIELD_CHARS', 'MAX_PATH_FIELD_CHARS', 'MAX_PATH_MESSAGE_CHARS', 'MAX_SCALAR_CHARS',
@@ -1218,6 +1264,15 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     // and the grace for a lock file still being written. The wait belongs to each caller, not to the lock.
     'file-lock.ts': { LOCK_STALE_MS: 30000, LOCK_MALFORMED_GRACE_MS: 1000 },
     'index.ts': {},
+    // The identity token's format bounds. None is a render budget - the module renders nothing - but
+    // each is a number a reader must be able to check: the clear label's width, the passphrase's
+    // symbols and grouping, the cipher's salt, nonce, tag and key sizes, the scrypt cost and its
+    // memory ceiling, and the length above which a pasted value is refused before it is decoded.
+    'identity-token.ts': {
+      IDENTITY_LABEL_HEX: 16, PASSPHRASE_SYMBOLS: 20, PASSPHRASE_GROUP: 5, SALT_BYTES: 16, IV_BYTES: 12,
+      TAG_BYTES: 16, KEY_BYTES: 32, KDF_N: 32768, KDF_R: 8, KDF_P: 1, KDF_MAXMEM_BYTES: 67108864,
+      MAX_TOKEN_CHARS: 4096,
+    },
     // Budgets, but not exports: `server.ts` exports nothing at all and calls `main()` at module
     // scope, so importing it to read them off would start a server. They are derived from its SOURCE
     // instead, below. Listed here so every module is pinned in one place.
@@ -2028,7 +2083,11 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       // FAILURE. That value has to round-trip - a user who already activated on another machine
       // recovers by copying the key at that path - which is why it is `safePathField` and not
       // `safeField`, the class distinction this release's sibling entry turns on.
-      'safePathField:MAX_PATH_FIELD_CHARS': 6,
+      // EIGHT since `export-identity`: its summary names where the identity came from (a key file
+      // path, or a variable name) and the export file it wrote - both must round-trip whole.
+      // NINE since that file is named by its own name where its path is withheld - `basename(file)`, in the exports
+      // folder under SAIHM_HOME. The name must round-trip whole too: it is how the operator finds the file.
+      'safePathField:MAX_PATH_FIELD_CHARS': 9,
       // TWO erasure residuals, not one. The first embeds the local cache path; the second embeds the
       // erasure-feed path, and it is a SEPARATE rendered line because the two say different things to
       // the operator - plaintext may remain HERE, versus the erasure happened and nothing downstream
@@ -2071,6 +2130,8 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     // {} - the lock calls no fence.
     'file-lock.ts': {},
     'index.ts': {},
+    // {} - the identity token module calls no fence: its errors carry no value to fence, by design.
+    'identity-token.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
   // module under `src/` with a wrong-budget call site stayed green, and `index.ts` was missing
@@ -2217,6 +2278,9 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // which catches it and reports a residual.
     'client.ts:withWriteLock': 4,
     'server.ts:persistCheckoutUrl': 4, // writes the checkout URL, and is already wrapped
+    // TWO, and neither writes the cache: the export directory (mkdir, 0700) and the one export file
+    // (`wx`, 0600). Both sit inside a `markPathBearing` rethrow at the site, so a failure names its path whole.
+    'server.ts:runExportIdentity': 2,
     // ONE, and it is an UNLINK, not a write to the cache. `sweepStaleIdentityTemps` removes
     // orphaned `<identity>.tmp.*` files stranded by a hard kill between the atomic write and the
     // rename. It is listed here rather than wrapped because its failure never reaches the
@@ -2727,7 +2791,7 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // `erasure-feed.ts: 0` - it reaches no `persist()`. It writes a DIFFERENT artifact through its
     // own `node:fs` calls, censused in `FS_WRITES` above; there is nothing here for a wrapper to
     // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
-    { 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0 },
+    { 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -2832,7 +2896,8 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // own temporary file when the rename fails.
     // `feed-state-file.ts: 1` - the feed state is replaced whole the same way, and that arm unlinks its own temporary
     // file when the rename fails. `file-lock.ts: 0` - the lock is created and removed, never renamed.
-    { 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1 },
+    // `identity-token.ts: 0` - it writes no file at all; the export verb in `server.ts` writes once, with `wx`, no rename.
+    { 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
 });
@@ -3657,7 +3722,10 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     // `safePathField` at the path budget. Fencing at the throw would truncate twice and change
     // `.message` - the consumer regression this branch introduced and reverted once.
     'client.ts': {
-      SAIHM_HOME: 1, // env read into a local
+      // TWO: the env read into a local, and the NAME in boot's refusal of a state directory with the shape of a
+      // secret - `['SAIHM_HOME', 'SAIHM_STATE_DIR'] as const`, the list that refusal reads and names. It names the
+      // variable, never its value.
+      SAIHM_HOME: 2,
       // Enumerated by PARENT KIND from the tree, because describing them from memory got it wrong:
       // the previous note said "four fs arguments" against three, and omitted the shorthand property
       // in `return { created, keyPath }` entirely - two errors that cancelled to the right total.
@@ -3677,7 +3745,13 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // reads it twice - `dirname(keyPath)` and `basename(keyPath)` inside the prefix template.
       // A parameter declaration and two call arguments. None reaches a rendered line: the value is
       // used to derive a directory and a startsWith prefix, and the function returns a count.
-      keyPath: 16,
+      // SEVENTEEN: `ensureSelfJoinIdentityEnv`'s identity-token arm returns `{ keyPath: null }` - the
+      // property NAME, carrying no value at all, because a token has no file to name.
+      // EIGHTEEN: the mint refuses a key path with the shape of a secret - `pathHoldsIdentitySecret(keyPath)`,
+      // an argument to a predicate. The refusal names SAIHM_HOME and never carries the value.
+      // NINETEEN: where creating the key fails, `displayableKeyPath(keyPath) === null` decides whether Node's
+      // path-bearing error is relayed or replaced by its code - an argument to a predicate again.
+      keyPath: 19,
       // EIGHT OCCURRENCES, not eight lines: the delete/rewrite carries three on one line (the
       // condition, the property write and the value read). A count of occurrences described as a
       // list of lines reads as an off-by-two to anyone who checks it. The eighth is the recall cache
@@ -3699,7 +3773,9 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // Neither is a rendered line on its own - the label goes into a `SaihmConfigError` message and
       // `failText` fences THAT through `safePathField`, the same deliberate shape the note above
       // documents for the throw site.
-      secretFile: 12,
+      // THIRTEEN: the unreadable-file arm first asks whether the value is shaped like a key, a
+      // passphrase or a token (`displayableKeyPath(secretFile)`) so that one is never echoed.
+      secretFile: 13,
     },
     'erasure-feed.ts': {
       // TWO occurrences of the NAME, and not one occurrence of a value. The first is the read
@@ -3723,12 +3799,16 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'file-lock.ts': {},
     'index.ts': {},
     'render_fence.ts': {},
+    // {} - the identity token module is handed its two values and reads no caller-chosen name.
+    'identity-token.ts': {},
     'server.ts': {
       // An env read into a local, the same shape as the `client.ts` allowance above. It is here
       // because `persistCheckoutUrl` now honours `SAIHM_HOME` as a fallback for `SAIHM_STATE_DIR`:
       // two names for ONE directory, both defaulting to `~/.saihm`, so relocating `SAIHM_HOME` left
       // this file written under the old path with no declared variable to redirect it.
-      SAIHM_HOME: 1,
+      // TWO since a failed join says where this machine's key is when its path is withheld: a truthiness test of
+      // `process.env.SAIHM_HOME` picks one of two fixed sentences - under SAIHM_HOME, or in ~/.saihm.
+      SAIHM_HOME: 2,
       localCacheResidual: 1, // truthiness selecting whether the residual line renders at all
       feedResidual: 1, // the same, for the second residual line
       savedTo: 2, // parameter declaration, and the truthiness guarding its (fenced) render
@@ -4883,7 +4963,21 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // that started matching something new.
   // Raised by `saihm_remember`'s two local share re-issue counts, rendered in one conditional part of its `+` chain:
   // the template arm counts each of the two values and the concatenation arm counts the part once.
-  const EXAMINED_SPANS_PIN = 87;
+  // +3 net since 0.11.2, measured by swapping trees: `export-identity`'s summary adds FOUR spans; the
+  // two `badSecret` templates lost TWO when they stopped appending the setup hint (their label span is
+  // no longer counted twice, and both are still examined); `saihm_join`'s paid-plan tier adds ONE.
+  // +2, measured by listing the spans: the paid-plan answer moved into a helper that names the plan only
+  // when it is a known one, so its fenced tier now sits in a template INSIDE a conditional - counted by
+  // both arms, three spans where the inline template had one.
+  // +1, measured by listing the spans: that answer now has two arms that render the plan - the plan is
+  // ready, or its payment method is missing - so the `+`-chain arm examines the bound `on` twice where
+  // it examined the conditional once. Every other moved span was a rename to `shownKeyPath`.
+  // +1, measured by listing the spans: the tier answer's conditional (a plan, or "a paid plan") is gone,
+  // since an unknown label now returns before it (-1); the plan meant is named in the join's slip answer
+  // (+1) and in `export-identity`'s refusal of a tier slip (+1). The rest moved by a rename to `shownPath`.
+  // +1, measured by listing the spans: `export-identity` names its file by its own name where the path is withheld,
+  // `safePathField(basename(file), ...)` - one template span, in no `+` chain, so the pin moves by one.
+  const EXAMINED_SPANS_PIN = 95;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

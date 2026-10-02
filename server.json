@@ -7,12 +7,12 @@
     "url": "https://github.com/SAIHM-Admin/saihm-mcp-server-pro",
     "source": "github"
   },
-  "version": "0.11.2",
+  "version": "0.12.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@saihm/mcp-server-pro",
-      "version": "0.11.2",
+      "version": "0.12.0",
       "transport": {
         "type": "stdio"
       },
@@ -36,6 +36,38 @@
           "isRequired": false,
           "format": "filepath",
           "isSecret": true
+        },
+        {
+          "name": "SAIHM_IDENTITY",
+          "description": "An identity token written by export-identity: brings an existing SAIHM identity to this machine or a hosted agent environment without copying a key file. Set together with SAIHM_IDENTITY_PASSPHRASE; leave both unset to use this machine's own identity.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "SAIHM_IDENTITY_PASSPHRASE",
+          "description": "The passphrase export-identity generated for SAIHM_IDENTITY. The two together are the identity: store it as a secret.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "SAIHM_TIER",
+          "description": "The plan this identity onboards with (FREE, PRO, PRO_FAST, ENTERPRISE, ENTERPRISE_FAST). Defaults to FREE while self-join is on (the default); set it for a paid plan, and with SAIHM_SELF_JOIN=0 for every plan, FREE included. An export-identity token carries its own, which a non-empty value here overrides.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SAIHM_PAYMENT_METHOD",
+          "description": "The payment rail of a paid plan, e.g. stripe. Required for a paid SAIHM_TIER unless an export-identity token carries it.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "SAIHM_EPHEMERAL_HOME",
+          "description": "Set it (e.g. 1) where the home directory is discarded at session end: the join then refuses to create a key. 0 declares the home kept and overrides the host's own signal. Unset: detected where the host says so.",
+          "isRequired": false,
+          "format": "string"
         },
         {
           "name": "SAIHM_HOME",

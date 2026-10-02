@@ -54,6 +54,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
+import { looksLikeIdentitySecret } from './identity-token.js';
 
 /** The feed's own filename inside a tenant directory. Not exported: the consumer hard-codes it. */
 const FEED_FILENAME = 'erasures.ndjson';
@@ -147,8 +148,13 @@ export function resolveFeedRoot(env: NodeJS.ProcessEnv = process.env): string {
   const root = explicit ?? home ?? pathJoin(homedir(), '.saihm');
   if (!isAbsolute(root)) {
     const which = explicit !== undefined ? 'SAIHM_ERASURE_FEED_DIR' : 'SAIHM_HOME';
+    // Not echoed when it has the shape of a key, passphrase or token: a value pasted into the wrong field
+    // must not come back in the erasure receipt an agent relays.
+    const got = looksLikeIdentitySecret(root)
+      ? 'a value with the shape of a key, passphrase or token (not shown)'
+      : JSON.stringify(root);
     throw new ErasureFeedError(
-      `${which} must be an ABSOLUTE path; got ${JSON.stringify(root)}. A relative feed root ` +
+      `${which} must be an ABSOLUTE path; got ${got}. A relative feed root ` +
         `resolves against the current working directory, so the same identity would write to a ` +
         `different file depending on where the process was started, and a consumer would report the ` +
         `feed absent while lines were being written elsewhere.`,

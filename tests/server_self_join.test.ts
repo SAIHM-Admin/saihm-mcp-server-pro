@@ -208,7 +208,12 @@ function startServer(endpoint: string, extraEnv: Record<string, string>): Driver
   // Never inherit a real key/tier from the runner's shell — self-join must stand alone.
   delete env.SAIHM_MASTER_SECRET_HEX;
   delete env.SAIHM_MASTER_SECRET_FILE;
+  if (!('SAIHM_IDENTITY' in extraEnv)) delete env.SAIHM_IDENTITY;
+  if (!('SAIHM_IDENTITY_PASSPHRASE' in extraEnv)) delete env.SAIHM_IDENTITY_PASSPHRASE;
   if (!('SAIHM_TIER' in extraEnv)) delete env.SAIHM_TIER;
+  // A CI runner marks its home temporary (CI, GITHUB_ACTIONS), and the join refuses to mint there.
+  // These tests join in a temp SAIHM_HOME they own, so they declare it kept unless a test says otherwise.
+  if (!('SAIHM_EPHEMERAL_HOME' in extraEnv)) env.SAIHM_EPHEMERAL_HOME = '0';
   const proc = spawn(TSX, [SERVER], {
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -383,7 +388,7 @@ test('saihm_join ON: 9 tools; two-phase self-join self-generates the key, binds 
     );
 
     // Phase 1: returns the device prompt (open URL + code) and notes the freshly created key.
-    const first = await callText(d, 3, 'saihm_join', {});
+    const first = await callText(d, 3, 'saihm_join', { newIdentity: true });
     assert.equal(first.isError, false, `phase-1 errored: ${first.text}`);
     assert.match(first.text, /https:\/\/device\.test\/activate/);
     assert.match(first.text, /ABCD-1234/);
@@ -402,7 +407,7 @@ test('saihm_join ON: 9 tools; two-phase self-join self-generates the key, binds 
     let done = { text: '', isError: false };
     for (let i = 0; i < 8; i++) {
       await sleep(1200);
-      done = await callText(d, 10 + i, 'saihm_join', {});
+      done = await callText(d, 10 + i, 'saihm_join', { newIdentity: true });
       if (!done.isError && /free SAIHM memory is active/i.test(done.text)) break;
     }
     assert.equal(done.isError, false, `phase-2 errored: ${done.text}`);
@@ -439,7 +444,7 @@ test('saihm_join ON: a hostile bridge cannot add steps to the human instructions
   const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '1' });
   try {
     await handshake(d);
-    const first = await callText(d, 3, 'saihm_join', {});
+    const first = await callText(d, 3, 'saihm_join', { newIdentity: true });
     assert.equal(first.isError, false, `phase-1 errored: ${first.text}`);
     const lines = first.text.split('\n');
     // Exactly the five lines this server composes: header, two numbered steps, expiry, key note.
@@ -555,7 +560,7 @@ const expiryLine = async (expiresIn: unknown): Promise<string> => {
   const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '1' });
   try {
     await handshake(d);
-    const first = await callText(d, 3, 'saihm_join', {});
+    const first = await callText(d, 3, 'saihm_join', { newIdentity: true });
     assert.equal(first.isError, false, `phase-1 errored: ${first.text}`);
     const line = first.text.split('\n').find((l) => l.includes('expires in about'));
     assert.ok(line, `no expiry line was rendered:\n${first.text}`);

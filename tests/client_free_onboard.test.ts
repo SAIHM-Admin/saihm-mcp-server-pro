@@ -1195,3 +1195,19 @@ describe('FF18: no endpoint-chosen value reaches a message the JOIN STATE will r
     );
   });
 });
+
+describe('self-onboarding names the tier before the payment method (R7 L2)', () => {
+  it('no tier: asks for SAIHM_TIER, not for a payment method a FREE identity does not need', () => {
+    assert.throws(
+      () => new SaihmProClient('http://127.0.0.1:9/mcp', undefined, masterOf(40), {}),
+      /self-onboarding requires a tier \(set SAIHM_TIER\)/,
+    );
+  });
+  it('FREE needs no payment method; a paid tier without one is refused', () => {
+    assert.doesNotThrow(() => new SaihmProClient('http://127.0.0.1:9/mcp', undefined, masterOf(41), { tier: 'FREE' }));
+    assert.throws(
+      () => new SaihmProClient('http://127.0.0.1:9/mcp', undefined, masterOf(42), { tier: 'PRO' }),
+      /self-onboarding requires a paymentMethod \(set SAIHM_PAYMENT_METHOD\)/,
+    );
+  });
+});

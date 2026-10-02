@@ -263,6 +263,9 @@ function startServer(
 ): Driver {
   const env = {
     ...process.env,
+    // Never a token from the runner's shell: it would exclude the secret below and fail every boot.
+    SAIHM_IDENTITY: undefined,
+    SAIHM_IDENTITY_PASSPHRASE: undefined,
     SAIHM_ENDPOINT_URL: endpoint,
     SAIHM_MASTER_SECRET_HEX: MASTER_HEX,
     SAIHM_TIER: 'PRO',
@@ -2124,5 +2127,23 @@ test('server.ts: a marks file that cannot be READ leaves an empty floor, so a re
   } finally {
     rmSync(home, { recursive: true, force: true });
     await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('saihm_join advertises newIdentity as a plain boolean: null is mapped before validation, never added to the schema (R7 F2)', async () => {
+  // A union type in a tool schema is a dialect some hosts' function calling does not take; the schema every host
+  // reads stays as reviewed.
+  const d = startServer('http://127.0.0.1:9/mcp', [], { SAIHM_SELF_JOIN: undefined });
+  try {
+    await d.rpc(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 't', version: '0' } });
+    d.notify('notifications/initialized');
+    const list = await d.rpc(2, 'tools/list', {});
+    const tools = list.result.tools as { name: string; inputSchema: { properties: Record<string, Record<string, unknown>> } }[];
+    const join = tools.find((t) => t.name === 'saihm_join');
+    assert.ok(join, 'saihm_join is listed with self-join on');
+    assert.equal(join.inputSchema.properties.newIdentity.type, 'boolean');
+    assert.equal(join.inputSchema.properties.newIdentity.anyOf, undefined);
+  } finally {
+    d.proc.kill();
   }
 });

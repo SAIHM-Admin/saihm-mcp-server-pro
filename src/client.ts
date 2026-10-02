@@ -30,6 +30,12 @@
  *                           never transmitted or logged. Its derived `agentIdHash` MUST equal the
  *                           JWT `sub` (the blind endpoint rejects a write whose signed agentIdHash
  *                           != JWT.sub — BLIND_ATTRIBUTION_MISMATCH).
+ *   SAIHM_IDENTITY          an identity token written by `export-identity`: the master secret sealed
+ *                           under a generated passphrase, with the tier and payment method it
+ *                           onboards with. Needs SAIHM_IDENTITY_PASSPHRASE beside it, and EXCLUDES
+ *                           the two master-secret variables (both set is an error, never a pick).
+ *                           Non-empty SAIHM_TIER / SAIHM_PAYMENT_METHOD override what it carries.
+ *   SAIHM_IDENTITY_PASSPHRASE the passphrase `export-identity` generated for that token.
  *   SAIHM_TIER              the billing tier label baked into sealed cell metadata. REQUIRED for
  *                           self-onboarding (it is part of the onboard request); otherwise optional —
  *                           if unset (static-auth mode) the client resolves it once via `status()`.
@@ -58,7 +64,10 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
-import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
+import { Agent as HttpsAgent, request as httpsRequest, type RequestOptions as HttpsRequestOptions } from 'node:https';
+import { connect as tlsConnect } from 'node:tls';
+import { isIP } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import {
@@ -103,6 +112,16 @@ import { ShareEventsFeed, type FeedStore, type ShareEventsTransport, type ShareS
 import { FileFeedStore, feedStatePath } from './feed-state-file.js';
 import { shareStatesPath, writeShareStates } from './share-states-file.js';
 import { safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
+import {
+  openIdentityToken,
+  cleanPastedValue,
+  looksLikeIdentitySecret,
+  pathHoldsIdentitySecret,
+  IdentityTokenError,
+  IDENTITY_ENV,
+  PASSPHRASE_ENV,
+  type OpenedIdentityToken,
+} from './identity-token.js';
 import {
   MAX_FEED_CELL_ID_CHARS,
   emitErasureLineReporting,
@@ -243,9 +262,32 @@ export const MAX_ANNOUNCEMENT_TOTAL_CHARS = 32 * 1024;
 export const DEFAULT_ENDPOINT = 'https://saihm.net/mcp';
 
 /**
- * Appended to every remaining bootFromEnv configuration error. A bare env-var
- * name is a dead end for the agent reading it: it cannot tell that a free,
- * zero-config path exists one tool call away.
+ * The fix for the two onboard refusals that a CONFIGURATION causes, appended to the error.
+ *
+ * Selected by EXACT match on the endpoint's typed `reason`, and the sentences are ours: the most an
+ * endpoint can do by choosing a reason is pick one of these two, and each only names variables to
+ * check. Anything else gets no remedy, rather than a guess presented as a diagnosis. Kept short
+ * enough that the whole message, with every endpoint-chosen part at its slice, stays inside the
+ * plain-message render budget.
+ */
+function onboardRemedy(status: number, code: string | undefined, reason: string | undefined): string {
+  if (status !== 401 || code !== 'verification_failed') return '';
+  if (reason === 'no_free_entitlement')
+    return ' Paid identity? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for its plan. New free one? Finish Join SAIHM first.';
+  if (reason === 'no_active_subscription')
+    return ' Check that SAIHM_TIER names the plan this identity was bought on.';
+  return '';
+}
+
+/**
+ * Appended to the one boot error that is not about an identity: an empty SAIHM_ENDPOINT_URL. A bare
+ * env-var name is a dead end for the agent reading it: it cannot tell that a free, zero-config path
+ * exists one tool call away.
+ *
+ * NOT appended to errors about a CONFIGURED identity - a key file that is unreadable, empty or
+ * malformed, an inline secret that is not hex, a token that does not open. Every one of those used to
+ * end "ask me to Join SAIHM", and following that advice minted a SECOND identity while the
+ * operator's real one sat there unread: the remedy for a broken key is to fix the key.
  *
  * It MUST be computed per call, not frozen into a constant: under
  * SAIHM_SELF_JOIN=0 the server registers eight tools and no `saihm_join`, so
@@ -268,7 +310,11 @@ function assertEndpointUrl(endpoint: string): void {
     url = new URL(endpoint);
   } catch {
     throw new SaihmConfigError(
-      `SAIHM_ENDPOINT_URL is not a valid URL: ${endpoint}`,
+      // Not echoed when it has the shape of a key, passphrase or token: one pasted into the wrong one of
+      // several settings fields would otherwise come back in a reply an agent repeats.
+      looksLikeIdentitySecret(endpoint)
+        ? 'SAIHM_ENDPOINT_URL is not a valid URL, and what it holds looks like a key, passphrase or token, so it is not shown.'
+        : `SAIHM_ENDPOINT_URL is not a valid URL: ${endpoint}`,
       'url',
     );
   }
@@ -422,7 +468,9 @@ export class SaihmEndpointError extends Error {
  * wording had these two the wrong way round and also blamed the throw SITE for being unguarded:
  * the site is indeed unguarded, but which hint it carries is chosen entirely inside `setupHint()`.
  * That is the same polarity error already recorded as found and fixed twice in this tree. Both
- * numbers are far below a real path. The budget itself is not
+ * numbers are far below a real path. (Those sentences no longer carry the hint at all - an error
+ * about a configured key now names its own remedy - but the class still matters for the path.)
+ * The budget itself is not
  * passed from here — `render_fence.ts` imports this module, so handing it a number would close a
  * cycle. It gets the value's CLASS and keeps the choice of bound where the other bounds live.
  *
@@ -496,6 +544,16 @@ const PATH_BEARING = Symbol('saihm.pathBearingMessage');
  * this function is generic, so a caller can hand it anything. A mark that cannot be applied means
  * the render stays narrow, which is the safe direction.
  */
+/** A Node error's code as a report may carry it - `EACCES` and the like - never its message, which names paths. */
+export function nodeErrorCode(e: unknown): string {
+  try {
+    const code = (e as { code?: unknown } | null)?.code;
+    return typeof code === 'string' && /^E[A-Z0-9]{2,15}$/.test(code) ? code : 'a file system error';
+  } catch {
+    return 'a file system error';
+  }
+}
+
 export function markPathBearing<E>(e: E): E {
   // The WHOLE body is guarded, not only `defineProperty`. `e instanceof Error` runs a
   // `getPrototypeOf` trap and `PATH_BEARING in e` runs a `has` trap, so on a proxy whose traps
@@ -618,6 +676,257 @@ const KEEPALIVE_OPTS = { keepAlive: true, keepAliveMsecs: KEEPALIVE_PROBE_MS, ma
 const saihmKeepAliveAgentHttps = new HttpsAgent(KEEPALIVE_OPTS);
 const saihmKeepAliveAgentHttp = new HttpAgent(KEEPALIVE_OPTS);
 
+/*
+ * PROXIES. A hosted agent environment, or a corporate network, may let traffic out only through an
+ * HTTP proxy named in HTTPS_PROXY - and this transport, being `node:https` with its own agent,
+ * honoured none: there the endpoint was simply unreachable, behind a remedy ("allow the host") that
+ * could not help. `https_proxy` (or `HTTPS_PROXY` when that is unset) is honoured now, for https
+ * endpoints only. `HTTP_PROXY` names a proxy for http traffic, which npm and curl never use for an
+ * https URL either - a machine that sets it for that would see this endpoint rerouted - and an http
+ * endpoint is legal on loopback alone, which never goes through a proxy. NO_PROXY excludes hosts the way curl and npm read it: `*`, exact names, and domain suffixes
+ * with or without a leading dot or `*`, each optionally with a port.
+ *
+ * The tunnel is a CONNECT to the proxy and TLS to the endpoint THROUGH it, so the proxy learns the
+ * host name and nothing more, and the endpoint's certificate is checked exactly as on a direct
+ * connection. A proxy's credentials (user:password in its URL) go to the proxy and nowhere else:
+ * every failure here is reported as a fixed code, never with the URL that carried them.
+ */
+const PROXY_VARIABLES = ['https_proxy', 'HTTPS_PROXY'] as const;
+
+/** A request's abort signal, as the tunnel agent receives it: Node hands an agent every request option but `signal`. */
+const TUNNEL_ABORT = Symbol('saihm.tunnelAbort');
+
+/**
+ * Each proxied request's own abort signal, by REQUEST. Node builds the socket for a QUEUED request (one
+ * waiting behind `maxSockets`) from the options of whichever socket's close freed the slot - another
+ * request's, carrying that request's signal - so the options alone cannot name the right one; see
+ * `ProxyTunnelAgent.createSocket`. `null` records that a request has none, so it never inherits one.
+ */
+const TUNNEL_SIGNALS = new WeakMap<object, AbortSignal | null>();
+
+/** An error whose `code` is the whole report: `transportReason` surfaces it, and it carries no value. */
+function codedError(code: string): Error {
+  const e = new Error(code) as Error & { code: string };
+  e.code = code;
+  return e;
+}
+
+function noProxyMatches(hostname: string, port: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  // 127/8 as an ADDRESS: a host NAME that merely starts with `127.` is someone's domain, not this machine.
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '::1' || (isIP(host) === 4 && host.startsWith('127.')))
+    return true;
+  // Trimmed like the proxy variables, so a blank `no_proxy` does not hide `NO_PROXY`.
+  const list = (process.env.no_proxy?.trim() || process.env.NO_PROXY?.trim() || '').toLowerCase();
+  for (const item of list.split(/[\s,]+/)) {
+    if (item === '') continue;
+    if (item === '*') return true;
+    let name = item;
+    let only = '';
+    const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(item);
+    if (bracketed) {
+      name = bracketed[1] ?? '';
+      only = bracketed[2] ?? '';
+    } else {
+      const at = item.lastIndexOf(':');
+      if (at > 0 && item.indexOf(':') === at && /^\d+$/.test(item.slice(at + 1))) {
+        name = item.slice(0, at);
+        only = item.slice(at + 1);
+      }
+    }
+    if (only !== '' && only !== port) continue;
+    name = name.replace(/^\*/, '');
+    if (name === '' || name === '.') continue;
+    if (name.startsWith('.') ? host.endsWith(name) || host === name.slice(1) : host === name || host.endsWith(`.${name}`))
+      return true;
+  }
+  return false;
+}
+
+/** The proxy variable this transport reads: the first one set, lower case first, as curl reads them. */
+function proxyVariableInUse(): (typeof PROXY_VARIABLES)[number] | null {
+  for (const n of PROXY_VARIABLES) if (process.env[n]?.trim()) return n;
+  return null;
+}
+
+/**
+ * The proxy to reach an https `target` through, or `null` to connect directly. Throws a coded error
+ * - naming the variable, never its value - when the configured proxy cannot be used at all, rather
+ * than quietly connecting direct where the operator said not to.
+ */
+export function proxyForTarget(target: URL): URL | null {
+  if (target.protocol !== 'https:') return null;
+  const name = proxyVariableInUse();
+  const raw = name === null ? '' : (process.env[name] ?? '').trim();
+  if (raw === '' || noProxyMatches(target.hostname, target.port || '443')) return null;
+  let proxy: URL;
+  try {
+    proxy = new URL(raw.includes('://') ? raw : `http://${raw}`);
+  } catch {
+    throw codedError(`${name}_NOT_A_URL`);
+  }
+  if (proxy.protocol !== 'http:' || proxy.hostname === '') throw codedError(`${name}_NOT_AN_HTTP_PROXY`);
+  return proxy;
+}
+
+/** Whether a request to `url` goes through a proxy - or would have, had the proxy setting been usable. */
+function proxyApplies(url: string): boolean {
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    return false;
+  }
+  try {
+    return proxyForTarget(target) !== null;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a transport failure is a certificate this machine does not trust, which is what a network
+ * that inspects TLS produces. Expired and wrong-name certificates are not in it: no CA added here
+ * fixes either.
+ */
+export function untrustedCertificate(reason: string): boolean {
+  return /SELF_SIGNED|UNABLE_TO_(?:VERIFY|GET_ISSUER)/.test(reason);
+}
+
+/** Whether a transport failure is a proxy setting this transport cannot use at all: not an http:// URL. */
+export function unusableProxy(reason: string): boolean {
+  return /(?:https_proxy|HTTPS_PROXY)_NOT_(?:A_URL|AN_HTTP_PROXY)\b/.test(reason);
+}
+
+/** An https agent whose sockets are TLS tunnels through one proxy, pooled and kept alive like the direct one. */
+class ProxyTunnelAgent extends HttpsAgent {
+  readonly #proxy: URL;
+
+  constructor(proxy: URL) {
+    super(KEEPALIVE_OPTS);
+    this.#proxy = proxy;
+  }
+
+  /**
+   * Node's agent makes every socket through here, and is handed the request it is for. For a request
+   * that was QUEUED, `options` are those of the socket whose close freed the slot, so their signal was
+   * another request's: that request's abort failed this healthy one at once, and this one's own abort
+   * could not reach its CONNECT. The request's own entry wins. A request still being constructed - its
+   * first, unqueued pass - has no entry yet, and the options it brings are its own.
+   */
+  createSocket(req: object, options: HttpsRequestOptions, cb: (err: Error | null, socket?: Duplex) => void): void {
+    // A request that already FAILED - its own CONNECT refused or reset - is destroyed without its signal
+    // aborting, as its caller cleared the timer, and Node keeps it at the head of the queue: the socket
+    // made for it would answer to nobody until its deadline. It is read as given up, as an aborted one is.
+    const own = (req as { destroyed?: boolean }).destroyed ? AbortSignal.abort() : TUNNEL_SIGNALS.get(req);
+    const opts = own === undefined ? options : { ...options, [TUNNEL_ABORT]: own ?? undefined };
+    (HttpsAgent.prototype as unknown as { createSocket: (r: object, o: object, c: typeof cb) => void }).createSocket.call(
+      this,
+      req,
+      opts,
+      cb,
+    );
+  }
+
+  override createConnection(
+    options: HttpsRequestOptions,
+    callback?: (err: Error | null, stream: Duplex) => void,
+  ): Duplex | null | undefined {
+    const host = String(options.host ?? options.hostname ?? '');
+    const port = Number(options.port) || 443;
+    const authority = host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
+    const headers: Record<string, string> = { host: authority };
+    if (this.#proxy.username !== '' || this.#proxy.password !== '') {
+      const user = decodeURIComponent(this.#proxy.username);
+      const pass = decodeURIComponent(this.#proxy.password);
+      headers['proxy-authorization'] = `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+    }
+    let settled = false;
+    const done = (err: Error | null, stream?: Duplex): void => {
+      if (settled) {
+        stream?.destroy();
+        return;
+      }
+      settled = true;
+      callback?.(err, stream as Duplex);
+    };
+    // WHOSE ABORT ENDS THIS CONNECT: the request it was opened for, while that one waits; once it gives up,
+    // the next request still queued for this host - the one the socket will then serve - and only when none
+    // waits is the CONNECT abandoned. Node opens every replacement socket for the head of the queue, and
+    // leaves a request there after it gave up, so a CONNECT tied to one request stranded the rest.
+    const name = this.getName(options);
+    const nextWaiting = (): AbortSignal | null | undefined => {
+      const next = (this.requests[name] ?? []).find((r) => !r.destroyed);
+      return next === undefined ? undefined : (TUNNEL_SIGNALS.get(next) ?? null);
+    };
+    const signal = (options as { [TUNNEL_ABORT]?: AbortSignal })[TUNNEL_ABORT];
+    if (signal?.aborted && nextWaiting() === undefined) {
+      done(codedError('PROXY_CONNECT_ABORTED'));
+      return undefined;
+    }
+    const connect = httpRequest({
+      host: this.#proxy.hostname.replace(/^\[(.*)\]$/, '$1'),
+      port: Number(this.#proxy.port) || 80,
+      method: 'CONNECT',
+      path: authority,
+      headers,
+      agent: false,
+    });
+    // AN ABSOLUTE DEADLINE, not an idle timer: a proxy that trickles its reply re-arms an idle timer with
+    // every byte, and the phase never ends. The caller's abort ends it too. The request waiting on this
+    // tunnel has no socket yet, so destroying that request leaves the CONNECT running - holding the
+    // process open - until the proxy answers.
+    let watched: AbortSignal | undefined;
+    const abort = (): void => {
+      watched = undefined;
+      const next = nextWaiting();
+      if (next === undefined) connect.destroy(codedError('PROXY_CONNECT_ABORTED'));
+      else if (next !== null && !next.aborted) watch(next);
+    };
+    const watch = (s: AbortSignal): void => {
+      watched = s;
+      s.addEventListener('abort', abort, { once: true });
+    };
+    const deadline = setTimeout(() => connect.destroy(codedError('PROXY_CONNECT_TIMEOUT')), REQUEST_TIMEOUT_MS);
+    if (signal?.aborted) abort();
+    else if (signal) watch(signal);
+    const finished = (): void => {
+      clearTimeout(deadline);
+      watched?.removeEventListener('abort', abort);
+    };
+    connect.once('connect', (res, socket, head) => {
+      finished();
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        done(codedError(`PROXY_CONNECT_${res.statusCode ?? 0}`));
+        return;
+      }
+      if (head.length > 0) socket.unshift(head);
+      // TLS to the ENDPOINT, verified as on a direct connection: the default trust store (plus
+      // NODE_EXTRA_CA_CERTS), the endpoint's own name for SNI and the certificate check, and
+      // nothing taken from the request options that could loosen either.
+      const tls = tlsConnect({ socket, ...(isIP(host) === 0 ? { servername: host } : { host }) });
+      done(null, tls);
+    });
+    connect.on('error', (e) => {
+      finished();
+      done(e);
+    });
+    connect.end();
+    return undefined;
+  }
+}
+
+const proxyTunnelAgents = new Map<string, ProxyTunnelAgent>();
+function proxyTunnelAgent(proxy: URL): ProxyTunnelAgent {
+  let agent = proxyTunnelAgents.get(proxy.href);
+  if (agent === undefined) {
+    agent = new ProxyTunnelAgent(proxy);
+    proxyTunnelAgents.set(proxy.href, agent);
+  }
+  return agent;
+}
+
 function decodeBody(stream: Readable, encoding: string | undefined): Readable {
   switch ((encoding ?? '').trim().toLowerCase()) {
     case 'gzip':
@@ -658,9 +967,10 @@ async function keepAliveFetch(
 
     const isHttps = target.protocol === 'https:';
     const doRequest = isHttps ? httpsRequest : httpRequest;
+    const proxy = proxyForTarget(target);
     const req = doRequest(
       {
-        agent: isHttps ? saihmKeepAliveAgentHttps : saihmKeepAliveAgentHttp,
+        agent: proxy !== null ? proxyTunnelAgent(proxy) : isHttps ? saihmKeepAliveAgentHttps : saihmKeepAliveAgentHttp,
         protocol: target.protocol,
         host: target.hostname,
         port: target.port || (isHttps ? 443 : 80),
@@ -668,6 +978,7 @@ async function keepAliveFetch(
         method,
         headers,
         maxHeaderSize: MAX_RESPONSE_HEADER_BYTES,
+        ...(proxy !== null && signal ? { [TUNNEL_ABORT]: signal } : {}),
       },
       (res) => {
         const status = res.statusCode ?? 0;
@@ -710,7 +1021,13 @@ async function keepAliveFetch(
       },
     );
 
-    function onAbort(): void { req.destroy(abortError()); }
+    // SETTLED HERE, not only destroyed: a request still waiting for its socket - a proxy tunnel being
+    // opened - reports its error only once the agent hands it one, so the caller's timeout waited on the proxy.
+    function onAbort(): void {
+      req.destroy(abortError());
+      reject(abortError());
+    }
+    if (proxy !== null) TUNNEL_SIGNALS.set(req, signal ?? null);
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
     req.on('error', (e: Error) => { reject(e); });
@@ -1159,6 +1476,93 @@ export function defaultIdentityPath(): string {
 }
 
 /**
+ * Whether an identity token is configured - the token, OR its passphrase alone. TRIMMED truthiness: a
+ * blank value is what a `${SAIHM_IDENTITY:-}` reference in a shared MCP config yields on a machine
+ * that has no token, and that machine must go on booting its own identity. The passphrase counts on
+ * its own so that a host which delivered it and lost the token gets a typed error naming the missing
+ * variable, instead of quietly booting whatever other identity this machine happens to hold.
+ */
+export function identityTokenConfigured(): boolean {
+  return (
+    identityTokenSet() || cleanPastedValue(process.env.SAIHM_IDENTITY_PASSPHRASE ?? '', PASSPHRASE_ENV) !== ''
+  );
+}
+
+/**
+ * Whether the TOKEN itself is set - not merely its passphrase. Blank as the paste cleaner reads it, so
+ * an env file's `SAIHM_IDENTITY=""` (which arrives as two quote characters) is as absent as unset.
+ * What names "the token" to a reader asks this; what decides whether to open one or to mint asks
+ * {@link identityTokenConfigured}, because a passphrase alone must stop both.
+ */
+export function identityTokenSet(): boolean {
+  return cleanPastedValue(process.env.SAIHM_IDENTITY ?? '', IDENTITY_ENV) !== '';
+}
+
+/**
+ * A tier as it may be SHOWN: a plan this package knows by name, or `null`. SAIHM_TIER is typed by
+ * hand, one field after the identity's passphrase in an install form, so a reply that echoed any
+ * value would carry whatever was pasted there by mistake.
+ */
+export function displayablePlan(tier: string): string | null {
+  return tier === 'FREE' || MONTHLY_PAID_TIERS.has(tier) ? tier : null;
+}
+
+/**
+ * A key-file setting as it may be SHOWN: the value, or `null` when it has the shape of a key,
+ * passphrase or token rather than a path. Every site that names `SAIHM_MASTER_SECRET_FILE`'s value
+ * to a reader goes through this, so the guard cannot be applied at one site and missed at another.
+ */
+export function displayableKeyPath(v: string): string | null {
+  return looksLikeIdentitySecret(v) ? null : v;
+}
+
+/**
+ * Whether {@link ensureSelfJoinIdentityEnv} would CREATE a key if called now. The join gates ask
+ * this before calling it, and it reads the same variables in the same order, so the question asked
+ * and the act performed cannot come apart.
+ */
+export function selfJoinWouldMint(): boolean {
+  return (
+    !identityTokenConfigured() &&
+    !process.env.SAIHM_MASTER_SECRET_FILE &&
+    !process.env.SAIHM_MASTER_SECRET_HEX &&
+    !existsSync(defaultIdentityPath())
+  );
+}
+
+/**
+ * Signals that this process runs where the home directory is DISCARDED when the session ends: a
+ * hosted agent session or a CI runner. A key minted there dies with the machine, and minting one
+ * spends the once-per-person free activation on it - so the join paths refuse to mint where one of
+ * these is set unless told the home does persist.
+ *
+ * Each entry is a variable the host itself documents and sets. Detection is a convenience on top of
+ * the confirmation the join asks for anyway, never the only guard: an unlisted host is treated as
+ * persistent, which is the behaviour every release before this one had everywhere.
+ * `SAIHM_EPHEMERAL_HOME` overrides it both ways: `1` declares the home temporary, `0` declares it kept.
+ */
+const EPHEMERAL_HOME_SIGNALS: ReadonlyArray<readonly [string, (v: string) => boolean]> = [
+  ['CLAUDE_CODE_REMOTE', (v) => v.trim().toLowerCase() === 'true'],
+  ['GITHUB_ACTIONS', (v) => v.trim().toLowerCase() === 'true'],
+  ['CI', (v) => v !== '' && v !== '0' && v.toLowerCase() !== 'false'],
+];
+
+/** The variable that marks this home as temporary, or `null` when none does. */
+export function ephemeralHomeSignal(): string | null {
+  // ANY DECLARATION COUNTS, not only `1`. The override is the operator's only way to mark a host this
+  // list does not know, and `true` or `yes` meaning "kept" was a refusal that silently did not happen.
+  // Only an explicit no (`0`, `false`, `no`, `off`) declares the home kept; blank means undeclared.
+  const override = (process.env.SAIHM_EPHEMERAL_HOME ?? '').trim().toLowerCase();
+  if (['0', 'false', 'no', 'off'].includes(override)) return null;
+  if (override !== '') return 'SAIHM_EPHEMERAL_HOME';
+  for (const [name, isSet] of EPHEMERAL_HOME_SIGNALS) {
+    const v = process.env[name];
+    if (v !== undefined && isSet(v)) return name;
+  }
+  return null;
+}
+
+/**
  * Where the sequence high-water marks live when the operator has not named a file.
  *
  * Derived from `defaultIdentityPath()` — the FUNCTION, not a copy of the chain it reads — because
@@ -1245,6 +1649,9 @@ function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlySet<string> 
  * does not CREATE anything - naming a key to back up must not mint one as a side effect.
  */
 export function identityKeyFile(): string | null {
+  // A token has no file: the identity lives in the environment, and boot refuses a token configured
+  // beside either secret variable, so nothing below can be the key this process uses.
+  if (identityTokenSet()) return null;
   if (process.env.SAIHM_MASTER_SECRET_FILE) return process.env.SAIHM_MASTER_SECRET_FILE;
   if (process.env.SAIHM_MASTER_SECRET_HEX) return null;
   if (selfJoinEnabled()) {
@@ -1337,6 +1744,10 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
       /* a sweep must never break a join */
     }
   }
+  // A TOKEN IS AN IDENTITY, so there is nothing to mint and no file to name. Boot opens it - or says
+  // why it does not open - and never falls back to a key minted here in its place: on a machine whose
+  // home is discarded at session end, that fallback is how the join loop started.
+  if (identityTokenConfigured()) return { created: false, keyPath: null };
   if (process.env.SAIHM_MASTER_SECRET_FILE) {
     return { created: false, keyPath: process.env.SAIHM_MASTER_SECRET_FILE };
   }
@@ -1354,6 +1765,13 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
   const keyPath = defaultIdentityPath();
   let created = false;
   if (!existsSync(keyPath)) {
+    // Never under a SAIHM_HOME with the shape of a key, passphrase or token. The join gates refuse first,
+    // in their own words; this keeps any other caller from creating a key whose path is a secret.
+    if (pathHoldsIdentitySecret(keyPath))
+      throw new SaihmConfigError(
+        'SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory, so no key is created there. Fix SAIHM_HOME, then join again.',
+        'path',
+      );
     try {
       const secretHex = randomBytes(32).toString('hex');
       mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
@@ -1378,7 +1796,14 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
       }
       created = true;
     } catch (e) {
-      // Node named `keyPath` (or the tmp beside it) in its own message; widen the fence for it.
+      // Node named `keyPath` (or the tmp beside it) in its own message: widened only where that path may be
+      // shown, and otherwise replaced by Node's code, so a home the refusal let through is not printed here.
+      if (displayableKeyPath(keyPath) === null)
+        throw new SaihmConfigError(
+          `the key could not be created under SAIHM_HOME (${nodeErrorCode(e)}); its path has the shape of a ` +
+            'key, so it is not shown.',
+          'path',
+        );
       throw markPathBearing(e);
     }
   } else {
@@ -1425,6 +1850,298 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
   process.env.SAIHM_MASTER_SECRET_FILE = keyPath;
   if (!process.env.SAIHM_TIER) process.env.SAIHM_TIER = 'FREE';
   return { created, keyPath };
+}
+
+/** The identity this process boots, as {@link resolveIdentityFromEnv} found it. */
+export interface ResolvedIdentity {
+  /** The master secret. The CALLER owns it and must scrub it (`fill(0)`) when done. */
+  master: Uint8Array;
+  tier: string | undefined;
+  /** Where `tier` came from, so an export can say whether it is a choice or a default. */
+  tierFrom: 'SAIHM_TIER' | 'SAIHM_IDENTITY' | 'default' | 'none';
+  paymentMethod: string | undefined;
+  /** Booted from the self-join default key file, which is what the recall-cache default keys on. */
+  defaultKey: boolean;
+  /** Where it came from: a variable name, or a phrase naming the file. */
+  source: string;
+}
+
+/**
+ * Resolve the identity this process would boot, WITHOUT constructing a client and without touching
+ * the network: an identity token, else `SAIHM_MASTER_SECRET_FILE`, else `SAIHM_MASTER_SECRET_HEX`,
+ * else the self-join default key file. Boot and `export-identity` both call this, so the identity a
+ * server boots and the identity an export carries are the same one by construction. It never mints:
+ * creating a key is {@link ensureSelfJoinIdentityEnv}'s job, and only the join paths call that.
+ */
+export function resolveIdentityFromEnv(): ResolvedIdentity {
+  // AN IDENTITY TOKEN EXCLUDES the two master-secret variables rather than ranking above them. FILE
+  // over HEX is a precedence operators built configs around; a token arriving beside either is a
+  // SECOND identity, and picking one would open the wrong memory while every backup line named the
+  // other. So both set is an error naming both, and a token that does not open is an error too - never
+  // a fall-through to the self-join key below, which, on a machine whose home is discarded at session
+  // end, is where the join loop came from.
+  //
+  // ONLY A TOKEN THAT IS REALLY THERE conflicts. A blank token beside its passphrase, or an unexpanded
+  // `${...}` reference, is reported as itself by `openIdentityToken` - "Two identities are configured"
+  // would name a variable that holds nothing, and its remedy, "unset the other", would point the
+  // operator at the one variable that does hold their identity.
+  let imported: OpenedIdentityToken | undefined;
+  if (identityTokenConfigured()) {
+    const token = process.env.SAIHM_IDENTITY ?? '';
+    const alsoSet = ['SAIHM_MASTER_SECRET_FILE', 'SAIHM_MASTER_SECRET_HEX'].filter((n) => process.env[n]);
+    if (alsoSet.length > 0 && identityTokenSet() && !token.includes('$'))
+      throw new Error(
+        `Two identities are configured: ${IDENTITY_ENV} and ${alsoSet.join(' and ')}. Keep the one ` +
+          'whose memory you mean and unset the other; SAIHM does not guess between identities.',
+      );
+    imported = openIdentityToken(token, process.env.SAIHM_IDENTITY_PASSPHRASE ?? '');
+  }
+  // The master secret may be supplied inline via SAIHM_MASTER_SECRET_HEX, or — preferably for
+  // operators / security-conscious users — as the path to a mode-600 file via
+  // SAIHM_MASTER_SECRET_FILE so the root seed is never inlined into a synced/shared MCP config.
+  // FILE wins when both are set.
+  const secretFile = process.env.SAIHM_MASTER_SECRET_FILE;
+  // CONFIGURED, not merely non-empty - the distinction `SAIHM_ENDPOINT_URL` above already makes
+  // ("explicitly empty is still a configuration error, not an opt-in to the default") and this
+  // did not. The self-join fallback was guarded by `!secretHex`, which conflates "no secret was
+  // configured" with "the configured secret is empty", so a ZERO-BYTE SAIHM_MASTER_SECRET_FILE
+  // fell through to the default identity: the process booted a DIFFERENT key while every backup
+  // line - and `identityKeyFile()` with it - named the file the operator had configured.
+  // Reproduced end to end: `identityKeyFile()` reported the empty file while `bootFromEnv()`
+  // returned the default file's identity, so the only key to that memory was never named.
+  //
+  // TRUTHINESS, not `!== undefined`. The first cut of this used `!== undefined` and so treated an
+  // EMPTY variable as "configured" while the read gate below tests truthiness and never opens it:
+  // `SAIHM_MASTER_SECRET_FILE=""` then hard-failed with "holds no secret: " and nothing after the
+  // colon, where 0.4.1 self-joined. `server.json` declares that variable optional with
+  // `format: filepath` and no default, so a blank field in a registry install UI emits exactly
+  // that - a real deployment shape, broken for no security gain. An empty variable is not
+  // POINTING at a secret; a variable naming an empty FILE is, and that is the case this guard
+  // exists for.
+  //
+  // Deliberately unlike `SAIHM_ENDPOINT_URL` above, where empty IS an error: that has no safe
+  // fallback to fall to, and this does.
+  const secretConfigured = Boolean(
+    process.env.SAIHM_MASTER_SECRET_FILE || process.env.SAIHM_MASTER_SECRET_HEX,
+  );
+  let secretHex: string | undefined;
+  if (secretFile) {
+    // A WHITESPACE-ONLY value is named as one rather than printed. `SAIHM_MASTER_SECRET_FILE=" "`
+    // is truthy, so it reached the read and failed with `could not be read:  .` - a diagnostic
+    // whose whole subject is invisible in it, and one an operator cannot tell from a bug. It is
+    // not quoted to make it visible: wrapping a value in delimiters hands it an escape. The
+    // CONDITION is stated instead, which needs no value at all. (This once said the value is
+    // "rendered downstream inside a fenced `label=value` line". It is not - it reaches
+    // `configErrorText` and lands as standalone text; `safePathField` does not scrub `=` and no
+    // site of its own is a labelled line. The reasoning above holds on delimiters alone.)
+    if (secretFile.trim().length === 0)
+      throw new SaihmConfigError(
+        'SAIHM_MASTER_SECRET_FILE is set to a whitespace-only value, which is not a path. Unset ' +
+          'it, or point it at your key file.',
+        'path',
+      );
+    try {
+      secretHex = readFileSync(secretFile, 'utf-8');
+    } catch {
+      // A KEY PASTED WHERE A PATH BELONGS is not echoed. This message names the value so a mistyped
+      // path can be fixed, and it reaches an agent's transcript as tool text - so a master secret, a
+      // passphrase or a token pasted into the path field (the field beside them in an install form)
+      // would land there in full. Those three shapes are recognisable, and none is a plausible path.
+      if (displayableKeyPath(secretFile) === null)
+        throw new Error(
+          'SAIHM_MASTER_SECRET_FILE holds what looks like a key, passphrase or token rather than a ' +
+            'file path, so it is not shown. Put the path of your key file there instead.',
+        );
+      throw new SaihmConfigError(
+        `SAIHM_MASTER_SECRET_FILE could not be read: ${secretFile}. Check the path and the file's ` +
+          'permissions.',
+        'path',
+      );
+    }
+    try {
+      // Advisory only (never blocks): warn if the secret file is group/world-accessible on POSIX.
+      if (
+        process.platform !== 'win32' &&
+        (statSync(secretFile).mode & 0o077) !== 0
+      ) {
+        // FENCED, not deleted. An earlier cut dropped the path entirely on the theory that this
+        // file cannot import the fence - `render_fence.ts` imports from here, and `safePathField`
+        // is an `export const`, so the reverse edge was called a TDZ fault. MEASURED FALSE: an ESM
+        // cycle only faults on a binding read during module EVALUATION, and every `client.ts`
+        // symbol `render_fence.ts` uses is read inside a function body, so the cycle resolves
+        // under both entry orders. Deleting the path also broke this advisory's own contract - its
+        // test is named "never leaking the secret", meaning it names the FILE and withholds the
+        // KEY - and cost a log consumer information it had. stderr is a human-read surface, the
+        // operator's terminal under the CLI paths, so the value is fenced like any other path.
+        process.stderr.write(
+          `warning: SAIHM_MASTER_SECRET_FILE ${safePathField(secretFile, MAX_PATH_FIELD_CHARS)} ` +
+            'is group/world-accessible; chmod 600 it.\n',
+        );
+      }
+    } catch {
+      /* stat is advisory only */
+    }
+  } else {
+    secretHex = process.env.SAIHM_MASTER_SECRET_HEX;
+  }
+  if (imported) secretHex = imported.secretHex;
+  // Self-join fallback (ON by default; `SAIHM_SELF_JOIN=0` opts out): a prior `saihm_join`
+  // persists the self-generated identity to the default key file, so a plain restart with no
+  // env secret re-loads it. Under `SAIHM_SELF_JOIN=0` this block is inert.
+  // This read "SAIHM_SELF_JOIN=1 only ... Off by default => this block is inert and boot
+  // behaviour is unchanged" and was false: `selfJoinEnabled()` is `!== '0'` (measured across
+  // unset/''/'1'/'anything' => true, '0' => false). The identical sentence was already found
+  // and corrected in server.ts:833-835 and never propagated to this second
+  // copy — the same fix-one-of-N-sites defect the shardId resolve-twice mutation exposed.
+  if (!secretConfigured && !imported && selfJoinEnabled()) {
+    const p = defaultIdentityPath();
+    if (existsSync(p)) {
+      try {
+        secretHex = readFileSync(p, 'utf-8');
+      } catch {
+        throw new SaihmConfigError(
+          `self-join identity file could not be read: ${p}. Fix its permissions, or restore your ` +
+            'backup of it.',
+          'path',
+        );
+      }
+      // PRESENT BUT EMPTY is not "no identity". It fell through to the no-memory message below, which
+      // called the file "not there" and steered to a join or an import - for the one case where the
+      // real identity is in danger. Same words as the join path, which already refuses it.
+      if (secretHex.trim() === '')
+        throw new SaihmConfigError(
+          `the self-join identity file holds no secret: ${p}. Restore your backup of it, or delete ` +
+            'it and join again to mint a new identity - which starts an EMPTY memory, so restore ' +
+            'first if you have a backup.',
+          'path',
+        );
+    }
+  }
+  if (!secretHex) {
+    // A CONFIGURED secret that is empty is a configuration error, and it is named as one. Sending
+    // this caller to `saihm_join` would be the wrong direction twice over: they did configure a
+    // secret, and joining would mint a SECOND identity while the empty file sat there looking
+    // like the key to the first.
+    //
+    // ONE BRANCH, not two. This carried an `SAIHM_MASTER_SECRET_HEX is set but empty.` arm that
+    // cannot run: `secretConfigured` is deliberately TRUTHINESS-based for the reason given
+    // above, so an empty `SAIHM_MASTER_SECRET_HEX` is not configured, and a non-empty one makes
+    // `!secretHex` false. Proved dead by mutation - nineteen boot cases, zero hits. It also
+    // typed itself `valueKind: 'path'` while carrying no path, which would have widened the
+    // render to a path budget for a message naming only a variable. (That mistyping is the
+    // whole objection - NOT that a path-less message may never be a `SaihmConfigError`. The
+    // live whitespace-only-`SAIHM_MASTER_SECRET_FILE` throw ~70 lines above names no path and
+    // is deliberately `'path'`-typed, because its remedy does not fit in 256 characters. The
+    // reason to delete this branch is that it is DEAD, not that its type is forbidden.) A dead branch is not
+    // free: it made the compatibility note about a "configured but EMPTY secret" read as though
+    // it covered an empty VARIABLE, which it never did - only a zero-byte FILE.
+    if (secretConfigured && secretFile !== undefined)
+      throw new SaihmConfigError(
+        `SAIHM_MASTER_SECRET_FILE is set but holds no secret: ${secretFile}. Restore the key into ` +
+          'it, or point the variable at the file that holds it.',
+        'path',
+      );
+    // Self-join enabled but no identity yet => guide the agent to the join tool rather than
+    // surfacing a raw env-var error (a memory tool was called before `saihm_join`).
+    //
+    // IT SAYS WHAT WAS CHECKED and asks the question the join used to skip. On a hosted agent's fresh
+    // machine this is the first thing every session saw, and "Say 'Join SAIHM'" was the only way
+    // forward it offered - so an operator whose memory lived on another machine was led, session after
+    // session, into minting a new and empty one. The import path comes first because it is the one
+    // nobody would find unprompted. A `'path'` config error because the message carries the default
+    // key path; its remedy does not fit the plain-message budget.
+    if (selfJoinEnabled())
+      throw new SaihmConfigError(
+        `No SAIHM memory yet on this device. Checked ${IDENTITY_ENV}, SAIHM_MASTER_SECRET_FILE and ` +
+          // SAIHM_HOME-derived, so shown only when it has the shape of a path.
+          `SAIHM_MASTER_SECRET_HEX (none set) and ${displayableKeyPath(defaultIdentityPath()) ?? 'the default key file'} (not there). Tell the ` +
+          'operator: "SAIHM memory is installed but not active yet. Already have a SAIHM identity? ' +
+          'Do not join: run npx -y @saihm/mcp-server-pro export-identity where it lives, set ' +
+          `${IDENTITY_ENV} and ${PASSPHRASE_ENV} in this environment's settings (environment ` +
+          'variables or secrets - never in this chat or a file in the repository; each host\'s steps ' +
+          "are in the package README under Hosted agent environments), then start a new session. " +
+          'New to SAIHM? Say ' +
+          "'Join SAIHM' to start a new, empty memory.\" Run the saihm_join tool only when they ask " +
+          'to join, then try again. Never ask for either value in the chat.',
+        'path',
+      );
+    throw new Error(
+      `No SAIHM identity is configured and self-join is off (SAIHM_SELF_JOIN=0). Set ${IDENTITY_ENV} and ` +
+        `${PASSPHRASE_ENV}, or SAIHM_MASTER_SECRET_FILE or SAIHM_MASTER_SECRET_HEX, in this ` +
+        "environment's settings - never in the chat or a repository file.",
+    );
+  }
+  // WHERE THE SECRET CAME FROM, because both checks below used to name
+  // `SAIHM_MASTER_SECRET_HEX` whatever the source was. Measured: with no env var set at all and a
+  // corrupt `free-identity.key`, boot said "SAIHM_MASTER_SECRET_HEX must be canonical lowercase
+  // hex" - naming a variable the operator never set, about a file it never named, on the one
+  // error whose whole job is to say what to go and fix. That is this release's defect class in a
+  // sentence: the value is actionable and it is the wrong one.
+  //
+  // `secretFile` MAY HAVE BEEN SET BY US. `ensureSelfJoinIdentityEnv` writes the minted key path
+  // into `SAIHM_MASTER_SECRET_FILE` so the boot below can read it, and after that this branch
+  // could no longer tell a file the operator configured from one we configured for them. It named
+  // the variable on precisely the two entry points that mint FIRST - the `free-join` verb and the
+  // `saihm_join` tool - which are the paths a caller reaches by following the advice this very
+  // message's `setupHint` gives them. Same file, same session, two different variable names, and
+  // the one they were shown is absent from their config, from `server.json` and from the install
+  // UI. Comparing against `defaultIdentityPath()` rather than tracking a flag: both sides call the
+  // same function, so they cannot disagree, and an operator who points the variable AT the
+  // self-join file is told the truth either way.
+  const selfJoinIdentity = defaultIdentityPath();
+  // `defaultKey` rides on the same comparison: the recall-cache default below applies only to the
+  // self-join identity file, however this process was pointed at it.
+  const secretSource: { label: string; kind: 'path' | 'env'; defaultKey: boolean } = imported
+    ? { label: IDENTITY_ENV, kind: 'env', defaultKey: false }
+    : secretFile
+    ? secretFile === selfJoinIdentity
+      ? { label: `the self-join identity file ${secretFile}`, kind: 'path', defaultKey: true }
+      : { label: `SAIHM_MASTER_SECRET_FILE ${secretFile}`, kind: 'path', defaultKey: false }
+    : process.env.SAIHM_MASTER_SECRET_HEX
+      ? { label: 'SAIHM_MASTER_SECRET_HEX', kind: 'env', defaultKey: false }
+      : { label: `the self-join identity file ${selfJoinIdentity}`, kind: 'path', defaultKey: true };
+  const badSecret = (why: string): Error =>
+    secretSource.kind === 'path'
+      ? new SaihmConfigError(`${secretSource.label} ${why}.`, 'path')
+      : new Error(`${secretSource.label} ${why}.`);
+  let master: Uint8Array;
+  try {
+    master = fromHex(secretHex.trim());
+  } catch {
+    throw badSecret('must hold canonical lowercase hex');
+  }
+  if (master.length < 32) {
+    master.fill(0);
+    throw badSecret('must decode to >= 32 bytes');
+  }
+  // THE LABEL IS CHECKED, not trusted. It travels in clear so a reader can tell tokens apart, and it
+  // is bound into the ciphertext, so a token that opens with a label naming some other identity was
+  // built that way by someone holding its passphrase. Refused before anything is written under it.
+  if (imported && !toHex(deriveIdentity(master).agentIdHash).startsWith(imported.label)) {
+    master.fill(0);
+    throw new IdentityTokenError(
+      `${IDENTITY_ENV} is labelled for a different identity than the one sealed inside it. Export ` +
+        'the identity again on the machine that holds it.',
+    );
+  }
+  // EMPTY MEANS UNSET for the tier, as it already did for the payment method. `??` let a blank
+  // SAIHM_TIER through as a tier of '', which the constructor then reported as a missing payment
+  // method. A blank is what a `${SAIHM_TIER:-}` reference yields wherever the variable is unset, so it
+  // now falls through like an unset one: to the token's tier, then to the self-join default.
+  return {
+    master,
+    tier: process.env.SAIHM_TIER || imported?.tier || (selfJoinEnabled() ? 'FREE' : undefined),
+    tierFrom: process.env.SAIHM_TIER
+      ? 'SAIHM_TIER'
+      : imported?.tier
+        ? 'SAIHM_IDENTITY'
+        : selfJoinEnabled()
+          ? 'default'
+          : 'none',
+    paymentMethod: process.env.SAIHM_PAYMENT_METHOD || imported?.paymentMethod,
+    defaultKey: secretSource.defaultKey,
+    source: secretSource.label,
+  };
 }
 
 /**
@@ -2389,14 +3106,15 @@ export class SaihmProClient {
       // the endpoint checks). The FREE tier carries NO payment: its entitlement is proven ONCE, out of
       // band, via `acquireFreeEntitlement` (bridge-proxied OAuth device flow) and bound to this sovereign
       // key; thereafter /api/onboard mints FREE JWTs with no paymentMethod and the same refresh loop runs.
-      if (this.tier !== 'FREE' && !opts.paymentMethod) {
-        throw new Error(
-          'self-onboarding requires a paymentMethod (set SAIHM_PAYMENT_METHOD) when no auth header is supplied',
-        );
-      }
+      // The tier FIRST: with none, a FREE identity (self-join off) was told to set a payment method it does not need.
       if (this.tier === undefined) {
         throw new Error(
           'self-onboarding requires a tier (set SAIHM_TIER) when no auth header is supplied',
+        );
+      }
+      if (this.tier !== 'FREE' && !opts.paymentMethod) {
+        throw new Error(
+          'self-onboarding requires a paymentMethod (set SAIHM_PAYMENT_METHOD) when no auth header is supplied',
         );
       }
       this.paymentMethod = opts.paymentMethod;
@@ -2412,193 +3130,45 @@ export class SaihmProClient {
         : process.env.SAIHM_ENDPOINT_URL;
     const auth = process.env.SAIHM_AUTH_HEADER;
     if (!endpoint)
-      throw new Error('SAIHM_ENDPOINT_URL is set but empty.' + setupHint());
+      throw new Error(
+        'SAIHM_ENDPOINT_URL is set but empty: set it to an endpoint URL, or leave it out for the default.' +
+          // The join hint only where a join would start an identity: one already configured has nothing to join.
+          (selfJoinWouldMint() ? setupHint() : ''),
+      );
     // Validate here, not only in the constructor: boot can throw on a missing
     // identity long before a client is ever constructed, which silently masked a
     // malformed or plain-http endpoint behind the join hint. The endpoint is
     // never contacted either way, so this is a diagnostic fix — it reports the
     // misconfiguration the operator actually has.
     assertEndpointUrl(endpoint);
-    // The master secret may be supplied inline via SAIHM_MASTER_SECRET_HEX, or — preferably for
-    // operators / security-conscious users — as the path to a mode-600 file via
-    // SAIHM_MASTER_SECRET_FILE so the root seed is never inlined into a synced/shared MCP config.
-    // FILE wins when both are set.
-    const secretFile = process.env.SAIHM_MASTER_SECRET_FILE;
-    // CONFIGURED, not merely non-empty - the distinction `SAIHM_ENDPOINT_URL` above already makes
-    // ("explicitly empty is still a configuration error, not an opt-in to the default") and this
-    // did not. The self-join fallback was guarded by `!secretHex`, which conflates "no secret was
-    // configured" with "the configured secret is empty", so a ZERO-BYTE SAIHM_MASTER_SECRET_FILE
-    // fell through to the default identity: the process booted a DIFFERENT key while every backup
-    // line - and `identityKeyFile()` with it - named the file the operator had configured.
-    // Reproduced end to end: `identityKeyFile()` reported the empty file while `bootFromEnv()`
-    // returned the default file's identity, so the only key to that memory was never named.
-    //
-    // TRUTHINESS, not `!== undefined`. The first cut of this used `!== undefined` and so treated an
-    // EMPTY variable as "configured" while the read gate below tests truthiness and never opens it:
-    // `SAIHM_MASTER_SECRET_FILE=""` then hard-failed with "holds no secret: " and nothing after the
-    // colon, where 0.4.1 self-joined. `server.json` declares that variable optional with
-    // `format: filepath` and no default, so a blank field in a registry install UI emits exactly
-    // that - a real deployment shape, broken for no security gain. An empty variable is not
-    // POINTING at a secret; a variable naming an empty FILE is, and that is the case this guard
-    // exists for.
-    //
-    // Deliberately unlike `SAIHM_ENDPOINT_URL` above, where empty IS an error: that has no safe
-    // fallback to fall to, and this does.
-    const secretConfigured = Boolean(
-      process.env.SAIHM_MASTER_SECRET_FILE || process.env.SAIHM_MASTER_SECRET_HEX,
-    );
-    let secretHex: string | undefined;
-    if (secretFile) {
-      // A WHITESPACE-ONLY value is named as one rather than printed. `SAIHM_MASTER_SECRET_FILE=" "`
-      // is truthy, so it reached the read and failed with `could not be read:  .` - a diagnostic
-      // whose whole subject is invisible in it, and one an operator cannot tell from a bug. It is
-      // not quoted to make it visible: wrapping a value in delimiters hands it an escape. The
-      // CONDITION is stated instead, which needs no value at all. (This once said the value is
-      // "rendered downstream inside a fenced `label=value` line". It is not - it reaches
-      // `configErrorText` and lands as standalone text; `safePathField` does not scrub `=` and no
-      // site of its own is a labelled line. The reasoning above holds on delimiters alone.)
-      if (secretFile.trim().length === 0)
+    // A STATE DIRECTORY WITH THE SHAPE OF A SECRET is refused before anything is written under it: this
+    // server's own writers create it - relative to the working directory when it is relative, which in a
+    // hosted agent is a repository checkout an agent may commit. The join and the export refuse it too.
+    for (const name of ['SAIHM_HOME', 'SAIHM_STATE_DIR'] as const) {
+      const v = process.env[name];
+      if (v && pathHoldsIdentitySecret(v))
         throw new SaihmConfigError(
-          'SAIHM_MASTER_SECRET_FILE is set to a whitespace-only value, which is not a path. Unset ' +
-            'it to start free, or point it at your key file.' + setupHint(),
+          `${name} holds what looks like a key, passphrase or token rather than a directory, so nothing is ` +
+            `written there. Fix ${name}, then start a new session.`,
           'path',
         );
-      try {
-        secretHex = readFileSync(secretFile, 'utf-8');
-      } catch {
+    }
+    // A SECRET IN A PLAN OR PAYMENT FIELD - the fields beside the secret ones in an install form - is
+    // refused rather than sent to the endpoint as the tier or the payment method.
+    for (const name of ['SAIHM_TIER', 'SAIHM_PAYMENT_METHOD'] as const) {
+      const v = process.env[name];
+      if (v && looksLikeIdentitySecret(v))
         throw new SaihmConfigError(
-          `SAIHM_MASTER_SECRET_FILE could not be read: ${secretFile}.` +
-            setupHint(),
+          `${name} holds what looks like a key, passphrase or token, so it is not sent. Fix ${name}, then ` +
+            'start a new session.',
           'path',
         );
-      }
-      try {
-        // Advisory only (never blocks): warn if the secret file is group/world-accessible on POSIX.
-        if (
-          process.platform !== 'win32' &&
-          (statSync(secretFile).mode & 0o077) !== 0
-        ) {
-          // FENCED, not deleted. An earlier cut dropped the path entirely on the theory that this
-          // file cannot import the fence - `render_fence.ts` imports from here, and `safePathField`
-          // is an `export const`, so the reverse edge was called a TDZ fault. MEASURED FALSE: an ESM
-          // cycle only faults on a binding read during module EVALUATION, and every `client.ts`
-          // symbol `render_fence.ts` uses is read inside a function body, so the cycle resolves
-          // under both entry orders. Deleting the path also broke this advisory's own contract - its
-          // test is named "never leaking the secret", meaning it names the FILE and withholds the
-          // KEY - and cost a log consumer information it had. stderr is a human-read surface, the
-          // operator's terminal under the CLI paths, so the value is fenced like any other path.
-          process.stderr.write(
-            `warning: SAIHM_MASTER_SECRET_FILE ${safePathField(secretFile, MAX_PATH_FIELD_CHARS)} ` +
-              'is group/world-accessible; chmod 600 it.\n',
-          );
-        }
-      } catch {
-        /* stat is advisory only */
-      }
-    } else {
-      secretHex = process.env.SAIHM_MASTER_SECRET_HEX;
     }
-    // Self-join fallback (ON by default; `SAIHM_SELF_JOIN=0` opts out): a prior `saihm_join`
-    // persists the self-generated identity to the default key file, so a plain restart with no
-    // env secret re-loads it. Under `SAIHM_SELF_JOIN=0` this block is inert.
-    // This read "SAIHM_SELF_JOIN=1 only ... Off by default => this block is inert and boot
-    // behaviour is unchanged" and was false: `selfJoinEnabled()` is `!== '0'` (measured across
-    // unset/''/'1'/'anything' => true, '0' => false). The identical sentence was already found
-    // and corrected in server.ts:833-835 and never propagated to this second
-    // copy — the same fix-one-of-N-sites defect the shardId resolve-twice mutation exposed.
-    if (!secretConfigured && selfJoinEnabled()) {
-      const p = defaultIdentityPath();
-      if (existsSync(p)) {
-        try {
-          secretHex = readFileSync(p, 'utf-8');
-        } catch {
-          throw new SaihmConfigError(
-            `self-join identity file could not be read: ${p}.` + setupHint(),
-            'path',
-          );
-        }
-      }
-    }
-    if (!secretHex) {
-      // A CONFIGURED secret that is empty is a configuration error, and it is named as one. Sending
-      // this caller to `saihm_join` would be the wrong direction twice over: they did configure a
-      // secret, and joining would mint a SECOND identity while the empty file sat there looking
-      // like the key to the first.
-      //
-      // ONE BRANCH, not two. This carried an `SAIHM_MASTER_SECRET_HEX is set but empty.` arm that
-      // cannot run: `secretConfigured` is deliberately TRUTHINESS-based for the reason given
-      // above, so an empty `SAIHM_MASTER_SECRET_HEX` is not configured, and a non-empty one makes
-      // `!secretHex` false. Proved dead by mutation - nineteen boot cases, zero hits. It also
-      // typed itself `valueKind: 'path'` while carrying no path, which would have widened the
-      // render to a path budget for a message naming only a variable. (That mistyping is the
-      // whole objection - NOT that a path-less message may never be a `SaihmConfigError`. The
-      // live whitespace-only-`SAIHM_MASTER_SECRET_FILE` throw ~70 lines above names no path and
-      // is deliberately `'path'`-typed, because its remedy does not fit in 256 characters. The
-      // reason to delete this branch is that it is DEAD, not that its type is forbidden.) A dead branch is not
-      // free: it made the compatibility note about a "configured but EMPTY secret" read as though
-      // it covered an empty VARIABLE, which it never did - only a zero-byte FILE.
-      if (secretConfigured && secretFile !== undefined)
-        throw new SaihmConfigError(
-          `SAIHM_MASTER_SECRET_FILE is set but holds no secret: ${secretFile}.` + setupHint(),
-          'path',
-        );
-      // Self-join enabled but no identity yet => guide the agent to the join tool rather than
-      // surfacing a raw env-var error (a memory tool was called before `saihm_join`).
-      if (selfJoinEnabled())
-        throw new Error(
-          'No SAIHM memory yet on this device. Tell the operator: "SAIHM memory is installed but not active yet. Say \'Join SAIHM\' to activate the free memory." When they ask, run the saihm_join tool to create their free memory, then try again.',
-        );
-      throw new Error(
-        'SAIHM_MASTER_SECRET_HEX (or SAIHM_MASTER_SECRET_FILE) env var required (>= 64 hex chars).' +
-          setupHint(),
-      );
-    }
-    // WHERE THE SECRET CAME FROM, because both checks below used to name
-    // `SAIHM_MASTER_SECRET_HEX` whatever the source was. Measured: with no env var set at all and a
-    // corrupt `free-identity.key`, boot said "SAIHM_MASTER_SECRET_HEX must be canonical lowercase
-    // hex" - naming a variable the operator never set, about a file it never named, on the one
-    // error whose whole job is to say what to go and fix. That is this release's defect class in a
-    // sentence: the value is actionable and it is the wrong one.
-    //
-    // `secretFile` MAY HAVE BEEN SET BY US. `ensureSelfJoinIdentityEnv` writes the minted key path
-    // into `SAIHM_MASTER_SECRET_FILE` so the boot below can read it, and after that this branch
-    // could no longer tell a file the operator configured from one we configured for them. It named
-    // the variable on precisely the two entry points that mint FIRST - the `free-join` verb and the
-    // `saihm_join` tool - which are the paths a caller reaches by following the advice this very
-    // message's `setupHint` gives them. Same file, same session, two different variable names, and
-    // the one they were shown is absent from their config, from `server.json` and from the install
-    // UI. Comparing against `defaultIdentityPath()` rather than tracking a flag: both sides call the
-    // same function, so they cannot disagree, and an operator who points the variable AT the
-    // self-join file is told the truth either way.
-    const selfJoinIdentity = defaultIdentityPath();
-    // `defaultKey` rides on the same comparison: the recall-cache default below applies only to the
-    // self-join identity file, however this process was pointed at it.
-    const secretSource: { label: string; kind: 'path' | 'env'; defaultKey: boolean } = secretFile
-      ? secretFile === selfJoinIdentity
-        ? { label: `the self-join identity file ${secretFile}`, kind: 'path', defaultKey: true }
-        : { label: `SAIHM_MASTER_SECRET_FILE ${secretFile}`, kind: 'path', defaultKey: false }
-      : process.env.SAIHM_MASTER_SECRET_HEX
-        ? { label: 'SAIHM_MASTER_SECRET_HEX', kind: 'env', defaultKey: false }
-        : { label: `the self-join identity file ${selfJoinIdentity}`, kind: 'path', defaultKey: true };
-    const badSecret = (why: string): Error =>
-      secretSource.kind === 'path'
-        ? new SaihmConfigError(`${secretSource.label} ${why}.` + setupHint(), 'path')
-        : new Error(`${secretSource.label} ${why}.` + setupHint());
-    let master: Uint8Array;
-    try {
-      master = fromHex(secretHex.trim());
-    } catch {
-      throw badSecret('must hold canonical lowercase hex');
-    }
-    if (master.length < 32) {
-      master.fill(0);
-      throw badSecret('must decode to >= 32 bytes');
-    }
-    const optTier =
-      process.env.SAIHM_TIER ?? (selfJoinEnabled() ? 'FREE' : undefined);
+    const id = resolveIdentityFromEnv();
+    const optTier = id.tier;
     const optSeqPath = process.env.SAIHM_SEQ_STATE_PATH;
     const optRecallCachePath = process.env.SAIHM_RECALL_CACHE_PATH;
-    const optPaymentMethod = process.env.SAIHM_PAYMENT_METHOD;
+    const optPaymentMethod = id.paymentMethod;
     const optDiscoverySource = process.env.SAIHM_DISCOVERY_SOURCE;
     const opts: SaihmProClientOpts = {};
     if (optTier) opts.tier = optTier;
@@ -2617,15 +3187,15 @@ export class SaihmProClient {
     // SAIHM_RECALL_CACHE=0 turns it off in every case, an explicit path included.
     const recallCacheOff = process.env.SAIHM_RECALL_CACHE === '0';
     if (!recallCacheOff && optRecallCachePath) opts.recallCachePath = optRecallCachePath;
-    else if (!recallCacheOff && secretSource.defaultKey) opts.persistRecallCache = true;
+    else if (!recallCacheOff && id.defaultKey) opts.persistRecallCache = true;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
     // SAIHM_PAYMENT_METHOD + SAIHM_TIER (paste-once). Set => used verbatim, no self-onboarding.
     try {
-      return new SaihmProClient(endpoint, auth, master, opts);
+      return new SaihmProClient(endpoint, auth, id.master, opts);
     } finally {
-      master.fill(0); // scrub the decoded master secret; the identity holds only derived material
+      id.master.fill(0); // scrub the decoded master secret; the identity holds only derived material
     }
   }
 
@@ -3152,6 +3722,7 @@ export class SaihmProClient {
       const text = await readBodyCapped(res, MAX_RESPONSE_BYTES, 'onboard');
       if (!res.ok) {
         let code: string | undefined;
+        let reason: string | undefined;
         try {
           const j = JSON.parse(text) as Record<string, unknown>;
           // TRUNCATED AT THE MINT, exactly as `doCall` does — see the longer note there. This
@@ -3165,6 +3736,10 @@ export class SaihmProClient {
           // prose goes stale silently. `MAX_ERROR_CODE_CHARS` is the grep handle; the invariant is
           // that no endpoint-chosen string reaches `.code` without passing through it.
           if (typeof j.error === 'string') code = j.error.slice(0, MAX_ERROR_CODE_CHARS);
+          // The REASON rides beside the code and was dropped here, so a paid identity booted at the
+          // default FREE tier read `verification_failed` on every call with nothing saying which
+          // variable was wrong. Sliced at the mint like the code, and rendered beside it.
+          if (typeof j.reason === 'string') reason = j.reason.slice(0, MAX_ERROR_CODE_CHARS);
         } catch {
           /* non-JSON error body — leave code undefined */
         }
@@ -3174,7 +3749,8 @@ export class SaihmProClient {
           // `statusText` is an endpoint-chosen reason phrase, sliced at the mint like every other
           // endpoint string reaching an error: short by RFC, unbounded by our transport.
           `SAIHM onboard failed: ${res.status} ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}` +
-            (code ? ` (${code})` : ''),
+            (code ? ` (${code}${reason ? `: ${reason}` : ''})` : '') +
+            onboardRemedy(res.status, code, reason),
         );
       }
       try {
@@ -3195,16 +3771,56 @@ export class SaihmProClient {
           `SAIHM onboard timed out after ${this.requestTimeoutMs}ms`,
         );
       }
+      // BARE LITERALS, deliberately, and they stay so. FF18 sweeps the join path for every
+      // SaihmEndpointError mint whose message is not a bare literal and requires each to be
+      // individually accounted for and driven at two magnitudes — the guarantee being that
+      // no endpoint-sized text can reach the JoinState the server retains. Naming the dialed
+      // endpoint here was tried on 2026-09-23 and the sweep correctly rejected it: the win is
+      // small, the invariant is not, and the endpoint-call path already carries the detail.
+      //
+      // Each is still ONE bare literal after gaining its remedy - a concatenation reads to that sweep
+      // as a built message - and which one is CHOSEN by the class of the failure, never built from
+      // it: a certificate this machine does not trust (a network that inspects TLS), a proxy setting
+      // this transport cannot use, a proxy in the way, or none. A hosted agent environment that
+      // blocks the endpoint's host is the common way to arrive at the last two - its egress proxy
+      // refuses the tunnel - so the allowlist leads there too.
+      if (untrustedCertificate(transportReason(e)))
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          "SAIHM onboard transport error: the SAIHM endpoint's certificate is not trusted here. Never turn certificate checks off: if this network inspects TLS, get its CA certificate from its administrator, set NODE_EXTRA_CA_CERTS to that file and restart.",
+        );
+      // Named exactly: the lowercase variable is read first, and naming HTTPS_PROXY for a broken
+      // https_proxy sent the reader to fix the one that was fine.
+      if (unusableProxy(transportReason(e)) && transportReason(e).startsWith('https_proxy'))
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          "SAIHM onboard transport error: the proxy in https_proxy (read before HTTPS_PROXY) is not an http URL, and only http proxies are supported. Fix it, or add the endpoint's host to NO_PROXY.",
+        );
+      if (unusableProxy(transportReason(e)))
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          "SAIHM onboard transport error: the proxy in HTTPS_PROXY is not an http URL, and only http proxies are supported. Fix it, or add the endpoint's host to NO_PROXY.",
+        );
+      // The variable READ is named: with a broken https_proxy, that is the one to fix, whatever HTTPS_PROXY holds.
+      if (proxyApplies(url) && proxyVariableInUse() === 'https_proxy')
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          "SAIHM onboard transport error: the SAIHM endpoint could not be reached through the proxy in https_proxy. In a hosted agent environment, allow its host (saihm.net by default) in the network settings; else check the proxy and NO_PROXY.",
+        );
+      if (proxyApplies(url))
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          "SAIHM onboard transport error: the SAIHM endpoint could not be reached through the proxy in HTTPS_PROXY. In a hosted agent environment, allow its host (saihm.net by default) in the network settings; else check the proxy and NO_PROXY.",
+        );
       throw new SaihmEndpointError(
         0,
         'network',
-        // BARE LITERAL, deliberately, and it stays one. FF18 sweeps the join path for every
-        // SaihmEndpointError mint whose message is not a bare literal and requires each to be
-        // individually accounted for and driven at two magnitudes — the guarantee being that
-        // no endpoint-sized text can reach the JoinState the server retains. Naming the dialed
-        // endpoint here was tried on 2026-09-23 and the sweep correctly rejected it: the win is
-        // small, the invariant is not, and the endpoint-call path already carries the detail.
-        'SAIHM onboard transport error',
+        "SAIHM onboard transport error: the SAIHM endpoint could not be reached. In a hosted agent environment, allow the endpoint's host (saihm.net by default) in its network settings; if traffic must go through a proxy, set HTTPS_PROXY.",
       );
     } finally {
       clearTimeout(timer);
@@ -3399,11 +4015,24 @@ export class SaihmProClient {
           `SAIHM endpoint ${method} timed out after ${this.requestTimeoutMs}ms`,
         );
       }
+      const reason = transportReason(e);
       throw new SaihmEndpointError(
         0,
         'network',
-        `SAIHM endpoint ${method} could not reach ${safeEndpoint(this.endpoint)}` +
-          ` (${transportReason(e)})`,
+        `SAIHM endpoint ${method} could not reach ${safeEndpoint(this.endpoint)} (${reason}). ` +
+          (untrustedCertificate(reason)
+            ? 'Never disable certificate checks; if TLS is inspected here, set NODE_EXTRA_CA_CERTS to a file ' +
+              "of the network admin's CA certificate."
+            : unusableProxy(reason)
+              ? 'Only an http proxy URL is supported: fix the variable named above, or add this host to NO_PROXY.'
+              : proxyApplies(this.endpoint)
+                ? proxyVariableInUse() === 'https_proxy'
+                  ? 'Via the proxy in https_proxy: if hosted, allow this host in its network settings; otherwise ' +
+                    'check the proxy and NO_PROXY.'
+                  : 'Via the proxy in HTTPS_PROXY: if hosted, allow this host in its network settings; otherwise ' +
+                    'check the proxy and NO_PROXY.'
+                : 'If hosted, allow that host in its network settings; if traffic must go through a proxy, set ' +
+                  'HTTPS_PROXY and check NO_PROXY.'),
       );
     } finally {
       clearTimeout(timer);

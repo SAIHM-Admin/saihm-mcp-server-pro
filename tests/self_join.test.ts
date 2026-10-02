@@ -38,6 +38,10 @@ const KEYS = [
   'SAIHM_MASTER_SECRET_HEX',
   'SAIHM_TIER',
   'SAIHM_ENDPOINT_URL',
+  // An identity token in the runner's environment excludes the secret these tests set, so every
+  // boot here would fail on the RUNNER's configuration rather than on the case under test.
+  'SAIHM_IDENTITY',
+  'SAIHM_IDENTITY_PASSPHRASE',
 ] as const;
 
 /** Run fn with a clean, isolated slice of the relevant env, restored afterwards. */
@@ -166,9 +170,11 @@ test('ensureSelfJoinIdentityEnv yields to a configured env secret (no file writt
   }
 });
 
-test('bootFromEnv: opted out + no secret => generic env error (pre-0.2 behaviour)', () => {
+test('bootFromEnv: opted out + no secret => an env error naming every identity source', () => {
   withEnv({ SAIHM_ENDPOINT_URL: 'https://x.test/mcp', SAIHM_SELF_JOIN: '0' }, () => {
-    assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_MASTER_SECRET_HEX .*required/);
+    assert.throws(() => SaihmProClient.bootFromEnv(), /self-join is off \(SAIHM_SELF_JOIN=0\)/);
+    assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE/);
+    assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_MASTER_SECRET_FILE or SAIHM_MASTER_SECRET_HEX/);
   });
 });
 
@@ -284,15 +290,21 @@ test('setup hint: opted OUT must never name saihm_join (that tool is not registe
     withEnv({ SAIHM_HOME: home, SAIHM_SELF_JOIN: '0' }, () => {
       assert.throws(() => SaihmProClient.bootFromEnv(), (e: unknown) => {
         assert.ok(e instanceof Error);
-        assert.match(e.message, /SAIHM_MASTER_SECRET_HEX .*required/);
+        assert.match(e.message, /No SAIHM identity is configured/);
         assert.ok(!/saihm_join/.test(e.message), 'must not name an unregistered tool');
         assert.match(e.message, /SAIHM_MASTER_SECRET_FILE or SAIHM_MASTER_SECRET_HEX/);
         return true;
       });
     });
-    // Opted IN (default): the same class of error DOES name the join tool.
+    // Opted IN (default), and a secret IS configured but broken: no join hint either. Following it
+    // would mint a second identity while the configured one sits there unread.
     withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: 'zz'.repeat(32) }, () => {
-      assert.throws(() => SaihmProClient.bootFromEnv(), /lowercase hex\..*saihm_join/);
+      assert.throws(() => SaihmProClient.bootFromEnv(), (e: unknown) => {
+        assert.ok(e instanceof Error);
+        assert.match(e.message, /SAIHM_MASTER_SECRET_HEX must hold canonical lowercase hex\.$/);
+        assert.ok(!/saihm_join|Join SAIHM/.test(e.message), 'a broken configured key must not invite a join');
+        return true;
+      });
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -304,7 +316,15 @@ test('bootFromEnv: endpoint set but EMPTY => configuration error (not silently d
   try {
     withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: '', SAIHM_MASTER_SECRET_HEX: 'ab'.repeat(32) }, () => {
       assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_ENDPOINT_URL is set but empty/);
-      assert.throws(() => SaihmProClient.bootFromEnv(), /saihm_join/);
+      // An identity is configured, so there is nothing to join: the hint would start a second one.
+      assert.throws(
+        () => SaihmProClient.bootFromEnv(),
+        (e: unknown) => e instanceof Error && !/saihm_join|Join SAIHM/.test(e.message),
+      );
+    });
+    // With nothing configured, the join hint is still how to start.
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: '' }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_ENDPOINT_URL is set but empty.*saihm_join/s);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -536,7 +556,7 @@ test('an unreadable SELF-JOIN IDENTITY names its path in full, not cut to fit th
         }
         assert.ok(caught instanceof SaihmConfigError, 'must be typed as carrying a path');
         // Anchored on the clause AFTER the path: cut to fit, the path takes the setup hint with it.
-        const m = /identity file could not be read: (.+?)\. To start free/.exec(
+        const m = /identity file could not be read: (.+?)\. Fix its permissions/.exec(
           failText(caught),
         );
         assert.ok(m, `path and trailing clause must both survive. got: ${failText(caught)}`);
@@ -683,4 +703,55 @@ test('after the fresh-join flow captures its own state, no read reaches the modu
       `FALL: do NOT lower the pin until you have confirmed the reference was deleted on purpose ` +
       `and the walk still recognises the ones that remain.`,
   );
+});
+
+test('an invalid SAIHM_ENDPOINT_URL is echoed only when it does not have the shape of a secret', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-ep3-'));
+  try {
+    const key = randomBytes(32).toString('hex');
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: key, SAIHM_MASTER_SECRET_HEX: 'ab'.repeat(32) }, () => {
+      assert.throws(
+        () => SaihmProClient.bootFromEnv(),
+        (e: unknown) => e instanceof Error && /is not a valid URL, .*so it is not shown/.test(e.message) && !e.message.includes(key),
+      );
+    });
+    // Positive control: an ordinary mistake is still shown, so the reader can see what is wrong with it.
+    withEnv({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: 'saihm dot net', SAIHM_MASTER_SECRET_HEX: 'ab'.repeat(32) }, () => {
+      assert.throws(() => SaihmProClient.bootFromEnv(), /SAIHM_ENDPOINT_URL is not a valid URL: saihm dot net/);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('ensureSelfJoinIdentityEnv never creates a key under a SAIHM_HOME with the shape of a key', () => {
+  const base = mkdtempSync(join(tmpdir(), 'saihm-kh-'));
+  try {
+    const shaped = randomBytes(32).toString('hex');
+    const home = join(base, shaped);
+    withEnv({ SAIHM_HOME: home }, () => {
+      assert.throws(
+        () => ensureSelfJoinIdentityEnv(),
+        (e: unknown) => e instanceof SaihmConfigError && /SAIHM_HOME holds what looks like a key/.test(e.message) && !e.message.includes(shaped),
+      );
+      assert.ok(!existsSync(join(home, 'free-identity.key')), 'nothing is created');
+    });
+    // Positive control: an ordinary SAIHM_HOME still gets its key.
+    withEnv({ SAIHM_HOME: join(base, 'plain') }, () => {
+      assert.equal(ensureSelfJoinIdentityEnv().created, true);
+    });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('ensureSelfJoinIdentityEnv creates the key under a folder that only looks like a passphrase', () => {
+  const base = mkdtempSync(join(tmpdir(), 'saihm-fp-'));
+  try {
+    withEnv({ SAIHM_HOME: join(base, 'saihm-agent-state-store') }, () => {
+      assert.equal(ensureSelfJoinIdentityEnv().created, true);
+    });
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
