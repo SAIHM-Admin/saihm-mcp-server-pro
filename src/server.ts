@@ -54,6 +54,7 @@ import {
   epochOrMarker,
   failText,
 } from './render_fence.js';
+import { acceptAbsentToolArguments, optionalInput } from './tool-input.js';
 
 import { z } from 'zod';
 import { deriveIdentity, toHex } from '@saihm/client-pro';
@@ -73,6 +74,10 @@ import {
   identityTokenConfigured,
   identityTokenSet,
   displayableKeyPath,
+  SaihmEndpointError,
+  identityHomeName,
+  keyShapedHomeRefusal,
+  saihmHomeSetting,
   displayablePlan,
   nodeErrorCode,
   selfJoinWouldMint,
@@ -121,6 +126,12 @@ const server = new McpServer(
 // typed tool error on first use rather than crashing the transport.
 let client: SaihmProClient | null = null;
 function getClient(): SaihmProClient {
+  // A JOIN WAITING FOR APPROVAL: the identity it activates has no memory yet, so an onboard now is refused, and it
+  // counts against the endpoint's onboard limit. The memory tools say what is waiting instead of trying.
+  // Only for a key this join CREATED: no memory can exist under it yet. An identity already here may be active, and a
+  // second join of it must not stop its memory tools; one that is not active yet is answered from its refusal in fail().
+  if (joinState?.running && (joinState.createdKey || joinState.refused === true))
+    throw new JoinPendingError(joinPendingNotice(joinState));
   if (!client) {
     client = SaihmProClient.bootFromEnv();
     // Share events are opt-in: the feed long-polls only when asked to. Its open request would keep the process running
@@ -141,9 +152,28 @@ const ok = (text: string, structuredContent?: Record<string, unknown>) => ({
   ...(structuredContent ? { structuredContent } : {}),
 });
 
+/** A memory tool called while this server's join waits for approval. Its message is built from fenced parts. */
+class JoinPendingError extends Error {}
+
+/** The endpoint's refusal of an identity with no free memory yet: what a join waiting for approval looks like from a tool. */
+const refusedForNoEntitlement = (e: unknown): boolean =>
+  e instanceof SaihmEndpointError && e.status === 401 && e.code === 'verification_failed' && e.message.includes(': no_free_entitlement)');
+
 /** Surface any error as a typed MCP tool error (never crash the server). */
 function fail(e: unknown) {
-  return { content: [{ type: 'text' as const, text: failText(e) }], isError: true as const };
+  const s = joinState;
+  let text: string;
+  if (e instanceof JoinPendingError) text = e.message;
+  else if (s?.running && refusedForNoEntitlement(e)) {
+    // Refused once for having no free memory yet: the rest of this join answers without asking the endpoint again.
+    s.refused = true;
+    text = joinPendingNotice(s);
+  } else if (s?.running && e instanceof SaihmEndpointError && e.code === 'rate_limited' && e.message.startsWith('SAIHM onboard failed:')) {
+    // A limit on the ONBOARD during the join (an identity not active yet): its steps first, then the wait. A limit on
+    // a memory call means the identity is already active, and is reported as itself.
+    text = `${joinPendingNotice(s)}\n${failText(e)}`;
+  } else text = failText(e);
+  return { content: [{ type: 'text' as const, text }], isError: true as const };
 }
 
 /**
@@ -188,23 +218,15 @@ function freeJoinFailureGuidance(): string {
         ? `  This machine's key file: ${safePathField(shown, MAX_PATH_FIELD_CHARS)}\n`
         : keyFile === defaultIdentityPath()
           ? // The key this machine's join created: SAIHM_MASTER_SECRET_FILE was set to it here, not by the operator.
-            process.env.SAIHM_HOME
+            saihmHomeSetting() !== undefined
             ? "  This machine's key file is free-identity.key under SAIHM_HOME, whose path has the shape of a key, so it is not shown.\n"
             : "  This machine's key file is free-identity.key in ~/.saihm, whose path has the shape of a key, so it is not shown.\n"
-          : '  SAIHM_MASTER_SECRET_FILE holds what looks like a key rather than a path; it is not shown.\n'
+          : '  SAIHM_MASTER_SECRET_FILE has the shape of a key, or names a folder that does, so it is not shown.\n'
       : process.env.SAIHM_MASTER_SECRET_HEX
         ? '  This machine uses the key you supplied inline in SAIHM_MASTER_SECRET_HEX.\n'
         : '')
   );
 }
-
-/**
- * The join's answer where SAIHM_HOME has the shape of a key, passphrase or token: no key file is ever
- * created under it, so its path never has to be shown - the refusal export-identity gives as well.
- */
-const KEY_SHAPED_HOME_JOIN_REFUSAL =
-  'SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory, so no key is ' +
-  'created there. Fix SAIHM_HOME, then join again.';
 
 /**
  * The join's answer where it would MINT while SAIHM_TIER is set to anything but FREE, or `null`: a free join
@@ -435,10 +457,8 @@ server.registerTool(
       'Store information in SAIHM persistent memory. Encryption happens in this process and the key never leaves it, so the server holds ciphertext it cannot read. Use this when a fact, decision, or piece of context should outlive the current session. Pass an existing cellId to update that cell instead of adding a new one; when the endpoint reports that the update left shares of the cell on the previous version, they are re-issued for the new version and the result counts them, and a share that was not re-issued needs saihm_share again. Returns the cell id that saihm_forget takes.',
     inputSchema: {
       content: z.string().describe('Information to remember'),
-      cellId: z
-        .string()
-        .optional()
-        .describe('Existing cell id (hex) to update; omit to create a new cell'),
+      // Every optional field of every tool reads null and blank values as absent (see tool-input.ts).
+      cellId: optionalInput(z.string()).describe('Existing cell id (hex) to update; omit to create a new cell'),
     },
     outputSchema: {
       cellId: z.string(),
@@ -529,32 +549,23 @@ server.registerTool(
     description:
       'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or leave it out to load everything. To read a single cell another agent shared with you, pass their sharerPinnedAgentIdHashHex and sharerRecord together with the cellId; that path is read-only.',
     inputSchema: {
-      query: z
-        .string()
-        .optional()
-        .describe('Filter your OWN memories by keyword (empty = all). Ignored when reading a shared cell.'),
-      sharerPinnedAgentIdHashHex: z
-        .string()
-        .optional()
-        .describe(
+      query: optionalInput(z.string()).describe(
+        'Filter your OWN memories by keyword (empty = all). Ignored when reading a shared cell.',
+      ),
+      sharerPinnedAgentIdHashHex: optionalInput(z.string()).describe(
           "Read a cell shared TO you: the SHARER's agentIdHash (hex), pinned out-of-band. When set, sharerRecord and cellId are also required.",
         ),
-      sharerRecord: z
-        .object({
+      sharerRecord: optionalInput(
+        z.object({
           mldsaPubKey: z.string(),
           mlkemPubKey: z.string(),
           mlkemPubKeySelfSig: z.string(),
-        })
-        .optional()
-        .describe("The SHARER's published identity record (hex fields). Required with sharerPinnedAgentIdHashHex."),
-      cellId: z
-        .string()
-        .optional()
-        .describe('The shared cell id to read. Required when reading a shared cell.'),
-      shareEntries: z
-        .boolean()
-        .optional()
-        .describe('With the share events feed on, also return every entry of the share map; without it, only its summary.'),
+        }),
+      ).describe("The SHARER's published identity record (hex fields). Required with sharerPinnedAgentIdHashHex."),
+      cellId: optionalInput(z.string()).describe('The shared cell id to read. Required when reading a shared cell.'),
+      shareEntries: optionalInput(z.boolean()).describe(
+        'With the share events feed on, also return every entry of the share map; without it, only its summary.',
+      ),
     },
     outputSchema: {
       count: z.number(),
@@ -1101,15 +1112,10 @@ server.registerTool(
       recipientPinnedAgentIdHashHex: z
         .string()
         .describe("The grantee's agentIdHash (hex), pinned out-of-band"),
-      scope: z
-        .enum(['read', 'write', 'readwrite'])
-        .optional()
-        .describe('Access scope (default read)'),
-      expiryEpoch: z
-        .string()
-        .regex(/^[0-9]+$/, 'expiryEpoch must be a decimal UNIX-epoch count')
-        .optional()
-        .describe('Optional expiry as a UNIX-epoch count (decimal string)'),
+      scope: optionalInput(z.enum(['read', 'write', 'readwrite'])).describe('Access scope (default read)'),
+      expiryEpoch: optionalInput(
+        z.string().regex(/^[0-9]+$/, 'expiryEpoch must be a decimal UNIX-epoch count'),
+      ).describe('Optional expiry as a UNIX-epoch count (decimal string)'),
     },
     annotations: {
       title: 'Share',
@@ -1197,11 +1203,8 @@ server.registerTool(
       scope: z
         .enum(['emission_param', 'protocol_upgrade'])
         .describe('Governable scope'),
-      paramKey: z
-        .string()
-        .optional()
-        .describe('Parameter key (when scope=emission_param)'),
-      proposedValue: z.string().optional().describe('Proposed value as string'),
+      paramKey: optionalInput(z.string()).describe('Parameter key (when scope=emission_param)'),
+      proposedValue: optionalInput(z.string()).describe('Proposed value as string'),
     },
     annotations: {
       title: 'Propose (governance)',
@@ -1294,6 +1297,8 @@ interface JoinState {
   /** The key FILE, or `null` when the secret is inline in `SAIHM_MASTER_SECRET_HEX` and no file exists. */
   keyPath: string | null;
   createdKey: boolean;
+  /** The endpoint has refused this identity once during this join for having no free memory yet. */
+  refused?: boolean;
 }
 let joinState: JoinState | null = null;
 
@@ -1352,6 +1357,14 @@ function joinPendingText(s: JoinState): string {
   ].join('\n');
 }
 
+/** What a memory tool answers while the join waits: the same steps saihm_join gives, once it has them. */
+function joinPendingNotice(s: JoinState): string {
+  return (
+    'SAIHM memory is not active yet: the join is waiting for approval.\n' +
+    (s.prompt ? joinPendingText(s) : 'Ask me to "Join SAIHM" again in a few seconds for the steps.')
+  );
+}
+
 function joinSuccessText(s: JoinState): string {
   return [
     "You're in — your free SAIHM memory is active.",
@@ -1378,14 +1391,11 @@ if (selfJoinEnabled()) {
     {
       title: 'Join SAIHM (activate free memory)',
       description:
-        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory: first ask whether they already have a SAIHM identity (from another machine or an earlier session) - if so, do not join; they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Pass newIdentity: true once they confirm they want a new one here. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, call saihm_join again to finish; the memory tools then work. No payment and no website visit.',
+        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory: first ask whether they already have a SAIHM identity (from another machine or an earlier session) - if so, do not join; they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Pass newIdentity: true once they confirm they want a new one here. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, call saihm_join again to finish; the memory tools then work. No payment.',
       inputSchema: {
-        newIdentity: z
-          // NULL READS AS UNSET: clients that fill every field send null for one not chosen, and the field this
-          // release added failed their every join with an input error, where the tool had taken any arguments.
-          // Mapped before validation, so the advertised schema stays a plain boolean; any other type still errs.
-          .preprocess((v) => (v === null ? undefined : v), z.boolean().optional())
-          .describe('true once the user confirms they have no SAIHM identity to bring here and want a new, empty memory'),
+        newIdentity: optionalInput(z.boolean()).describe(
+          'true once the user confirms they have no SAIHM identity to bring here and want a new, empty memory',
+        ),
       },
       annotations: {
         title: 'Join SAIHM (activate free memory)',
@@ -1429,7 +1439,7 @@ if (selfJoinEnabled()) {
           const temporary = ephemeralHomeSignal();
           if (temporary !== null) return ok(ephemeralJoinRefusal(temporary));
           if (newIdentity !== true) return ok(JOIN_EXISTING_IDENTITY_QUESTION);
-          if (pathHoldsIdentitySecret(defaultIdentityPath())) return ok(KEY_SHAPED_HOME_JOIN_REFUSAL);
+          if (pathHoldsIdentitySecret(defaultIdentityPath())) return ok(keyShapedHomeRefusal('join'));
           const tierRefusal = mintTierRefusal();
           if (tierRefusal !== null) return ok(tierRefusal);
         }
@@ -1440,6 +1450,8 @@ if (selfJoinEnabled()) {
         // Capture THIS flow's state object; every background callback guards on `joinState === s` so a
         // late callback from a superseded flow can never mutate a newer one (defence in depth — by
         // construction only one background runs at a time, but this survives future refactors).
+        // Only a key THIS join created is known to hold no memory. One left by an earlier join, here or in another session,
+        // may have been granted even when that join's answer was lost, so the memory tools ask the endpoint once.
         const s: JoinState = { running: true, keyPath, createdKey: created };
         joinState = s;
         void jc
@@ -1519,8 +1531,11 @@ function persistCheckoutUrl(fenced: string): string {
     // that cannot find its identity mints a new one, which starts an EMPTY memory. So an operator
     // who sets only `SAIHM_STATE_DIR` keeps their identity under `~/.saihm` while this file moves.
     // That asymmetry is two variables with two jobs, not a split left half-closed.
+    // Blank counts as unset for both, as for the identity's folder: spaces alone made this a path under the working directory.
     const dir =
-      process.env.SAIHM_STATE_DIR || process.env.SAIHM_HOME || pathJoin(homedir(), '.saihm');
+      (process.env.SAIHM_STATE_DIR?.trim() ? process.env.SAIHM_STATE_DIR : undefined) ??
+      saihmHomeSetting() ??
+      pathJoin(homedir(), '.saihm');
     // BOTH `mode` options here apply ONLY ON CREATION — an existing directory or file keeps whatever
     // permissions it already had, and neither call reports that it did nothing. Where `~/.saihm`
     // already exists - which is the common case, since the rest of the SAIHM toolchain creates it -
@@ -1662,7 +1677,7 @@ async function runFreeJoin(): Promise<void> {
   }
   // The tool's refusal for a SAIHM_HOME with the shape of a key, on the verb: no key is created there.
   if (selfJoinEnabled() && selfJoinWouldMint() && pathHoldsIdentitySecret(defaultIdentityPath())) {
-    process.stderr.write('saihm: not joined - ' + KEY_SHAPED_HOME_JOIN_REFUSAL + '\n');
+    process.stderr.write('saihm: not joined - ' + keyShapedHomeRefusal('join') + '\n');
     process.exitCode = 1;
     return;
   }
@@ -1769,10 +1784,7 @@ function runExportIdentity(): void {
   // A SAIHM_HOME WITH THE SHAPE OF A KEY is refused before anything is written under it: every location
   // this verb prints is inside it, and an export the operator cannot be told the location of is no export.
   if (pathHoldsIdentitySecret(defaultIdentityPath())) {
-    process.stderr.write(
-      'saihm: not exported - SAIHM_HOME holds what looks like a key, passphrase or token rather than a\n' +
-        'directory. Fix SAIHM_HOME, then export again.\n',
-    );
+    process.stderr.write('saihm: not exported - ' + keyShapedHomeRefusal('export') + '\n');
     process.exitCode = 1;
     return;
   }
@@ -1836,7 +1848,7 @@ function runExportIdentity(): void {
       const st = lstatSync(dir);
       if (!st.isDirectory() || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0)
         throw new Error(
-          `the export directory is not private to you: ${displayableKeyPath(dir) ?? 'the exports folder under SAIHM_HOME'}. It must be a directory you own ` +
+          `the export directory is not private to you: ${displayableKeyPath(dir) ?? `the exports folder under ${identityHomeName()}`}. It must be a directory you own ` +
             'with mode 700 (not a link). Fix it with chmod 700, or remove it. Nothing was exported.',
         );
     }
@@ -1849,7 +1861,7 @@ function runExportIdentity(): void {
     // Node names the path in its own message: widened only where that path may be shown.
     if (displayableKeyPath(file) === null && typeof (e as { code?: unknown } | null)?.code === 'string')
       throw new Error(
-        `the export could not be written (${nodeErrorCode(e)}): its folder under SAIHM_HOME has the shape of a ` +
+        `the export could not be written (${nodeErrorCode(e)}): its folder under ${identityHomeName()} has the shape of a ` +
           'key, so it is not shown. Nothing was exported.',
       );
     throw markPathBearing(e);
@@ -1869,7 +1881,7 @@ function runExportIdentity(): void {
       // Shown only where its path may be; otherwise the file's own name, which has no such shape, and where it is.
       displayableKeyPath(file) !== null
         ? `  file:  ${safePathField(file, MAX_PATH_FIELD_CHARS)} (readable only by you)`
-        : `  file:  ${safePathField(basename(file), MAX_PATH_FIELD_CHARS)} in the exports folder under SAIHM_HOME, whose path has the shape of a key, so it is not shown (readable only by you)`,
+        : `  file:  ${safePathField(basename(file), MAX_PATH_FIELD_CHARS)} in the exports folder under ${identityHomeName()}, whose path has the shape of a key, so it is not shown (readable only by you)`,
       '',
       'This is the identity, and the tier, that a server started from THIS shell would use. If your',
       'MCP client gives the server its own SAIHM_* values (a key file path, SAIHM_TIER,',
@@ -1894,12 +1906,21 @@ function runExportIdentity(): void {
       `  ${IDENTITY_ENV}              the token; useless without the passphrase`,
       `  ${PASSPHRASE_ENV}   the passphrase; store it as a secret`,
       '',
+      // A paid tier with no payment method onboards only with a static SAIHM_AUTH_HEADER, which no token carries: an
+      // identity reached that way was told to set a payment method it does not have.
       ...(id.tier !== undefined && id.tier !== 'FREE' && id.paymentMethod === undefined
-        ? [
-            'This token carries a paid tier but no payment method: set SAIHM_PAYMENT_METHOD as your MCP',
-            'client does, and export again.',
-            '',
-          ]
+        ? process.env.SAIHM_AUTH_HEADER?.trim()
+          ? [
+              'This shell reaches the endpoint with SAIHM_AUTH_HEADER, which the token does not carry: set it,',
+              'as a secret, where the token is used.',
+              '',
+            ]
+          : [
+              'This token carries a paid tier but no payment method: set SAIHM_PAYMENT_METHOD as your MCP',
+              'client does, and export again - or, for an identity reached with a static SAIHM_AUTH_HEADER,',
+              'set that header where the token is used.',
+              '',
+            ]
         : []),
       'Together they ARE your identity: anyone holding both can read, change and erase your memory.',
       'Never paste them into a chat or write them into a config file in a repository. Keep a copy in',
@@ -2002,7 +2023,7 @@ async function main(): Promise<void> {
   const verb = process.argv[2];
 
   if (verb === undefined || verb === '') {
-    const transport = new StdioServerTransport();
+    const transport = acceptAbsentToolArguments(new StdioServerTransport());
     await server.connect(transport);
     // With the feed on, follow shares from the start rather than from the first memory tool call. A client that cannot
     // boot yet stays unbuilt, and the first tool call reports why, as it always has.

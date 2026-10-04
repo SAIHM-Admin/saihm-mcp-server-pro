@@ -94,6 +94,19 @@ describe("RM2: the manifest cannot drift from the package it describes", () => {
     );
   });
 
+  // Gemini CLI installs the repository as an extension from this file, and shows its version: it ships with the
+  // repository, so it is bumped with the rest, and names this package and the default endpoint.
+  it("the Gemini CLI extension manifest carries this version and starts this package", () => {
+    const ext = JSON.parse(readFileSync(new URL("../gemini-extension.json", import.meta.url), "utf8")) as {
+      name: string; version: string; mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
+    };
+    assert.equal(ext.version, pkg.version, "gemini-extension.json version != package.json version");
+    assert.equal(ext.name, "saihm");
+    assert.deepEqual(ext.mcpServers.saihm?.args, ["-y", pkg.name]);
+    assert.equal(ext.mcpServers.saihm?.command, "npx");
+    assert.equal(ext.mcpServers.saihm?.env?.SAIHM_ENDPOINT_URL, "https://saihm.net/mcp");
+  });
+
   it("every version in the manifest matches package.json", () => {
     assert.equal(manifest.version, pkg.version, "server.json version != package.json version");
     for (const p of manifest.packages) {

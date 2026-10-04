@@ -60,6 +60,7 @@ jobs:
           # nothing about the version it ships. Same class as the lockfile: a shipping artifact
           # outside the gate.
           grep -q "^## \[$TAG\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## [$TAG]' heading"; exit 1; }
+          grep -q "^## \[$TAG\] — [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}" CHANGELOG.md || { echo "::error::CHANGELOG.md's '## [$TAG]' heading carries no release date (still Unreleased?)"; exit 1; }
           grep -q "^\[$TAG\]:" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '[$TAG]:' link definition"; exit 1; }
 
       - name: Install

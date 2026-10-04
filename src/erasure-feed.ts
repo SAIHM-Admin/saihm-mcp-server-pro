@@ -144,7 +144,8 @@ const HEX64 = /^[0-9a-f]{64}$/;
  */
 export function resolveFeedRoot(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env['SAIHM_ERASURE_FEED_DIR'];
-  const home = env['SAIHM_HOME'];
+  // Blank counts as unset, as for the identity's folder: spaces alone are not a place to write.
+  const home = env['SAIHM_HOME']?.trim() ? env['SAIHM_HOME'] : undefined;
   const root = explicit ?? home ?? pathJoin(homedir(), '.saihm');
   if (!isAbsolute(root)) {
     const which = explicit !== undefined ? 'SAIHM_ERASURE_FEED_DIR' : 'SAIHM_HOME';

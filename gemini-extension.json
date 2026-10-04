@@ -1,0 +1,14 @@
+{
+  "name": "saihm",
+  "version": "0.12.1",
+  "description": "Free-to-start portable memory for AI agents: encrypted, shareable, provably erased.",
+  "mcpServers": {
+    "saihm": {
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": {
+        "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp"
+      }
+    }
+  }
+}

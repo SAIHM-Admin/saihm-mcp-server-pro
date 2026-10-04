@@ -67,7 +67,7 @@ import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest, type RequestOptions as HttpsRequestOptions } from 'node:https';
 import { connect as tlsConnect } from 'node:tls';
 import { isIP } from 'node:net';
-import type { Duplex } from 'node:stream';
+import type { Duplex, Transform } from 'node:stream';
 import { Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import {
@@ -116,6 +116,7 @@ import {
   openIdentityToken,
   cleanPastedValue,
   looksLikeIdentitySecret,
+  normalizePassphrase,
   pathHoldsIdentitySecret,
   IdentityTokenError,
   IDENTITY_ENV,
@@ -262,6 +263,17 @@ export const MAX_ANNOUNCEMENT_TOTAL_CHARS = 32 * 1024;
 export const DEFAULT_ENDPOINT = 'https://saihm.net/mcp';
 
 /**
+ * The wait an endpoint asks for in `retry-after`, as words: its whole seconds when it gives them, otherwise a minute.
+ * Only a short run of digits is read; a date or anything else is not echoed.
+ */
+function retryAfterWait(res: { headers: { get(name: string): string | null } }): string {
+  const ra = res.headers.get('retry-after')?.trim() ?? '';
+  if (!/^[0-9]{1,5}$/.test(ra)) return 'a minute';
+  const n = Number(ra);
+  return n === 0 ? 'a moment' : n === 1 ? '1 second' : `${n} seconds`;
+}
+
+/**
  * The fix for the two onboard refusals that a CONFIGURATION causes, appended to the error.
  *
  * Selected by EXACT match on the endpoint's typed `reason`, and the sentences are ours: the most an
@@ -303,6 +315,28 @@ function setupHint(): string {
         ' to start free with no configuration instead.';
 }
 
+/**
+ * Whether part of an endpoint setting has the shape of a key, passphrase or token, as a message may not show it: the
+ * key-file test, and a passphrase in ANY grouping or case. A path keeps the stricter rule for folders, which have
+ * ordinary reasons to look like one; nothing in an endpoint's scheme, host or path does.
+ */
+function endpointValueHoldsSecret(v: string): boolean {
+  // Plain words count too (`saihm-gateway-internal` is twenty symbols once the dashes go) and are withheld: a digit
+  // cannot be required, as one generated passphrase in about 1,800 has none.
+  return displayableKeyPath(v) === null || (v.match(/[0-9A-Za-z-]+/g) ?? []).some((run) => normalizePassphrase(run) !== null);
+}
+
+/**
+ * The headers a redirect hop carries: all of them within the request's own origin (scheme, host and port), and none of
+ * its credentials across origins - the bearer token and any cookie were meant for the endpoint, as fetch decides it.
+ */
+export function redirectHopHeaders(from: URL, to: URL, headers: Record<string, string>): Record<string, string> {
+  if (to.origin === from.origin) return headers;
+  const kept: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() !== 'authorization' && k.toLowerCase() !== 'cookie') kept[k] = v;
+  return kept;
+}
+
 /** Mirrors the standards client: https only, except 127.0.0.1 / localhost over http (dev). */
 function assertEndpointUrl(endpoint: string): void {
   let url: URL;
@@ -312,7 +346,7 @@ function assertEndpointUrl(endpoint: string): void {
     throw new SaihmConfigError(
       // Not echoed when it has the shape of a key, passphrase or token: one pasted into the wrong one of
       // several settings fields would otherwise come back in a reply an agent repeats.
-      looksLikeIdentitySecret(endpoint)
+      endpointValueHoldsSecret(endpoint)
         ? 'SAIHM_ENDPOINT_URL is not a valid URL, and what it holds looks like a key, passphrase or token, so it is not shown.'
         : `SAIHM_ENDPOINT_URL is not a valid URL: ${endpoint}`,
       'url',
@@ -337,6 +371,12 @@ function assertEndpointUrl(endpoint: string): void {
   // character at a time rather than vanishing. Still not a finding: `new URL` accepts a scheme only
   // as `[A-Za-z][A-Za-z0-9+.-]*`, so reaching 146 means typing 146 of them before `://`. Recorded
   // so the next sweep neither re-derives it nor files it as a defect.
+  // Not echoed when the scheme has the shape of a key, passphrase or token: one pasted before a colon reads as a scheme.
+  if (endpointValueHoldsSecret(url.protocol))
+    throw new Error(
+      'SAIHM_ENDPOINT_URL must use https://, and its scheme looks like a key, passphrase or token, so it is not shown. ' +
+        'Plain http:// is only allowed for 127.0.0.1 or localhost (dev).',
+    );
   throw new Error(
     `SAIHM_ENDPOINT_URL must use https:// (got ${url.protocol}//). ` +
       `Plain http:// is only allowed for 127.0.0.1 or localhost (dev).`,
@@ -647,6 +687,10 @@ const MAX_RESPONSE_HEADER_BYTES = 96 * 1024;
 export function safeEndpoint(raw: string): string {
   try {
     const u = new URL(raw);
+    // A key, passphrase or token pasted into the URL is withheld like any value of that shape: the host alone is
+    // named when only the path has that shape, and the variable when the host has it.
+    if (endpointValueHoldsSecret(u.host)) return 'SAIHM_ENDPOINT_URL';
+    if (endpointValueHoldsSecret(u.pathname)) return `${u.protocol}//${u.host}`;
     return `${u.protocol}//${u.host}${u.pathname}`;
   } catch {
     return '(unparseable endpoint URL)';
@@ -759,6 +803,8 @@ export function proxyForTarget(target: URL): URL | null {
   const name = proxyVariableInUse();
   const raw = name === null ? '' : (process.env[name] ?? '').trim();
   if (raw === '' || noProxyMatches(target.hostname, target.port || '443')) return null;
+  // A scheme with ONE slash (`http:/host`) is a typo, not a bare host: prefixed with http:// it read as a proxy at host `http`.
+  if (!raw.includes('://') && /^[A-Za-z][A-Za-z0-9+.-]*:[\\/]/.test(raw)) throw codedError(`${name}_NOT_A_URL`);
   let proxy: URL;
   try {
     proxy = new URL(raw.includes('://') ? raw : `http://${raw}`);
@@ -927,18 +973,32 @@ function proxyTunnelAgent(proxy: URL): ProxyTunnelAgent {
   return agent;
 }
 
+/** Transport codes for an answer that ARRIVED but cannot be used: the endpoint was reached, so network advice misleads. */
+const UNUSABLE_ANSWER = new Set(['REDIRECT_CROSS_ORIGIN', 'REDIRECT_LOCATION_INVALID', 'STATUS_OUT_OF_RANGE', 'RESPONSE_INVALID']);
+
 function decodeBody(stream: Readable, encoding: string | undefined): Readable {
+  let decoder: Transform;
   switch ((encoding ?? '').trim().toLowerCase()) {
     case 'gzip':
     case 'x-gzip':
-      return stream.pipe(createGunzip());
+      decoder = createGunzip();
+      break;
     case 'deflate':
-      return stream.pipe(createInflate());
+      decoder = createInflate();
+      break;
     case 'br':
-      return stream.pipe(createBrotliDecompress());
+      decoder = createBrotliDecompress();
+      break;
     default:
       return stream;
   }
+  // pipe() carries data, not an error or an early close: a body cut off mid-way left the decoder, and the call reading
+  // it, waiting for ever. Either one now ends the decoder with an error, which the reader sees.
+  stream.once('error', (e: Error) => decoder.destroy(e));
+  stream.once('close', () => {
+    if (!stream.readableEnded) decoder.destroy(new Error('the response ended before its body did'));
+  });
+  return stream.pipe(decoder);
 }
 
 /** Drop-in replacement for `fetch` over a keep-alive agent. Same contract, warm sockets. */
@@ -983,11 +1043,33 @@ async function keepAliveFetch(
       (res) => {
         const status = res.statusCode ?? 0;
         const location = res.headers.location;
+        // A status no Response can carry (an endpoint can send 600 to 999) is a transport failure: thrown here, in the
+        // response callback, it would end the process.
+        if (status < 200 || status > 599) {
+          res.resume();
+          if (signal) signal.removeEventListener('abort', onAbort);
+          reject(codedError('STATUS_OUT_OF_RANGE'));
+          return;
+        }
         if (status >= 300 && status < 400 && typeof location === 'string' && redirectsLeft > 0) {
           res.resume();
           if (signal) signal.removeEventListener('abort', onAbort);
+          // An unusable Location is a transport failure too, for the same reason.
+          let next: URL;
+          try {
+            next = new URL(location, target);
+          } catch {
+            reject(codedError('REDIRECT_LOCATION_INVALID'));
+            return;
+          }
           // 301/302/303 downgrade to GET and drop the body, matching fetch; 307/308 preserve both.
           const keepMethod = status === 307 || status === 308;
+          // But never to ANOTHER ORIGIN with a body: fetch would re-send it there, and a body here can be a sign-in proof
+          // (onboarding's signed nonce) that whoever receives it could present first.
+          if (keepMethod && init.body !== undefined && next.origin !== target.origin) {
+            reject(codedError('REDIRECT_CROSS_ORIGIN'));
+            return;
+          }
           let nextInit: RequestInit = init;
           if (!keepMethod) {
             // Omit `body` entirely rather than setting it undefined — the project builds with
@@ -995,29 +1077,47 @@ async function keepAliveFetch(
             const { body: _dropped, ...rest } = init;
             nextInit = { ...rest, method: 'GET' };
           }
-          keepAliveFetch(new URL(location, target).toString(), nextInit, redirectsLeft - 1).then(resolve, reject);
+          // A redirect to ANOTHER ORIGIN never carries this request's credentials, as fetch drops them: the bearer token
+          // and any cookie were meant for the endpoint, not for wherever it points.
+          if (nextInit.headers) nextInit = { ...nextInit, headers: redirectHopHeaders(target, next, nextInit.headers as Record<string, string>) };
+          keepAliveFetch(next.toString(), nextInit, redirectsLeft - 1).then(resolve, reject);
           return;
         }
-        const decoded = decodeBody(res, res.headers['content-encoding'] as string | undefined);
+        // 204, 205 and 304 carry no body and are never decoded: a decompressor over an empty body errors, and nothing
+        // listens to it here, so that error would end the process.
+        const nullBody = status === 204 || status === 205 || status === 304;
+        const decoded = nullBody ? null : decodeBody(res, res.headers['content-encoding'] as string | undefined);
+        if (nullBody) res.resume();
         /*
-         * RESPONSE HEADERS ARE DELIBERATELY NOT COPIED ONTO THE Response.
+         * ONE RESPONSE HEADER IS COPIED ONTO THE Response, BY NAME: `retry-after`, and only as a
+         * short run of digits. The rest are deliberately not copied.
          *
-         * Measured: nothing downstream reads them. The only readers of a response header in
-         * this file are the two lines above — the redirect Location and the content encoding —
-         * both consumed here and neither surviving into the returned object. Callers use
-         * `ok`, `status`, and the body.
-         *
-         * Copying them would mean an anonymous whole-object read of attacker-influenced
+         * Copying them all would mean an anonymous whole-object read of attacker-influenced
          * header names and values, which is precisely the shape `server_render_fence` refuses
-         * to let through unenumerated. Not copying is strictly less surface than copying and
-         * then writing down why it is safe.
+         * to let through unenumerated. `retry-after` has readers: a 429 names the wait it asks
+         * for, and the share events feed waits that long when the body names no wait. Without
+         * this copy both read nothing, since every header was dropped here. A date, or any value
+         * that is not 1 to 5 digits, is dropped as before.
          */
-        resolve(
-          new Response(Readable.toWeb(decoded) as unknown as ReadableStream<Uint8Array>, {
+        const retryAfter = res.headers['retry-after'];
+        const wait = typeof retryAfter === 'string' && /^\s*[0-9]{1,5}\s*$/.test(retryAfter) ? retryAfter.trim() : null;
+        // A Response refuses a body for 204, 205 and 304, so none is passed. Any other answer Node parsed but a Response
+        // cannot carry (a status text with a control character) is a transport failure: thrown here, in the response
+        // callback, it would end the process.
+        let response: Response;
+        try {
+          response = new Response(decoded === null ? null : (Readable.toWeb(decoded) as unknown as ReadableStream<Uint8Array>), {
             status,
             statusText: res.statusMessage ?? '',
-          }),
-        );
+            ...(wait !== null ? { headers: { 'retry-after': wait } } : {}),
+          });
+        } catch {
+          res.resume();
+          if (signal) signal.removeEventListener('abort', onAbort);
+          reject(codedError('RESPONSE_INVALID'));
+          return;
+        }
+        resolve(response);
       },
     );
 
@@ -1469,10 +1569,50 @@ export function erasureFeedEnabled(): boolean {
   return process.env.SAIHM_ERASURE_FEED !== '0';
 }
 
+/**
+ * SAIHM_HOME as set, or `undefined` when it is unset or blank. Spaces alone made every path under it relative to the
+ * working directory - a repository checkout, in a hosted agent - and a join minted the key there.
+ */
+export function saihmHomeSetting(): string | undefined {
+  const v = process.env.SAIHM_HOME;
+  return v !== undefined && v.trim() !== '' ? v : undefined;
+}
+
 /** Default on-disk location of a self-generated FREE identity (written mode 600). */
 export function defaultIdentityPath(): string {
-  const home = process.env.SAIHM_HOME || pathJoin(homedir(), '.saihm');
+  const home = saihmHomeSetting() ?? pathJoin(homedir(), '.saihm');
   return pathJoin(home, 'free-identity.key');
+}
+
+/**
+ * The identity's folder as a message names it: SAIHM_HOME when that is set, otherwise ~/.saihm. A refusal that said
+ * "Fix SAIHM_HOME" when only the home folder's path had the shape of a key sent the reader to a variable never set.
+ */
+export function identityHomeName(): string {
+  return saihmHomeSetting() !== undefined ? 'SAIHM_HOME' : '~/.saihm';
+}
+
+/** Why nothing is created under the identity's folder when its path has the shape of a key, and what fixes it. */
+export function keyShapedHomeRefusal(verb: 'join' | 'export'): string {
+  const consequence = verb === 'join' ? ', so no key is created there' : '';
+  // An export reads the key this machine boots, which lives under that folder: once SAIHM_HOME moves, only naming the
+  // key file as well lets the export find it.
+  // Only a key that lives in a file needs naming: one given inline (SAIHM_MASTER_SECRET_HEX) or as a token has none.
+  const namesKeyFile = verb === 'export' && !process.env['SAIHM_MASTER_SECRET_HEX']?.trim() && !identityTokenConfigured();
+  const keyFile = namesKeyFile ? ', and SAIHM_MASTER_SECRET_FILE to the full path of your key file' : '';
+  return saihmHomeSetting() !== undefined
+    ? `SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory${consequence}. ` +
+        `Fix SAIHM_HOME${namesKeyFile ? ', set SAIHM_MASTER_SECRET_FILE to the full path of your key file' : ''}, then ${verb} again.`
+    : `The path of your home folder, where ~/.saihm is, holds what looks like a key, passphrase or token${consequence}. ` +
+        `Set SAIHM_HOME to the full path of a directory whose path does not${keyFile}, then ${verb} again.`;
+}
+
+/** The self-join key file as a message names it: its path, or its folder when the path has the shape of a key. */
+function selfJoinKeyFileShown(p: string): string {
+  return (
+    displayableKeyPath(p) ??
+    `free-identity.key under ${identityHomeName()} (its path has the shape of a key, so it is not shown)`
+  );
 }
 
 /**
@@ -1508,12 +1648,14 @@ export function displayablePlan(tier: string): string | null {
 }
 
 /**
- * A key-file setting as it may be SHOWN: the value, or `null` when it has the shape of a key,
- * passphrase or token rather than a path. Every site that names `SAIHM_MASTER_SECRET_FILE`'s value
- * to a reader goes through this, so the guard cannot be applied at one site and missed at another.
+ * A key-file setting, or a path under the identity's folder, as it may be SHOWN: the value, or `null` when it has
+ * the shape of a key, passphrase or token, or holds one in a part of the path - the test that refuses a folder.
+ * Every site that names a key-file path to a reader goes through this, so a path a refusal blocks is never one a
+ * message prints, and the guard cannot be applied at one site and missed at another. (A forget receipt's residual
+ * paths are fenced on their own; they name the recall cache and erasure feed files, never a key file.)
  */
 export function displayableKeyPath(v: string): string | null {
-  return looksLikeIdentitySecret(v) ? null : v;
+  return looksLikeIdentitySecret(v) || pathHoldsIdentitySecret(v) ? null : v;
 }
 
 /**
@@ -1768,10 +1910,7 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
     // Never under a SAIHM_HOME with the shape of a key, passphrase or token. The join gates refuse first,
     // in their own words; this keeps any other caller from creating a key whose path is a secret.
     if (pathHoldsIdentitySecret(keyPath))
-      throw new SaihmConfigError(
-        'SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory, so no key is created there. Fix SAIHM_HOME, then join again.',
-        'path',
-      );
+      throw new SaihmConfigError(keyShapedHomeRefusal('join'), 'path');
     try {
       const secretHex = randomBytes(32).toString('hex');
       mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
@@ -1800,7 +1939,7 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
       // shown, and otherwise replaced by Node's code, so a home the refusal let through is not printed here.
       if (displayableKeyPath(keyPath) === null)
         throw new SaihmConfigError(
-          `the key could not be created under SAIHM_HOME (${nodeErrorCode(e)}); its path has the shape of a ` +
+          `the key could not be created under ${identityHomeName()} (${nodeErrorCode(e)}); its path has the shape of a ` +
             'key, so it is not shown.',
           'path',
         );
@@ -1831,17 +1970,21 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
       // Moving the read forward moved it out from behind that wrapper, so the wrapper is restored
       // here. The changelog's stated remedy for this whole class is "match on the VARIABLE NAME",
       // which a bare errno cannot satisfy for any consumer.
+      const shown = displayableKeyPath(keyPath);
+      const code = (e as NodeJS.ErrnoException).code ?? 'unknown';
       throw new SaihmConfigError(
-        `the self-join identity file could not be read: ${keyPath} ` +
-          `(${(e as NodeJS.ErrnoException).code ?? 'unknown'}). Fix its permissions, or restore ` +
-          'your backup of it - deleting it and running the join again mints a NEW identity, which ' +
-          'starts an EMPTY memory.',
+        (shown === null
+          ? `the self-join identity file could not be read: free-identity.key under ${identityHomeName()} (${code}; its ` +
+            'path has the shape of a key, so it is not shown). '
+          : `the self-join identity file could not be read: ${shown} (${code}). `) +
+          'Fix its permissions, or restore your backup of it - deleting it and running the join again mints a NEW ' +
+          'identity, which starts an EMPTY memory.',
         'path',
       );
     }
     if (!holdsSecret)
       throw new SaihmConfigError(
-        `the self-join identity file holds no secret: ${keyPath}. Restore your backup of it, or ` +
+        `the self-join identity file holds no secret: ${selfJoinKeyFileShown(keyPath)}. Restore your backup of it, or ` +
           'delete it and run the join again to mint a new identity - which starts an EMPTY memory, ' +
           'so restore first if you have a backup.',
         'path',
@@ -1865,6 +2008,9 @@ export interface ResolvedIdentity {
   /** Where it came from: a variable name, or a phrase naming the file. */
   source: string;
 }
+
+/** Key files already warned about as group/world-accessible in this process. */
+const looseKeyFilesWarned = new Set<string>();
 
 /**
  * Resolve the identity this process would boot, WITHOUT constructing a client and without touching
@@ -1949,8 +2095,9 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
       // would land there in full. Those three shapes are recognisable, and none is a plausible path.
       if (displayableKeyPath(secretFile) === null)
         throw new Error(
-          'SAIHM_MASTER_SECRET_FILE holds what looks like a key, passphrase or token rather than a ' +
-            'file path, so it is not shown. Put the path of your key file there instead.',
+          'SAIHM_MASTER_SECRET_FILE could not be read, and what it holds looks like a key, passphrase or ' +
+            'token, so it is not shown. If it is a key, put the path of your key file there instead; if it is a ' +
+            'path, check that the file exists and that you can read it.',
         );
       throw new SaihmConfigError(
         `SAIHM_MASTER_SECRET_FILE could not be read: ${secretFile}. Check the path and the file's ` +
@@ -1962,8 +2109,12 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
       // Advisory only (never blocks): warn if the secret file is group/world-accessible on POSIX.
       if (
         process.platform !== 'win32' &&
+        !looseKeyFilesWarned.has(secretFile) &&
         (statSync(secretFile).mode & 0o077) !== 0
       ) {
+        // ONCE per file per process: the join's tier check and the boot behind it both resolve the identity.
+        looseKeyFilesWarned.add(secretFile);
+        const shown = displayableKeyPath(secretFile);
         // FENCED, not deleted. An earlier cut dropped the path entirely on the theory that this
         // file cannot import the fence - `render_fence.ts` imports from here, and `safePathField`
         // is an `export const`, so the reverse edge was called a TDZ fault. MEASURED FALSE: an ESM
@@ -1974,8 +2125,11 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
         // KEY - and cost a log consumer information it had. stderr is a human-read surface, the
         // operator's terminal under the CLI paths, so the value is fenced like any other path.
         process.stderr.write(
-          `warning: SAIHM_MASTER_SECRET_FILE ${safePathField(secretFile, MAX_PATH_FIELD_CHARS)} ` +
-            'is group/world-accessible; chmod 600 it.\n',
+          shown === null
+            ? 'warning: the key file SAIHM_MASTER_SECRET_FILE names is group/world-accessible; chmod 600 it ' +
+                '(its path has the shape of a key, so it is not shown).\n'
+            : `warning: SAIHM_MASTER_SECRET_FILE ${safePathField(shown, MAX_PATH_FIELD_CHARS)} ` +
+                'is group/world-accessible; chmod 600 it.\n',
         );
       }
     } catch {
@@ -2000,7 +2154,7 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
         secretHex = readFileSync(p, 'utf-8');
       } catch {
         throw new SaihmConfigError(
-          `self-join identity file could not be read: ${p}. Fix its permissions, or restore your ` +
+          `self-join identity file could not be read: ${selfJoinKeyFileShown(p)}. Fix its permissions, or restore your ` +
             'backup of it.',
           'path',
         );
@@ -2010,7 +2164,7 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
       // real identity is in danger. Same words as the join path, which already refuses it.
       if (secretHex.trim() === '')
         throw new SaihmConfigError(
-          `the self-join identity file holds no secret: ${p}. Restore your backup of it, or delete ` +
+          `the self-join identity file holds no secret: ${selfJoinKeyFileShown(p)}. Restore your backup of it, or delete ` +
             'it and join again to mint a new identity - which starts an EMPTY memory, so restore ' +
             'first if you have a backup.',
           'path',
@@ -2037,7 +2191,7 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
     // it covered an empty VARIABLE, which it never did - only a zero-byte FILE.
     if (secretConfigured && secretFile !== undefined)
       throw new SaihmConfigError(
-        `SAIHM_MASTER_SECRET_FILE is set but holds no secret: ${secretFile}. Restore the key into ` +
+        `SAIHM_MASTER_SECRET_FILE is set but holds no secret: ${displayableKeyPath(secretFile) ?? 'the file it names (its path has the shape of a key, so it is not shown)'}. Restore the key into ` +
           'it, or point the variable at the file that holds it.',
         'path',
       );
@@ -2100,9 +2254,17 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
     : process.env.SAIHM_MASTER_SECRET_HEX
       ? { label: 'SAIHM_MASTER_SECRET_HEX', kind: 'env', defaultKey: false }
       : { label: `the self-join identity file ${selfJoinIdentity}`, kind: 'path', defaultKey: true };
+  // A path label is shown as every message that names a key file shows one: a key-shaped path is named by its folder,
+  // or by the setting that holds it, and not printed. `source` keeps the full label; its one reader withholds it too.
+  const shownLabel =
+    secretSource.kind !== 'path' || displayableKeyPath(secretFile || selfJoinIdentity) !== null
+      ? secretSource.label
+      : secretSource.defaultKey
+        ? `the self-join identity file under ${identityHomeName()}`
+        : 'the file SAIHM_MASTER_SECRET_FILE names';
   const badSecret = (why: string): Error =>
     secretSource.kind === 'path'
-      ? new SaihmConfigError(`${secretSource.label} ${why}.`, 'path')
+      ? new SaihmConfigError(`${shownLabel} ${why}.`, 'path')
       : new Error(`${secretSource.label} ${why}.`);
   let master: Uint8Array;
   try {
@@ -3743,6 +3905,14 @@ export class SaihmProClient {
         } catch {
           /* non-JSON error body — leave code undefined */
         }
+        // A LIMIT WITH NO BODY - the edge's own, which sends only `retry-after` - is named for what it is, with the
+        // wait. It read as an `[unknown]` error with no way forward. A 429 that carries a code keeps it.
+        if (res.status === 429 && code === undefined)
+          throw new SaihmEndpointError(
+            429,
+            'rate_limited',
+            `SAIHM onboard failed: 429 ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}. Wait ${retryAfterWait(res)}, then try again.`,
+          );
         throw new SaihmEndpointError(
           res.status,
           code,
@@ -3783,7 +3953,20 @@ export class SaihmProClient {
       // it: a certificate this machine does not trust (a network that inspects TLS), a proxy setting
       // this transport cannot use, a proxy in the way, or none. A hosted agent environment that
       // blocks the endpoint's host is the common way to arrive at the last two - its egress proxy
-      // refuses the tunnel - so the allowlist leads there too.
+      // refuses the tunnel - so the allowlist leads there too. An answer that arrived but cannot be used comes first:
+      // the endpoint was reached, and that advice would send the reader to the wrong place.
+      if (transportReason(e) === 'REDIRECT_CROSS_ORIGIN')
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          'SAIHM onboard transport error: the SAIHM endpoint redirects to another host, which is not followed when signing in. Set SAIHM_ENDPOINT_URL to the address your operator gives.',
+        );
+      if (UNUSABLE_ANSWER.has(transportReason(e)))
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          'SAIHM onboard transport error: the SAIHM endpoint sent an answer this client cannot use. Check SAIHM_ENDPOINT_URL; if it is right, tell the operator.',
+        );
       if (untrustedCertificate(transportReason(e)))
         throw new SaihmEndpointError(
           0,
@@ -3989,6 +4172,13 @@ export class SaihmProClient {
         } catch {
           /* non-JSON error body — leave code undefined */
         }
+        // A limit with no body, as on the onboard path: named, with the wait.
+        if (res.status === 429 && code === undefined)
+          throw new SaihmEndpointError(
+            429,
+            'rate_limited',
+            `SAIHM endpoint ${method} failed: 429 ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}. Wait ${retryAfterWait(res)}, then try again.`,
+          );
         throw new SaihmEndpointError(
           res.status,
           code,
@@ -4016,6 +4206,16 @@ export class SaihmProClient {
         );
       }
       const reason = transportReason(e);
+      // The endpoint was reached, but its answer cannot be used: no network advice.
+      if (UNUSABLE_ANSWER.has(reason))
+        throw new SaihmEndpointError(
+          0,
+          'network',
+          `SAIHM endpoint ${method} got an answer it cannot use from ${safeEndpoint(this.endpoint)} (${reason}). ` +
+            (reason === 'REDIRECT_CROSS_ORIGIN'
+              ? 'It redirects to another host: set SAIHM_ENDPOINT_URL to the address your operator gives.'
+              : 'Check SAIHM_ENDPOINT_URL; if it is right, tell the operator.'),
+        );
       throw new SaihmEndpointError(
         0,
         'network',
@@ -4027,12 +4227,12 @@ export class SaihmProClient {
               ? 'Only an http proxy URL is supported: fix the variable named above, or add this host to NO_PROXY.'
               : proxyApplies(this.endpoint)
                 ? proxyVariableInUse() === 'https_proxy'
-                  ? 'Via the proxy in https_proxy: if hosted, allow this host in its network settings; otherwise ' +
-                    'check the proxy and NO_PROXY.'
-                  : 'Via the proxy in HTTPS_PROXY: if hosted, allow this host in its network settings; otherwise ' +
-                    'check the proxy and NO_PROXY.'
-                : 'If hosted, allow that host in its network settings; if traffic must go through a proxy, set ' +
-                  'HTTPS_PROXY and check NO_PROXY.'),
+                  ? 'Via https_proxy: if hosted, allow this host in its network settings; else check the proxy and ' +
+                    'NO_PROXY.'
+                  : 'Via HTTPS_PROXY: if hosted, allow this host in its network settings; else check the proxy and ' +
+                    'NO_PROXY.'
+                : 'If hosted, allow that host in its network settings; to use a proxy, set HTTPS_PROXY and check ' +
+                  'NO_PROXY.'),
       );
     } finally {
       clearTimeout(timer);

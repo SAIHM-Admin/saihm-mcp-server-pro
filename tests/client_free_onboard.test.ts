@@ -77,6 +77,12 @@ interface FreeMockOpts {
    * one layer up, where the reason phrase rides the status line rather than the body.
    */
   hostileStartChars?: number;
+  /**
+   * /start answers 429 with NO body - the shape of the service edge's own limit - a reason phrase of this many chars
+   * and `retry-after` set to `start429RetryAfter`. The client names it `rate_limited`, with the wait.
+   */
+  hostileStart429Chars?: number;
+  start429RetryAfter?: string;
 }
 
 const BOGUS_AGENT_ID = 'de'.repeat(32);
@@ -164,6 +170,13 @@ async function withFreeMock(
         if (opts.hostileStartChars) {
           const n = opts.hostileStartChars;
           return send(400, { error: 'E'.repeat(n) }, 'S'.repeat(n));
+        }
+        if (opts.hostileStart429Chars) {
+          res.writeHead(429, 'S'.repeat(opts.hostileStart429Chars), {
+            'content-length': '0',
+            ...(opts.start429RetryAfter !== undefined ? { 'retry-after': opts.start429RetryAfter } : {}),
+          });
+          return res.end();
         }
         const full: Record<string, unknown> = {
           flowId: 'flow-' + starts,
@@ -1180,6 +1193,9 @@ describe('FF18: no endpoint-chosen value reaches a message the JOIN STATE will r
         // Interpolates `this.requestTimeoutMs` — the client's OWN configured timeout. Nothing the
         // endpoint chose reaches it, so there is nothing here for a fence to cut.
         'SAIHM onboard timed out after ',
+        // A 429 with no body: the reason phrase, endpoint-chosen and sliced at `MAX_ERROR_CODE_CHARS` like the mint
+        // above, and the wait, which is 1 to 5 digits or a fixed "a minute". Driven below at two magnitudes.
+        'SAIHM onboard failed: 429 ',
         // `readBodyCapped`'s over-budget throw, and the entry this list gained when the walk stopped
         // following methods alone. It interpolates its `method` argument and its `max` argument. On
         // the join path the only caller is `onboardFetch`, which passes a string LITERAL for the
@@ -1194,6 +1210,34 @@ describe('FF18: no endpoint-chosen value reaches a message the JOIN STATE will r
         'mint and driven here; if it is local, say so in this list.',
     );
   });
+});
+
+describe('a body-less 429 on the join path is rate_limited, its reason phrase bounded and its wait parsed', () => {
+  for (const [n, retryAfter, wait] of [[256, '10', '10 seconds'], [16_384, '9'.repeat(64), 'a minute']] as const) {
+    it(`a ${n}-char reason phrase, retry-after of ${retryAfter.length} digits`, async () => {
+      let err: unknown;
+      await withFreeMock(
+        async (m) => {
+          const c = new SaihmProClient(m.base + '/mcp', undefined, masterOf(33), { tier: 'FREE' });
+          await assert.rejects(
+            () => c.acquireFreeEntitlement({ pollIntervalMs: 5, onPrompt: () => {} }),
+            (e: unknown) => {
+              err = e;
+              return e instanceof SaihmEndpointError;
+            },
+          );
+        },
+        { hostileStart429Chars: n, start429RetryAfter: retryAfter },
+      );
+      const e = err as SaihmEndpointError;
+      assert.equal(e.status, 429);
+      assert.equal(e.code, 'rate_limited');
+      assert.ok(e.message.includes('S'.repeat(MAX_ERROR_CODE_CHARS)), 'the reason phrase reached the message');
+      assert.ok(!e.message.includes('S'.repeat(MAX_ERROR_CODE_CHARS + 1)), 'the reason phrase passed its slice');
+      assert.ok(e.message.endsWith(`. Wait ${wait}, then try again.`), e.message.slice(-80));
+      assert.ok(!e.message.includes('9'.repeat(6)), 'a retry-after that is not 1 to 5 digits is not echoed');
+    });
+  }
 });
 
 describe('self-onboarding names the tier before the payment method (R7 L2)', () => {

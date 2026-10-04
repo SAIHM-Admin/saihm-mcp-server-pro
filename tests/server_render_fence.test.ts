@@ -297,7 +297,8 @@ const fenceOf = (n: ts.Node): 'safeField' | 'safePathField' | null => {
 // a fence has to be written down rather than trusted. Adding the name is what makes the sweep below
 // enumerate it; without it a new residual channel would have shipped with the suite green, which is
 // the hand-kept-list failure this file's opening indicts one field over from where it was caught.
-const SEEDS = ['keyPath', 'secretFile', 'savedTo', 'localCacheResidual', 'feedResidual', 'SAIHM_HOME'];
+// `saihmHomeSetting` is SAIHM_HOME's one reader now: seeded so the sweep follows the value through it, not around it.
+const SEEDS = ['keyPath', 'secretFile', 'savedTo', 'localCacheResidual', 'feedResidual', 'SAIHM_HOME', 'saihmHomeSetting'];
 const foldString = (n: ts.Node): string | null => {
   if (ts.isStringLiteralLike(n)) return n.text;
   if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n)) return foldString(n.expression);
@@ -410,6 +411,8 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // 0 - the identity token module renders nothing. It THROWS typed errors whose text is its own and
   // carries no value, and returns what it opened; its callers decide what reaches anyone.
   'identity-token.ts': 0,
+  // 0 - the tool argument mapping renders nothing: it maps values before validation and wraps a transport.
+  'tool-input.ts': 0,
   // 23 `ok(...)` + 8 `stdout.write` + 12 `stderr.write`. The third `stderr.write` is the `free-join`
   // failure guidance, written BEFORE the rethrow so it survives whatever `main` does with the
   // error, and to stderr so a caller piping stdout still sees it. The identity-token release added
@@ -463,9 +466,19 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'the free-join verb\'s tier answer, on stdout when the plan is ready and stderr when it is not, ' +
     'from `tierJoinAnswer`: fixed text whose one value is a plan name from the package\'s own list ' +
     'of known plans, `safeScalar`-fenced besides',
-  "server.ts:'saihm: not joined - ' + KEY_SHAPED_HOME_JOIN_REFUSAL + '\\n'":
-    'the free-join refusal for a SAIHM_HOME with the shape of a key: a fixed prefix and a fixed ' +
-    'constant. The refusal exists so that the value is never printed, and it is not',
+  "server.ts:'saihm: not joined - ' + keyShapedHomeRefusal('join') + '\\n'":
+    'the free-join refusal for an identity folder with the shape of a key: a fixed prefix and ' +
+    '`keyShapedHomeRefusal`, which returns one of two fixed sentences chosen by whether SAIHM_HOME is set. ' +
+    'The refusal exists so that the value is never printed, and it is not',
+  "server.ts:'saihm: not exported - ' + keyShapedHomeRefusal('export') + ":
+    'the export-identity refusal for an identity folder with the shape of a key: a fixed prefix and one ' +
+    'of the two fixed sentences of `keyShapedHomeRefusal`. It names the variable, never its value',
+  "server.ts:keyShapedHomeRefusal('join')":
+    "the saihm_join tool's refusal for an identity folder with the shape of a key: one of two fixed " +
+    'sentences, chosen by whether SAIHM_HOME is set. It names the variable, never its value',
+  'server.ts:identityHomeName()':
+    'the identity folder as an export message names it: the literal `SAIHM_HOME` when that variable is ' +
+    'set, otherwise the literal `~/.saihm` - a name we wrote, never a value anyone set',
   "server.ts:'saihm: not joined - ' + tierRefusal + '\\n'":
     'the free-join refusal to start a FREE identity under a paid SAIHM_TIER: a fixed prefix and ' +
     '`mintTierRefusal()`, which returns one of two fixed sentences. It names the variable, never its value',
@@ -1273,6 +1286,8 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       TAG_BYTES: 16, KEY_BYTES: 32, KDF_N: 32768, KDF_R: 8, KDF_P: 1, KDF_MAXMEM_BYTES: 67108864,
       MAX_TOKEN_CHARS: 4096,
     },
+    // The tool argument mapping declares no bound: it reads blankness, not size.
+    'tool-input.ts': {},
     // Budgets, but not exports: `server.ts` exports nothing at all and calls `main()` at module
     // scope, so importing it to read them off would start a server. They are derived from its SOURCE
     // instead, below. Listed here so every module is pinned in one place.
@@ -2132,6 +2147,8 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     'index.ts': {},
     // {} - the identity token module calls no fence: its errors carry no value to fence, by design.
     'identity-token.ts': {},
+    // {} - the tool argument mapping calls no fence: it returns values and renders nothing.
+    'tool-input.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
   // module under `src/` with a wrong-budget call site stayed green, and `index.ts` was missing
@@ -2791,7 +2808,7 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // `erasure-feed.ts: 0` - it reaches no `persist()`. It writes a DIFFERENT artifact through its
     // own `node:fs` calls, censused in `FS_WRITES` above; there is nothing here for a wrapper to
     // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
-    { 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0 },
+    { 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0, 'tool-input.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -2897,7 +2914,7 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // `feed-state-file.ts: 1` - the feed state is replaced whole the same way, and that arm unlinks its own temporary
     // file when the rename fails. `file-lock.ts: 0` - the lock is created and removed, never renamed.
     // `identity-token.ts: 0` - it writes no file at all; the export verb in `server.ts` writes once, with `wx`, no rename.
-    { 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1 },
+    { 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1, 'tool-input.ts': 0 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
 });
@@ -3725,7 +3742,13 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // TWO: the env read into a local, and the NAME in boot's refusal of a state directory with the shape of a
       // secret - `['SAIHM_HOME', 'SAIHM_STATE_DIR'] as const`, the list that refusal reads and names. It names the
       // variable, never its value.
-      SAIHM_HOME: 2,
+      // THREE, after one reader took every test of whether it is set: `saihmHomeSetting` reads it once, blank counting
+      // as unset; `identityHomeName` returns its NAME as a literal; and the boot refusal's list names it. A message names
+      // the folder in use; the value is never read into text.
+      SAIHM_HOME: 3,
+      // FOUR: the helper's declaration and its three readers - defaultIdentityPath, identityHomeName and
+      // keyShapedHomeRefusal. The first builds the key path; the other two only test whether it is set.
+      saihmHomeSetting: 4,
       // Enumerated by PARENT KIND from the tree, because describing them from memory got it wrong:
       // the previous note said "four fs arguments" against three, and omitted the shorthand property
       // in `return { created, keyPath }` entirely - two errors that cancelled to the right total.
@@ -3775,7 +3798,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // documents for the throw site.
       // THIRTEEN: the unreadable-file arm first asks whether the value is shaped like a key, a
       // passphrase or a token (`displayableKeyPath(secretFile)`) so that one is never echoed.
-      secretFile: 13,
+      // SEVENTEEN: the same question at three more sites - the set-but-empty message, the group/world-readable
+      // advisory, and `badSecret`'s label (`secretFile || selfJoinIdentity`) - so a path the refusal blocks is
+      // never printed by them either; and the advisory's once-per-file set takes the value as its key (`has`,
+      // `add`). The advisory's fence now renders `shown`, the value that question let through.
+      secretFile: 17,
     },
     'erasure-feed.ts': {
       // TWO occurrences of the NAME, and not one occurrence of a value. The first is the read
@@ -3786,7 +3813,8 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // site rather than here. Not fenced in place because this module imports no fence by design:
       // it is a leaf that throws, and fencing at the throw would fence the same value twice, on the
       // narrow message budget the render site is deliberately not using.
-      SAIHM_HOME: 2,
+      // THREE since a blank SAIHM_HOME counts as unset here as everywhere: the test reads it, then takes it.
+      SAIHM_HOME: 3,
     },
     // {} - the share events feed holds no caller-chosen value: it parses operator answers into a map
     // that its caller returns as structured data, and renders nothing itself.
@@ -3801,14 +3829,16 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'render_fence.ts': {},
     // {} - the identity token module is handed its two values and reads no caller-chosen name.
     'identity-token.ts': {},
+    // {} - the tool argument mapping reads no variable.
+    'tool-input.ts': {},
     'server.ts': {
       // An env read into a local, the same shape as the `client.ts` allowance above. It is here
       // because `persistCheckoutUrl` now honours `SAIHM_HOME` as a fallback for `SAIHM_STATE_DIR`:
       // two names for ONE directory, both defaulting to `~/.saihm`, so relocating `SAIHM_HOME` left
       // this file written under the old path with no declared variable to redirect it.
-      // TWO since a failed join says where this machine's key is when its path is withheld: a truthiness test of
-      // `process.env.SAIHM_HOME` picks one of two fixed sentences - under SAIHM_HOME, or in ~/.saihm.
-      SAIHM_HOME: 2,
+      // NONE read directly any more. THREE through the helper: its import, the failed join's sentence about where the
+      // key is (one of two fixed sentences, under SAIHM_HOME or in ~/.saihm), and the checkout file's folder.
+      saihmHomeSetting: 3,
       localCacheResidual: 1, // truthiness selecting whether the residual line renders at all
       feedResidual: 1, // the same, for the second residual line
       savedTo: 2, // parameter declaration, and the truthiness guarding its (fenced) render
@@ -3831,6 +3861,8 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // SEVEN before the inline-secret fix, which added three `=== null` branches; then NINE, when
       // routing both join verbs through `identityKeyFile()` removed the `identity?.keyPath` reads
       // and the local that held them. The remaining nine are all in the join-state plumbing.
+      // THIRTEEN for a while (a key this process created stayed "created" for a later join of it); NINE again since only a
+      // key THIS join created counts as created.
       keyPath: 9,
     },
   };
@@ -3919,7 +3951,11 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // cap orders entries (naming `status`, `copiesInvalidBefore` and `changedAt`), the state file is written from the
   // entries and the seen ids, and the seen-id bound drops the oldest id (a validated hex id, used only as a key). What
   // a caller receives is built field by field.
-  const ANON: Record<string, number> = { 'client.ts': 6, 'share-events.ts': 4 };
+  // tool-input.ts: 1 - `isBlankInput` asks whether EVERY field of a tool argument object is blank, so that a host's
+  // object of empty strings reads as the field left out. It returns a boolean; no value it reads reaches a renderer.
+  // client.ts: 7 - a redirect to another origin drops the credentials by reading the request's OWN headers whole: the
+  // client built them, nothing from outside is in them, and it passes them on minus the credential, to no renderer.
+  const ANON: Record<string, number> = { 'client.ts': 7, 'share-events.ts': 4, 'tool-input.ts': 1 };
   // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
   // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
   // measured green, which is this round's whole lesson landing on the fix for this round's finding.
@@ -4977,7 +5013,12 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // (+1) and in `export-identity`'s refusal of a tier slip (+1). The rest moved by a rename to `shownPath`.
   // +1, measured by listing the spans: `export-identity` names its file by its own name where the path is withheld,
   // `safePathField(basename(file), ...)` - one template span, in no `+` chain, so the pin moves by one.
-  const EXAMINED_SPANS_PIN = 95;
+  // +6, measured by listing the spans: every message naming a key file now asks `displayableKeyPath` first. Three in the
+  // template arm (`selfJoinKeyFileShown(keyPath)`, the bound `shown`, `displayableKeyPath(secretFile) ?? ...`) and
+  // three in the `+`-chain arm (the first and third again, and the unreadable-file sentence chosen on `shown`).
+  // `secretSource.label` became `shownLabel` and the advisory's `safePathField(secretFile, ...)` became
+  // `safePathField(shown, ...)`: renames.
+  const EXAMINED_SPANS_PIN = 101;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

@@ -24,13 +24,94 @@ else can read your memories. Not the storage, not SAIHM.
 npx -y @saihm/mcp-server-pro free-join
 ```
 
-That's it. No card, no account to fill in, nothing to invent. It sets up your
-identity on this machine and prints a one-time sign-in to confirm you're a real
-person. Open the link, enter the short code, approve.
+No card and no wallet. It does need you once, with a browser and a GitHub account, for
+a one-time sign-in that confirms you're a real person:
 
-Then point your AI tool at it. This works in Claude Desktop, Claude Code, Cursor,
-Cline, and any other host that runs local (stdio) MCP servers — add the `"saihm"` entry inside your
-existing `mcpServers` section:
+1. The command creates your key on this machine and prints a link and a short code.
+2. Open the link in a browser, sign in to GitHub, enter the code and approve.
+3. The command then finishes by itself and prints where your key is saved.
+
+No GitHub account? Start at <https://saihm.net/free> instead. It signs you in with
+Google, in the browser, and then shows a configuration that holds your new key. Save
+the key to a file only you can read and set `SAIHM_MASTER_SECRET_FILE` to that file's
+path in your client's block below. Never put the key itself in a settings file, least of
+all one in a project or workspace, which can be committed with a repository. Do not ask
+your assistant to join: that makes a different key, and its approval needs GitHub.
+
+Then [add SAIHM to your AI client](#add-saihm-to-your-ai-client), restart it, and say
+**"Recall my SAIHM memories."** You're running.
+
+**Prefer not to touch a terminal?** Add SAIHM to your client first, then say **"Join
+SAIHM"** to your assistant. It runs the same setup and gives you the same link and code
+to approve.
+
+**If a join stops before you approve it.** A join, from the command or from *"Join
+SAIHM"*, writes your key when it starts, before you approve. If the join stops while it
+waits (the terminal closes, or the session ends), the key stays. Join again on the same
+machine and follow its steps: it uses that same key, so it is the same identity, and it
+writes no second key. While a join started by your assistant waits for approval, the
+memory tools answer with its steps (an identity that was already active keeps working). To stop a join you don't want, stop the command
+(Ctrl+C) or end the session, and don't enter the code; it expires after the time the
+join shows. Keep the key file all the same: a later join on this machine uses it.
+
+## Add SAIHM to your AI client
+
+SAIHM runs as a local (stdio) MCP server that your client starts with `npx`, so the
+machine needs Node.js 20 or later. The package is on npm as
+[`@saihm/mcp-server-pro`](https://www.npmjs.com/package/@saihm/mcp-server-pro), and in
+the official [MCP Registry](https://registry.modelcontextprotocol.io) as
+`io.github.SAIHM-Admin/saihm-mcp-server-pro`.
+
+Each client below is marked *documented*: its steps follow that provider's own
+documentation as of October 2026, and SAIHM has not tested them end to end. See
+[Which clients are checked](#which-clients-are-checked).
+
+Before you paste:
+
+- **Valid JSON.** In a JSON settings file, a trailing comma, or a non-breaking space
+  (U+00A0) copied from an email or a web page, makes the whole file invalid, and every
+  server in it disappears.
+  Paste through a plain-text editor, or retype the indentation.
+- **Start-up time.** The first start downloads the package, which takes longer than
+  some clients wait by default. Where a client needs a longer limit, its block below sets
+  one: keep it. A server that misses the limit can be skipped **silently**: the tools
+  never appear, and nothing in the chat says why.
+
+> **Host note (2026-09-23).** From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which serves the identical service until 2026-12-31 and is then discontinued: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly. Every client block below sets it.
+
+### Claude Code (Anthropic)
+
+*Documented.* One command adds SAIHM for all your projects:
+
+```sh
+claude mcp add --env SAIHM_ENDPOINT_URL=https://saihm.net/mcp --transport stdio --scope user saihm -- npx -y @saihm/mcp-server-pro
+```
+
+For one repository only, leave `--scope` out: the entry then applies to the project you
+run it in, for you alone. `--scope project` writes it to the repository's `.mcp.json`
+instead, shared with everyone who uses the repository. If the tools are missing after the first start, give the server
+longer to start: `MCP_TIMEOUT=60000 claude` (milliseconds).
+
+**Check the setup.** `claude mcp list` shows whether each server connected, and says so
+when a config file is not valid JSON. If the broken file is `~/.claude.json`, Claude Code
+may replace it with a fresh one, without your servers (`claude mcp list` does; an
+interactive session asks first), and keep the original under
+`~/.claude/backups/`: fix that copy and put it back. To check a file yourself without printing it, run
+`python3 -m json.tool <file> > /dev/null && echo valid` on it (on Windows, in Command Prompt: `py -m json.tool <file> > NUL && echo valid`, writing `"%USERPROFILE%\.claude.json"` for `~/.claude.json`; `~/.claude.json` for the
+command above, or a repository's `.mcp.json`): it prints `valid`, or the line and column of
+the first error. Never print a config file into a chat or an agent's
+session: it can hold other servers' keys. A config copied from an email or a web page
+can carry non-breaking spaces (U+00A0) in its indentation, and JSON rejects them.
+
+Claude Code on the web (cloud sessions): see
+[Hosted agent environments](#hosted-agent-environments).
+
+### Claude Desktop (Anthropic)
+
+*Documented.* In Claude Desktop, open **Settings > Developer > Edit Config**. It opens
+`claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows:
+`%APPDATA%\Claude\`). Add the `"saihm"` entry inside `mcpServers`, then quit and reopen
+Claude Desktop:
 
 ```json
 {
@@ -38,31 +119,171 @@ existing `mcpServers` section:
     "saihm": {
       "command": "npx",
       "args": ["-y", "@saihm/mcp-server-pro"],
-      "env": {
-        "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp"
-      },
+      "env": { "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp" }
+    }
+  }
+}
+```
+
+This starts the server with the Node.js installed on your machine, so install it first.
+If the server does not connect, its log is `mcp-server-saihm.log` in
+`~/Library/Logs/Claude` (macOS) or `%APPDATA%\Claude\logs` (Windows).
+
+### Codex CLI (OpenAI)
+
+*Documented.* Add this to `~/.codex/config.toml`, or to a project's `.codex/config.toml`:
+
+```toml
+[mcp_servers.saihm]
+command = "npx"
+args = ["-y", "@saihm/mcp-server-pro"]
+env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp" }
+startup_timeout_sec = 60
+```
+
+Codex waits 10 seconds for a server to start unless `startup_timeout_sec` says
+otherwise; a server still starting may miss the first message's tools and appear from the
+next one. A project's `.codex/config.toml` is read only once you trust the project. It passes the server only a few basic variables (such as `HOME` and `PATH`);
+to pass another from your shell, such as `HTTPS_PROXY`, name it in
+`env_vars = ["HTTPS_PROXY"]`. Check with `codex mcp list`, or `/mcp` inside Codex.
+
+### OpenAI Agents SDK (Python)
+
+*Documented.*
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.mcp import MCPServerStdio
+
+async def main():
+    async with MCPServerStdio(
+        name="saihm",
+        params={
+            "command": "npx",
+            "args": ["-y", "@saihm/mcp-server-pro"],
+            "env": {"SAIHM_ENDPOINT_URL": "https://saihm.net/mcp"},
+        },
+        client_session_timeout_seconds=60,
+    ) as saihm:
+        agent = Agent(name="Assistant", mcp_servers=[saihm])
+        result = await Runner.run(agent, "Recall my SAIHM memories.")
+        print(result.final_output)
+
+asyncio.run(main())
+```
+
+The SDK waits 5 seconds for each server reply by default, too short for the first `npx`
+download, hence `client_session_timeout_seconds=60`. The server gets only a few basic
+variables (such as `HOME` and `PATH`) plus what you put in `env`, so set any other
+`SAIHM_*` setting there, and `HTTPS_PROXY` or `NODE_EXTRA_CA_CERTS` if your network needs
+them. Pass a secret from the environment
+(`os.environ["SAIHM_IDENTITY_PASSPHRASE"]`), never as a literal in your code.
+
+### Gemini CLI (Google)
+
+*Documented.* Add this to `~/.gemini/settings.json` (all projects) or
+`.gemini/settings.json` (one project):
+
+```json
+{
+  "mcpServers": {
+    "saihm": {
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": { "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp" }
+    }
+  }
+}
+```
+
+Or install the Gemini CLI extension, which carries the same entry:
+`gemini extensions install https://github.com/SAIHM-Admin/saihm-mcp-server-pro`.
+
+No `timeout` is needed: Gemini CLI waits up to 10 minutes by default. If you set one, it
+is in milliseconds, so the `"timeout": 60` other clients use would mean 60 ms here. Gemini
+CLI also withholds inherited variables that look sensitive: names containing words such
+as `SECRET`, `KEY`, `TOKEN`, `AUTH`, `PASSWORD`, `CREDENTIAL`, `CERT` or `PRIVATE`, and
+values such as a URL with a user name and password. If the server needs one, set it in
+`env`: write a path itself (`SAIHM_MASTER_SECRET_FILE`, `NODE_EXTRA_CA_CERTS`), and give a
+value that holds a password, such as a proxy URL with one, as a reference to the name
+your shell sets: `"HTTPS_PROXY": "$HTTPS_PROXY"`, or `"$https_proxy"` if it sets only the
+lowercase one. Gemini CLI fills a reference from the environment it was
+started from, before it withholds anything, and a reference to a variable missing there
+comes out empty. If your version leaves a reference empty, write the value only in
+`~/.gemini/settings.json`, never in a project's `.gemini/settings.json`, which can be
+committed with its repository. Never write a key itself into a settings file. Run Gemini
+CLI in a folder you trust: in an untrusted folder it does not start local servers. Check with `gemini mcp list`, or `/mcp` inside Gemini CLI. The first
+`gemini mcp list` can show the server disconnected while `npx` is still downloading,
+because that check waits only a few seconds; run it again.
+
+### GitHub Copilot in VS Code (Microsoft)
+
+*Documented.* Add this to `.vscode/mcp.json` in a workspace, or to your user `mcp.json`
+(run **MCP: Open User Configuration**). VS Code's own format uses `servers`, not
+`mcpServers`:
+
+```json
+{
+  "servers": {
+    "saihm": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": { "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp" }
+    }
+  }
+}
+```
+
+Or add it to your user profile from a terminal (bash, zsh or Command Prompt):
+
+```sh
+code --add-mcp "{\"name\":\"saihm\",\"command\":\"npx\",\"args\":[\"-y\",\"@saihm/mcp-server-pro\"],\"env\":{\"SAIHM_ENDPOINT_URL\":\"https://saihm.net/mcp\"}}"
+```
+
+**MCP: List Servers** shows the server, and its **Show Output** action shows the
+server's log. For the GitHub Copilot cloud agent, see
+[Hosted agent environments](#hosted-agent-environments).
+
+### Other MCP clients
+
+*Documented for Cline; for other clients this is the generic MCP form.* For third-party
+clients such as Cline, Cursor or Windsurf: where the client runs local MCP servers from an
+`mcpServers` block in its settings file, add the `"saihm"` entry inside the existing
+`mcpServers` object rather than replacing it:
+
+```json
+{
+  "mcpServers": {
+    "saihm": {
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": { "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp" },
       "timeout": 60
     }
   }
 }
 ```
 
-> **Host note (2026-09-23).** From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which serves the identical service until 2026-12-31 and is then discontinued: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly.
+`timeout` is in seconds in Cline. Without it, the Cline CLI gives a server only a few
+seconds to start (the editor extension waits longer). If your client documents another unit for `timeout`, or none, follow its
+documentation.
 
-Restart the connection and say **"Recall my SAIHM memories."** You're running.
+- **Cline in the editor:** open the Cline panel, select the **MCP Servers** icon, then
+  **Configure > Configure MCP Servers**.
+- **Cline CLI:** the file is `~/.cline/data/settings/cline_mcp_settings.json`.
+  `cline mcp install` writes its entry in another shape (`"transport": { ... }`), with no
+  `timeout` and no `env`: add `"timeout": 60` beside `"transport"`, or use the entry
+  above.
 
-Two details in that config are load-bearing:
+### Which clients are checked
 
-- **Keep `timeout: 60`.** Some tools allow as little as 1.5 seconds for a server
-  to start, which isn't long enough for `npx` to fetch and launch a package. A
-  server that misses the deadline is skipped **silently** — the tools simply never
-  appear, and nothing in the chat says why.
-- **No trailing commas.** These files are strict JSON. A stray comma doesn't just
-  break this entry; it invalidates the whole file and every other tool you had
-  configured disappears with it.
-
-**Prefer not to touch a terminal?** Add the config above first, then say **"Join
-SAIHM"** to your assistant. It does the same setup for you.
+Before each release, the server is started from the configurations above in Claude
+Code and Gemini CLI, which must each report it connected, and in the OpenAI Agents SDK,
+which must list the SAIHM tools. That check covers start-up only: memory calls through
+each client are not part of it. The other clients, Codex CLI included, are documented
+only.
 
 ## Things to say
 
@@ -93,9 +314,15 @@ You don't call tools by name — you talk to your assistant. Some starters:
 
 Every tool is labelled for your AI tool to read, including which are read-only and
 which one destroys data — so hosts that ask "are you sure?" before destructive
-actions know when to ask. Two further tools, `saihm_governance_propose` and
-`saihm_governance_vote`, are registered for a roadmap feature and are not yet
-active.
+actions know when to ask.
+
+**The full tool list.** The server registers eight protocol tools: `saihm_remember`,
+`saihm_recall`, `saihm_forget`, `saihm_status`, `saihm_share`, `saihm_revoke_share`,
+`saihm_governance_propose` and `saihm_governance_vote`. The two governance tools are
+present but answer "governance unavailable" for now. It also registers `saihm_join`, the
+bootstrap tool that answers *"Join SAIHM"*: on by default, removed by
+`SAIHM_SELF_JOIN=0`. So a client lists nine tools by default, and eight with
+`SAIHM_SELF_JOIN=0`.
 
 **"Forget" really means forget.** The key to that specific memory is destroyed, so
 the stored copy becomes permanently unreadable — by you, by SAIHM, by anyone
@@ -166,7 +393,7 @@ October 2026 — none of these hosts has been tested end to end yet:
   trust: every session in it, on any repository, can read them. (Its API-credential
   setting does not help here: those are attached to outbound requests and never
   reach the server.) Choose *Custom* network access, add `saihm.net`, and check
-  *Also include default list of common package managers* so `npx` can reach npm.
+  *Also include default list of common package managers*, so `npx` can still reach npm.
   Then pass the values through the repository's `.mcp.json`:
 
   ```json
@@ -176,6 +403,7 @@ October 2026 — none of these hosts has been tested end to end yet:
         "command": "npx",
         "args": ["-y", "@saihm/mcp-server-pro"],
         "env": {
+          "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp",
           "SAIHM_IDENTITY": "${SAIHM_IDENTITY:-}",
           "SAIHM_IDENTITY_PASSPHRASE": "${SAIHM_IDENTITY_PASSPHRASE:-}",
           "SAIHM_TIER": "${SAIHM_TIER:-}",
@@ -198,10 +426,17 @@ October 2026 — none of these hosts has been tested end to end yet:
   takes precedence over `.mcp.json`. Project servers load in cloud sessions with a
   single repository. A committed `.mcp.json` adds the server for everyone who uses the
   repository; your identity stays in your environment's settings. Every command the
-  session runs can read these variables.
+  session runs can read these variables. If the `saihm` tools do not appear, check the
+  file as under [Claude Code](#claude-code-anthropic): `claude mcp list` in the session,
+  `python3 -m json.tool .mcp.json > /dev/null && echo valid` (never print the file), and no
+  non-breaking spaces (U+00A0) pasted into it.
+  `MCP_TIMEOUT=60000` in the environment variables gives the server longer to start.
 - **GitHub Copilot cloud agent** — store the values as Agents secrets (repository
   *Settings → Secrets and variables → Agents*) named `COPILOT_MCP_SAIHM_IDENTITY` and
-  `COPILOT_MCP_SAIHM_IDENTITY_PASSPHRASE`; Copilot exposes those to MCP servers only.
+  `COPILOT_MCP_SAIHM_IDENTITY_PASSPHRASE`; only Agents secrets with that prefix can be
+  passed to an MCP server, and GitHub documents them as available to MCP servers only, not
+  to the agent's own environment. The server still runs in that environment, beside every
+  command the agent runs: use this only in a repository whose code you trust.
   Map them in the repository's MCP configuration (*Settings → Copilot → MCP
   servers*):
 
@@ -214,6 +449,7 @@ October 2026 — none of these hosts has been tested end to end yet:
         "args": ["-y", "@saihm/mcp-server-pro"],
         "tools": ["saihm_recall", "saihm_remember", "saihm_status"],
         "env": {
+          "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp",
           "SAIHM_IDENTITY": "$COPILOT_MCP_SAIHM_IDENTITY",
           "SAIHM_IDENTITY_PASSPHRASE": "$COPILOT_MCP_SAIHM_IDENTITY_PASSPHRASE",
           "SAIHM_EPHEMERAL_HOME": "1"
@@ -230,17 +466,14 @@ October 2026 — none of these hosts has been tested end to end yet:
   reach review comments. Unless you want that, turn off the repository setting
   **Allow Copilot to use MCP tools when reviewing pull requests**; that also stops
   reviews calling the default GitHub and Playwright MCP servers.
-- **Cursor cloud agents** — add the server as a personal MCP server for your cloud
-  agents (team servers are shared, and configured by team admins) and enter
-  both values, plus `SAIHM_EPHEMERAL_HOME=1`, in its environment fields. Cursor
-  stores them encrypted and cannot show them again, and the agent can read a local
-  server's environment. If your network setting is an allowlist, add `saihm.net` and
-  `registry.npmjs.org`.
-- **Elsewhere** — this should work on any host that runs local MCP servers, lets the
-  server read both variables, and lets it reach `saihm.net`; add
-  `SAIHM_EPHEMERAL_HOME=1` there if its home directory does not persist. Not verified
-  on other hosts. Hosts that only connect to remote MCP servers cannot run this
-  package.
+- **Elsewhere, including other clients' cloud agents** — this should work on any host
+  that runs local MCP servers, lets the server read both variables, and lets it reach
+  `saihm.net` (and `registry.npmjs.org`, for `npx`). Put the two values in the host's
+  own secrets or environment settings, and add `SAIHM_EPHEMERAL_HOME=1` there if its home
+  directory does not persist. Use settings scoped to you alone, never ones shared with a
+  team, in an environment only you use and for repositories you trust: the agent, and
+  every command it runs, may be able to read them. Not verified on other hosts. Hosts
+  that only connect to remote MCP servers cannot run this package.
 
 Where the home directory is temporary, the join refuses to create a key — where it
 can tell: in a session a host marks as hosted or CI (`CLAUDE_CODE_REMOTE`,
@@ -296,11 +529,12 @@ accepts.
 
 | What you see | Usual cause |
 |---|---|
-| No SAIHM tools appear, and no error anywhere | `timeout` too low — see the config above |
-| Every other tool vanished too | A trailing comma broke the settings file |
+| No SAIHM tools appear, and no error anywhere | The client stopped waiting before `npx` finished its first download: keep the start-up setting in [your client's block](#add-saihm-to-your-ai-client). Then check the file is valid JSON |
+| Every other tool vanished too | The settings file is no longer valid JSON: a trailing comma, or non-breaking spaces (U+00A0) from a copy and paste. Claude Code may replace a broken `~/.claude.json` with a fresh one and keep the original under `~/.claude/backups/`: fix that copy and put it back |
+| The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve; then say *"Join SAIHM"* again |
 | Tools appear but every call fails | `SAIHM_ENDPOINT_URL` unreachable |
 | Every call fails behind a proxy | In a hosted environment, allow the endpoint's host in its network settings; otherwise check `HTTPS_PROXY` (an `http://` URL) and `NO_PROXY`. A network that inspects TLS needs its CA certificate, from its administrator, in a file named by `NODE_EXTRA_CA_CERTS` |
-| "no identity" | Setup hasn't run on this machine yet |
+| "No SAIHM identity is configured" | Self-join is off (`SAIHM_SELF_JOIN=0`) and no identity is set here: set one, or remove that setting to join |
 | A hosted session keeps asking to join | The environment has no identity of yours — see *Hosted agent environments* |
 | A different memory than you expected | This machine has its own key rather than yours |
 | `status` mentions `seq-state` | A small local safeguard file couldn't be read or written. Your memories are unaffected — see `SAIHM_SEQ_STATE_PATH` below |
@@ -378,7 +612,7 @@ working defaults.
 | `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool — the one that answers *"Join SAIHM"*. **On by default**; set to `0` to remove it and expose only the canonical eight tools. |
 | `HTTPS_PROXY` / `NO_PROXY` | no | An HTTP proxy for reaching an `https://` endpoint, and the hosts to reach directly instead — `https_proxy`, or `HTTPS_PROXY` if that is unset (`HTTP_PROXY` is not used for https, as with npm and curl). Only an `http://` proxy URL is supported; any other fails with an error naming the setting rather than connecting directly. A network that inspects TLS presents its own certificate: get its CA certificate (PEM) from the network's administrator (never copy one from the connection itself), save it to a file and set `NODE_EXTRA_CA_CERTS` to that file's path in the server's environment; Node reads it at start. `NO_PROXY` (or `no_proxy`) takes `*`, host names, domain suffixes and ports. Loopback endpoints (`127.0.0.0/8`, `::1`, `localhost` and `*.localhost`) never use a proxy. Proxy credentials in the URL go to the proxy only and are never printed. |
 | `SAIHM_EPHEMERAL_HOME` | no | Says whether this environment discards its home directory when a session ends. Set it (e.g. `1`) where it does: the join then refuses to create a key that would be lost. `0` declares the home kept and overrides a host's own signal. Unset: detected where the host says so. |
-| `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600), where per-restart bookkeeping is kept, and where the erasure feed is written unless `SAIHM_ERASURE_FEED_DIR` overrides it. Defaults to `~/.saihm`. |
+| `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600), where per-restart bookkeeping is kept, and where the erasure feed is written unless `SAIHM_ERASURE_FEED_DIR` overrides it. Defaults to `~/.saihm`. Give a full path: a JSON config does not expand `~`, so `~/.saihm` there names a folder called `~` in the server's working directory. |
 | `SAIHM_AUTH_HEADER` | no | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended) — the client mints and refreshes its own token, so there is nothing to paste or re-paste. |
 | `SAIHM_TIER` | paid self-onboard; any self-onboard with `SAIHM_SELF_JOIN=0` | Plan label recorded in encrypted metadata (`FREE`, `PRO`, …). Defaults to `FREE` while self-join is on (the default); set it for a paid plan, and with self-join off for every plan, `FREE` included. An `export-identity` token carries its own, which a non-empty value here overrides. With self-join off and a static `SAIHM_AUTH_HEADER`, resolved via `status()`. |
 | `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. An identity token carries it; a non-empty value here overrides the token's. |

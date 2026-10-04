@@ -7,12 +7,12 @@
     "url": "https://github.com/SAIHM-Admin/saihm-mcp-server-pro",
     "source": "github"
   },
-  "version": "0.12.0",
+  "version": "0.12.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@saihm/mcp-server-pro",
-      "version": "0.12.0",
+      "version": "0.12.1",
       "transport": {
         "type": "stdio"
       },
@@ -26,13 +26,13 @@
         },
         {
           "name": "SAIHM_SELF_JOIN",
-          "description": "Self-join is ON by default: the saihm_join tool generates a non-custodial identity on this device and activates the free trial, so no master secret is needed. Set to '0' to suppress the tool.",
+          "description": "Self-join is ON by default: the saihm_join tool creates a non-custodial identity on this device and starts activating its free memory, which needs one browser sign-in; no master secret is needed. Set to '0' to suppress the tool.",
           "isRequired": false,
           "format": "string"
         },
         {
           "name": "SAIHM_MASTER_SECRET_FILE",
-          "description": "Path to a mode-600 file holding a 64+ hex-char master secret. Only needed if you opt out of self-join or are restoring an existing identity. Never transmitted.",
+          "description": "Path to a mode-600 file holding a 64+ hex-char master secret. Only needed if you opt out of self-join, are restoring an existing identity, or saved the key that saihm.net/free gives you. Never transmitted.",
           "isRequired": false,
           "format": "filepath",
           "isSecret": true

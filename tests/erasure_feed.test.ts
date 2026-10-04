@@ -24,7 +24,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ErasureFeedError,
@@ -80,6 +80,7 @@ test('the root follows the IDENTITY chain, and SAIHM_STATE_DIR is not on it', ()
       explicit,
     );
     assert.equal(resolveFeedRoot({ SAIHM_HOME: home, SAIHM_STATE_DIR: state }), home);
+    for (const blank of ['', '   ', '\t']) assert.equal(resolveFeedRoot({ SAIHM_HOME: blank }), join(homedir(), '.saihm'), JSON.stringify(blank));
     // THE DELIBERATE OMISSION, as a test rather than as a comment. `SAIHM_STATE_DIR` is set here and
     // set to a real directory, so a reader that honoured it would resolve to it and this would fail.
     // With neither identity variable set the root falls back to `~/.saihm`, which is what the

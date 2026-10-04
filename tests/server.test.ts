@@ -657,6 +657,21 @@ test("server.ts: `join` delivers a fragment-bearing checkout URL whole, printed 
   }
 });
 
+test("server.ts: a blank SAIHM_STATE_DIR and SAIHM_HOME count as unset: the checkout URL lands in ~/.saihm, not the working directory", async () => {
+  const home = mkdtempSync(pathJoin(tmpdir(), "saihm-join-blank-"));
+  const mock = startMock({ checkoutUrl: HOSTED_URL });
+  await new Promise<void>((r) => mock.server.listen(0, "127.0.0.1", () => r()));
+  try {
+    assertCheckoutDelivered(
+      await runCli(mock.base() + "/mcp", ["join"], { HOME: home, SAIHM_STATE_DIR: "  ", SAIHM_HOME: "   " }),
+      pathJoin(home, ".saihm"),
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
 test("server.ts: `upgrade` delivers a fragment-bearing checkout URL whole, printed and on disk", async () => {
   // The second call site, and the reason this file covers it: `requestUpgradeUrl` refuses a paid
   // identity, so reaching it needs SAIHM_TIER=FREE — which is exactly why a `join`-only test would

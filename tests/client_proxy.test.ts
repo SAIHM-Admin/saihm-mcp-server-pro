@@ -72,11 +72,24 @@ test('NO_PROXY: star, exact, suffix with or without a dot or star, and ports', (
   assert.equal(pick('https://saihm.net/mcp', { ...via, no_proxy: 'saihm.net', NO_PROXY: '' }), null, 'lowercase is read');
 });
 
+test('a bare host and port is still a proxy, with or without credentials; a blank https_proxy leaves HTTPS_PROXY in use', () => {
+  const url = 'https://saihm.net/mcp';
+  assert.equal(pick(url, { HTTPS_PROXY: 'localhost:3128' }), 'localhost:3128');
+  assert.equal(pick(url, { HTTPS_PROXY: '127.0.0.1:9' }), '127.0.0.1:9');
+  assert.equal(pick(url, { HTTPS_PROXY: 'user:pw@proxy.example:3128' }), 'proxy.example:3128');
+  assert.equal(pick(url, { HTTPS_PROXY: 'http://127.0.0.1:9' }), '127.0.0.1:9');
+  for (const blank of ['', ' ', '\t\n']) assert.equal(pick(url, { https_proxy: blank, HTTPS_PROXY: 'http://127.0.0.1:9' }), '127.0.0.1:9', JSON.stringify(blank));
+});
+
 test('an unusable proxy setting is a coded error naming the variable, never its value', () => {
   for (const [env, code] of [
     [{ HTTPS_PROXY: 'http://us:er:pw@[bad' }, 'HTTPS_PROXY_NOT_A_URL'],
     [{ https_proxy: 'socks5://user:s3cr3t@p:1080' }, 'https_proxy_NOT_AN_HTTP_PROXY'],
     [{ HTTPS_PROXY: 'https://user:s3cr3t@p:443' }, 'HTTPS_PROXY_NOT_AN_HTTP_PROXY'],
+    // A scheme with one slash is a typo for a URL, not a bare host named `http`.
+    [{ HTTPS_PROXY: 'http:/127.0.0.1:9' }, 'HTTPS_PROXY_NOT_A_URL'],
+    [{ https_proxy: 'https:/user:s3cr3t@p:443' }, 'https_proxy_NOT_A_URL'],
+    [{ HTTPS_PROXY: 'http:\\\\proxy.corp:8080' }, 'HTTPS_PROXY_NOT_A_URL'],
   ] as const) {
     let caught: unknown;
     try {
@@ -246,7 +259,7 @@ test('end to end: a refusing proxy is named by code, with no credentials in the 
   try {
     const out = await callThrough(dir, { HTTPS_PROXY: `http://user:s3cr3t@127.0.0.1:${r.proxyPort}`, NODE_EXTRA_CA_CERTS: r.ca });
     assert.match(out, /PROXY_CONNECT_403/);
-    assert.match(out, /Via the proxy in HTTPS_PROXY: if hosted, allow this host in its network settings; otherwise check the proxy and NO_PROXY\./);
+    assert.match(out, /Via HTTPS_PROXY: if hosted, allow this host in its network settings; else check the proxy and NO_PROXY\./);
     assert.ok(!out.includes('s3cr3t'));
     assert.equal(r.requests.length, 0);
   } finally {
@@ -482,7 +495,7 @@ test('end to end: the remedy follows the failure - an untrusted certificate, or 
     // An egress allowlist refuses the tunnel this way: the allowlist leads the remedy, on both paths.
     assert.match(onboard, /could not be reached through the proxy in HTTPS_PROXY\. In a hosted agent environment, allow its host \(saihm\.net by default\) in the network settings; else check the proxy and NO_PROXY\./, onboard);
     const call = await callThrough(dir, { HTTPS_PROXY: `http://127.0.0.1:${refusing.proxyPort}`, NODE_EXTRA_CA_CERTS: refusing.ca });
-    assert.match(call, /\(PROXY_CONNECT_403\)\. Via the proxy in HTTPS_PROXY: if hosted, allow this host in its network settings/, call);
+    assert.match(call, /\(PROXY_CONNECT_403\)\. Via HTTPS_PROXY: if hosted, allow this host in its network settings/, call);
   } finally {
     await refusing.close();
     rmSync(dir, { recursive: true, force: true });
@@ -919,7 +932,10 @@ test('a proxy that cannot be reached is named as the variable read: https_proxy 
     for (const env of [{ https_proxy: 'http://127.0.0.1:9' }, { https_proxy: 'http://127.0.0.1:9', HTTPS_PROXY: 'http://127.0.0.1:10' }]) {
       Object.assign(process.env, env);
       const lower = await both();
-      assert.match(lower.call, /\)\. Via the proxy in https_proxy: if hosted, allow this host in its network settings; otherwise check the proxy and NO_PROXY\.$/, lower.call);
+      assert.match(lower.call, /\)\. Via https_proxy: if hosted, allow this host in its network settings; else check the proxy and NO_PROXY\.$/, lower.call);
+      const lowerRemedy = lower.call.slice(lower.call.indexOf('). ') + 3);
+      const lowerWorst = `SAIHM endpoint saihm_governance_propose could not reach https://saihm.coti.global/mcp (ERR_SSL_OLD_SESSION_COMPRESSION_ALGORITHM_NOT_RETURNED). ${lowerRemedy}`;
+      assert.ok(lowerWorst.length <= 256, `${lowerWorst.length}: ${lowerWorst}`);
       assert.match(lower.onboard, /could not be reached through the proxy in https_proxy\. In a hosted agent environment, allow its host \(saihm\.net by default\) in the network settings; else check the proxy and NO_PROXY\./, lower.onboard);
       for (const m of [lower.call, lower.onboard]) assert.doesNotMatch(m, /HTTPS_PROXY/, m);
       for (const k of VARS) delete process.env[k];
@@ -927,7 +943,18 @@ test('a proxy that cannot be reached is named as the variable read: https_proxy 
     // Positive control: with only HTTPS_PROXY set, both name it.
     process.env.HTTPS_PROXY = 'http://127.0.0.1:9';
     const upper = await both();
-    assert.match(upper.call, /\)\. Via the proxy in HTTPS_PROXY: if hosted, allow this host in its network settings; otherwise check the proxy and NO_PROXY\.$/, upper.call);
+    assert.match(upper.call, /\)\. Via HTTPS_PROXY: if hosted, allow this host in its network settings; else check the proxy and NO_PROXY\.$/, upper.call);
+    const upperRemedy = upper.call.slice(upper.call.indexOf('). ') + 3);
+    const upperWorst = `SAIHM endpoint saihm_governance_propose could not reach https://saihm.coti.global/mcp (ERR_SSL_OLD_SESSION_COMPRESSION_ALGORITHM_NOT_RETURNED). ${upperRemedy}`;
+    assert.ok(upperWorst.length <= 256, `${upperWorst.length}: ${upperWorst}`);
+    // A blank https_proxy beside a set HTTPS_PROXY is no setting at all: HTTPS_PROXY is the one read, and named.
+    for (const blank of ['   ', '\t']) {
+      process.env.https_proxy = blank;
+      const named = await both();
+      assert.match(named.call, /\)\. Via HTTPS_PROXY: /, named.call);
+      assert.match(named.onboard, /could not be reached through the proxy in HTTPS_PROXY\./, named.onboard);
+    }
+    delete process.env.https_proxy;
     assert.match(upper.onboard, /could not be reached through the proxy in HTTPS_PROXY\./, upper.onboard);
     for (const m of [upper.call, upper.onboard]) assert.doesNotMatch(m, /https_proxy/, m);
   } finally {
@@ -941,6 +968,8 @@ test('a proxy that cannot be reached is named as the variable read: https_proxy 
 test('the remedy for an endpoint not reached directly fits the render budget at its worst', async () => {
   // Shortened in batch 7: at the longest code measured on this arm, the old default host and the longest method,
   // the old wording passed the budget and the cut took "(and check NO_PROXY)." (correctness R6 below-Low B2).
+  // Shortened again: OpenSSL names some failures with codes of up to 54 characters (ERR_SSL_OLD_SESSION_COMPRESSION_ALGORITHM_NOT_RETURNED), and the
+  // remedy must fit after the longest of them, on this arm and on both proxy arms.
   const saved: Record<string, string | undefined> = {};
   for (const k of VARS) {
     saved[k] = process.env[k];
@@ -952,9 +981,9 @@ test('the remedy for an endpoint not reached directly fits the render budget at 
       () => 'CALL_OK',
       (e: Error) => e.message,
     );
-    assert.match(call, /\(ECONNREFUSED\)\. If hosted, allow that host in its network settings; if traffic must go through a proxy, set HTTPS_PROXY and check NO_PROXY\.$/, call);
+    assert.match(call, /\(ECONNREFUSED\)\. If hosted, allow that host in its network settings; to use a proxy, set HTTPS_PROXY and check NO_PROXY\.$/, call);
     const remedy = call.slice(call.indexOf('). ') + 3);
-    const worst = `SAIHM endpoint saihm_governance_propose could not reach https://saihm.coti.global/mcp (ERR_TLS_CERT_ALTNAME_INVALID). ${remedy}`;
+    const worst = `SAIHM endpoint saihm_governance_propose could not reach https://saihm.coti.global/mcp (ERR_SSL_OLD_SESSION_COMPRESSION_ALGORITHM_NOT_RETURNED). ${remedy}`;
     assert.ok(worst.length <= 256, `${worst.length}: ${worst}`);
   } finally {
     for (const k of VARS) {

@@ -154,3 +154,33 @@ test('the info route: a non-success answer is tried again within seconds; a rout
     }
   }
 });
+
+test('a 429 on the events route: the feed waits what retry-after asks, and a wait of zero is not a hot loop', async () => {
+  for (const [retryAfter, label] of [['1', 'one second'], ['0', 'zero']] as const) {
+    let polls = 0;
+    const server: Server = createServer((req, res) => {
+      let buf = '';
+      req.on('data', (c) => (buf += c));
+      req.on('end', () => {
+        if (req.method === 'GET' && req.url === '/mcp/info') return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ events: CAPS }));
+        if (req.method === 'POST' && req.url === '/mcp/events') {
+          polls++;
+          return void res.writeHead(429, { 'content-type': 'application/json', 'retry-after': retryAfter }).end('{}');
+        }
+        res.writeHead(200, { 'content-type': 'application/json' }).end('[]');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const client = new SaihmProClient(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, 'Bearer t', new Uint8Array(32).fill(77), { tier: 'PRO' });
+    try {
+      client.startShareEvents();
+      await new Promise((r) => setTimeout(r, 3500));
+    } finally {
+      await client.stopShareEvents();
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+    // One second asked, plus jitter up to one more: a second poll within the window. Without the header the feed
+    // waits its ten-second default (one poll); with no floor, a zero wait polls as fast as answers come back.
+    assert.ok(polls >= 2 && polls <= 4, `retry-after ${label}: ${polls} polls in 3.5 s`);
+  }
+});

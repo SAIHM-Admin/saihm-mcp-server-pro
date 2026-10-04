@@ -130,6 +130,8 @@ export interface ShareEventsFeedOptions {
   readonly now?: () => number;
   readonly random?: () => number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** The shortest wait after a 429, a 503 or another refusal, whatever the endpoint asks for (default one second). */
+  readonly minWaitMs?: number;
   /** Called after any change to the map (for a host that surfaces resource updates). */
   readonly onChange?: () => void;
 }
@@ -304,6 +306,7 @@ export class ShareEventsFeed {
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  private readonly minWaitMs: number;
   private readonly onChange: (() => void) | undefined;
 
   private caps: EventsCapability | null = null;
@@ -336,6 +339,7 @@ export class ShareEventsFeed {
     this.now = opts.now ?? Date.now;
     this.random = opts.random ?? Math.random;
     this.sleep = opts.sleep ?? defaultSleep;
+    this.minWaitMs = opts.minWaitMs ?? 1_000;
     this.onChange = opts.onChange;
     const saved = this.store?.load();
     if (saved && saved.v === 1) {
@@ -494,7 +498,8 @@ export class ShareEventsFeed {
         const due = this.pendingReconcile || this.now() - this.lastReconcile >= DAY_MS;
         if (due && this.now() >= this.nextReconcileAt) await this.reconcile(signal);
         this.persist();
-        if (retryAfterMs !== undefined) await this.sleep(retryAfterMs, signal);
+        // A wait named in a 200 answer gets the same floor as one named in a refusal.
+        if (retryAfterMs !== undefined) await this.sleep(Math.max(this.minWaitMs, retryAfterMs), signal);
         continue;
       }
       if (answer.status === 400 && body.error === 'bad_cursor') { this.cursor = null; this.pendingReconcile = true; continue; }
@@ -512,7 +517,11 @@ export class ShareEventsFeed {
       }
       authBackoff = 1_000;
       // 429, 503 and anything else: wait what the operator asked for (or 10 s), plus jitter up to the same amount.
-      const base = retryAfterMs ?? (answer.retryAfterS !== undefined ? Math.min(answer.retryAfterS * 1000, DAY_MS) : 10_000);
+      // Never less than `minWaitMs`: a wait of zero, in the body or in `retry-after`, polled as fast as answers came back.
+      const base = Math.max(
+        this.minWaitMs,
+        retryAfterMs ?? (answer.retryAfterS !== undefined ? Math.min(answer.retryAfterS * 1000, DAY_MS) : 10_000),
+      );
       // The spacing is the same one the answered path respects, so a client that keeps being held back does not ask
       // for the listing every time.
       if ((this.warm || this.pendingReconcile) && base > HELD_POLL_BUDGET_MS && this.now() >= this.nextReconcileAt) {

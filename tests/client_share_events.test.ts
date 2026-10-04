@@ -52,6 +52,8 @@ function scripted(answers: PollAnswer[], listings: unknown[], opts: { caps?: unk
     advance: (ms: number) => { clock += ms; },
     make: (extra: Record<string, unknown> = {}) => new ShareEventsFeed({
       transport, now: () => clock, random: () => 0.5,
+      // The scripted waits test their own logic; the one-second floor is pinned in its own test.
+      minWaitMs: 1,
       // Yields to the event loop, so a spinning loop never starves the timers the tests wait on.
       sleep: async (ms, signal) => { sleeps.push(ms); await new Promise((r) => setImmediate(r)); if (!signal.aborted && answers.length === 0 && sleeps.length > 50) done(); },
       ...extra,
@@ -355,12 +357,64 @@ test('stop ends a poll in flight, and waits leave no listener behind', async () 
   const busy = new ShareEventsFeed({
     transport: { info: async () => CAPS, poll: async () => ({ status: 503, body: { retryAfterMs: 1 } }), listing: async () => null },
     random: () => 0,
+    minWaitMs: 1, // many short waits are what this measures; the floor is pinned on its own below
   });
   busy.start();
   while (n++ < 40) await new Promise((r) => setTimeout(r, 2));
   const signal = (busy as unknown as { abort: AbortController }).abort.signal;
   assert.ok(getEventListeners(signal, 'abort').length <= 1, `listeners: ${getEventListeners(signal, 'abort').length}`);
   await busy.stop();
+});
+
+test('a wait of zero or one millisecond, in the body or in retry-after, still waits at least one second', async () => {
+  for (const answer of [{ status: 503, body: { retryAfterMs: 0 } }, { status: 503, body: { retryAfterMs: 1 } }, { status: 429, body: {}, retryAfterS: 0 }] as PollAnswer[]) {
+    const sleeps: number[] = [];
+    let feed: ShareEventsFeed | undefined;
+    const enough = new Promise<void>((done) => {
+      feed = new ShareEventsFeed({
+        transport: { info: async () => CAPS, poll: async () => answer, listing: async () => null },
+        random: () => 0,
+        sleep: async () => {
+          await new Promise((r) => setImmediate(r));
+        },
+      });
+      const record = feed as unknown as { sleep: (ms: number, signal: AbortSignal) => Promise<void> };
+      const inner = record.sleep;
+      record.sleep = async (ms, signal) => {
+        sleeps.push(ms);
+        if (sleeps.length >= 3) done();
+        await inner(ms, signal);
+      };
+    });
+    feed!.start();
+    await enough;
+    await feed!.stop();
+    assert.ok(sleeps.length >= 3 && sleeps.every((ms) => ms >= 1000), `${JSON.stringify(answer)}: ${sleeps}`);
+  }
+});
+
+test('a wait named in a 200 answer gets the same one-second floor', async () => {
+  const sleeps: number[] = [];
+  let feed: ShareEventsFeed | undefined;
+  let n = 0;
+  const enough = new Promise<void>((done) => {
+    feed = new ShareEventsFeed({
+      transport: { info: async () => CAPS, poll: async () => ok([], { retryAfterMs: 1, gap: false }), listing: async () => null },
+      random: () => 0,
+      sleep: async () => { await new Promise((r) => setImmediate(r)); },
+    });
+    const record = feed as unknown as { sleep: (ms: number, signal: AbortSignal) => Promise<void> };
+    const inner = record.sleep;
+    record.sleep = async (ms, signal) => {
+      sleeps.push(ms);
+      if (++n >= 3) done();
+      await inner(ms, signal);
+    };
+  });
+  feed!.start();
+  await enough;
+  await feed!.stop();
+  assert.ok(sleeps.length >= 3 && sleeps.every((ms) => ms >= 1000), `${sleeps}`);
 });
 
 test('capabilityFrom bounds every limit and accepts only a path on the endpoint origin', () => {

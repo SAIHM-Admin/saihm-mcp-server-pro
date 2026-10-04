@@ -173,6 +173,47 @@ describe("SC12: a transport failure names the endpoint and the reason", () => {
     assert.equal(safeEndpoint("not a url"), "(unparseable endpoint URL)");
   });
 
+  it("safeEndpoint withholds a key, passphrase or token pasted into the URL: the host alone, or the variable", () => {
+    assert.equal(safeEndpoint("https://saihm.net/K7M2Q-9XWPT-4HNRC-8ZJ3V"), "https://saihm.net");
+    assert.equal(safeEndpoint("https://saihm.net/mcp/K7M2Q9-XRTBH4-WZD1NPVC"), "https://saihm.net");
+    assert.equal(safeEndpoint("https://saihm.net/" + "ab".repeat(32)), "https://saihm.net");
+    assert.equal(safeEndpoint("https://" + "ab".repeat(24) + ".example/mcp"), "SAIHM_ENDPOINT_URL");
+    assert.equal(safeEndpoint("https://saihm.net/mcp"), "https://saihm.net/mcp", "an ordinary path is named");
+    // A passphrase in another grouping or in lower case: no folder rule applies to an endpoint.
+    assert.equal(safeEndpoint("https://saihm.net/k7m2q9-xrtbh4-wzd1npvc"), "https://saihm.net");
+    assert.equal(safeEndpoint("https://saihm.net/K7M2QXRTBH4WZD1NPVCX"), "https://saihm.net");
+    // Plain words read as twenty symbols too, and are withheld rather than shown: a passphrase need not carry a digit.
+    for (const u of ["https://saihm-gateway-internal.corp.example/mcp", "https://something-random-words.trycloudflare.com/mcp"])
+      assert.equal(safeEndpoint(u), "SAIHM_ENDPOINT_URL", u);
+    assert.equal(safeEndpoint("https://mcp.example.com/v1/agent-memory-store-prod/mcp"), "https://mcp.example.com");
+    // A passphrase of letters only (one generated in about 1,800), regrouped, in either case.
+    for (const p of ["DMVC-KTBJ-SAHR-ZGQY-FPXE", "dmvckt-bjsahr-zgqyfpxe"]) {
+      assert.equal(safeEndpoint(`https://${p}.example.com/mcp`), "SAIHM_ENDPOINT_URL", p);
+      assert.equal(safeEndpoint(`https://saihm.net/${p}/mcp`), "https://saihm.net", p);
+    }
+  });
+
+  it("an endpoint whose scheme has the shape of a key is refused without echoing it", () => {
+    const refusal = (endpoint: string): string => {
+      try {
+        new SaihmProClient(endpoint, "Bearer t", new Uint8Array(32).fill(7), { tier: "PRO" });
+      } catch (e) {
+        return (e as Error).message;
+      }
+      return "ACCEPTED";
+    };
+    for (const scheme of ["k7m2q-9xwpt-4hnrc-8zj3v", "K7M2Q-9XWPT-4HNRC-8ZJ3V", "abcdef" + "0".repeat(58), "k7m2q9-xrtbh4-wzd1npvc", "K7M2Q9-XRTBH4-WZD1NPVC", "dmvc-ktbj-sahr-zgqy-fpxe"]) {
+      const m = refusal(`${scheme}://x`);
+      assert.equal(m, "SAIHM_ENDPOINT_URL must use https://, and its scheme looks like a key, passphrase or token, so it is not shown. Plain http:// is only allowed for 127.0.0.1 or localhost (dev).");
+      assert.ok(!m.toLowerCase().includes(scheme.toLowerCase().slice(0, 10)), m);
+    }
+    assert.equal(refusal("ftp://x"), "SAIHM_ENDPOINT_URL must use https:// (got ftp://). Plain http:// is only allowed for 127.0.0.1 or localhost (dev).");
+    // Not a URL at all, with a passphrase in another grouping inside it: not echoed either.
+    const bad = refusal("my key k7m2q9-xrtbh4-wzd1npvc");
+    assert.equal(bad, "SAIHM_ENDPOINT_URL is not a valid URL, and what it holds looks like a key, passphrase or token, so it is not shown.");
+    assert.equal(refusal("my key dmvckt-bjsahr-zgqyfpxe"), bad);
+  });
+
   it("transportReason reads the code off the error or its cause", () => {
     assert.equal(transportReason({ code: "ECONNREFUSED" }), "ECONNREFUSED");
     assert.equal(transportReason({ cause: { code: "ENOTFOUND" } }), "ENOTFOUND");

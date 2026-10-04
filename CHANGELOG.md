@@ -2,6 +2,132 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] — 2026-10-04
+
+### Fixed
+
+- **Hosts that fill every field.** A host that cannot leave a field out — OpenAI's
+  strict function calling, and the hosts that convert a tool's schema to it — sends
+  null, a blank string, or an object of blank strings for each optional field the
+  model did not choose. Every optional field of every tool now reads those as absent,
+  so the call does what it does with the field left out. Before, null failed the call
+  with an input error on `saihm_remember`, `saihm_recall`, `saihm_share` and
+  `saihm_governance_propose`; a blank `scope` or `expiryEpoch` failed `saihm_share`, and a
+  blank `newIdentity` or `shareEntries` failed `saihm_join` or `saihm_recall`;
+  and in `saihm_recall` a blank `sharerRecord` read as a half-given shared read, so
+  such a host could not load its own memories. The schemas a host is shown are
+  unchanged, a value of the wrong type is still refused, and a shared read given in
+  part still fails with the message naming the three fields it needs.
+- **Calls without `arguments`.** The protocol lets a `tools/call` request leave
+  `arguments` out. `saihm_recall`, `saihm_status` and `saihm_join`, which need none,
+  failed with an input error when it did, and `arguments: null` was refused before
+  any tool ran. Both now read as a call with no arguments.
+- **A key-file path with the shape of a key is never printed.** One test now
+  decides whether a key-file path may be shown, wherever a message names one: a
+  path is withheld when it looks like a key, passphrase or token, or when a folder
+  in it would be refused for that shape. That covers the errors for a key file that
+  cannot be read, holds nothing, or does not hold a key, an empty file named by
+  `SAIHM_MASTER_SECRET_FILE`, and the warning about a key file others can read.
+  Before, a key file left under such a folder by an older version could still be
+  named in full.
+- **Refusals name the folder in use.** Where the home folder's path, not
+  `SAIHM_HOME`, has the shape of a key, `saihm_join`, `free-join` and
+  `export-identity` said to fix `SAIHM_HOME`, a variable the reader never set. They
+  now say to set `SAIHM_HOME` to a directory whose path does not have that shape,
+  and messages about the identity's folder name `~/.saihm` when `SAIHM_HOME` is unset.
+- **A blank `SAIHM_HOME` or `SAIHM_STATE_DIR` counts as unset.** Set to spaces,
+  `SAIHM_HOME` made a folder of that name in the working directory and kept the key
+  there, and `SAIHM_STATE_DIR` did the same with the checkout link. Now a blank
+  `SAIHM_STATE_DIR` falls back to `SAIHM_HOME`, and a blank `SAIHM_HOME` to `~/.saihm`.
+- **The warning about a group- or world-readable key file is written once per
+  key-file setting in each run**, not twice on `free-join` and on each `saihm_join`.
+- **`SAIHM_ENDPOINT_URL` is not echoed when it holds a key.** A scheme with the
+  shape of a key, passphrase or token gets a fixed sentence instead of being
+  quoted, and a network error names only the host when the URL's path has that
+  shape, or names only the variable when the host has it.
+- **Proxy settings.** `HTTPS_PROXY=http:/host:port`, with one slash (or a backslash),
+  is reported as not a URL instead of being read as a proxy at a host named `http`.
+- **Network error advice fits.** The advice after a failure that names a long
+  OpenSSL code no longer runs past the length a reply allows, so its end is not
+  cut; the proxy advice now starts "Via HTTPS_PROXY:" (or "Via https_proxy:").
+- **While a join started with `saihm_join` waits for approval, the memory tools say
+  so.** Called before the human has approved the device sign-in, they answered with
+  the endpoint's refusal (`verification_failed`) and, a few calls later, a rate
+  limit, with the join's steps nowhere in sight. They now answer with the same steps
+  `saihm_join` gives (open the address, enter the code, then join again). For a key
+  that join created they do not call the endpoint at all; an identity that was
+  already here keeps working if it is active, and gets the steps if the endpoint
+  says it has no free memory yet.
+- **A rate limit is named, with its wait.** A 429 that carries no error code, as
+  the endpoint's own request limit sends it, was reported as `[unknown]`. It is now
+  `rate_limited` and says how long to wait, from `retry-after` when the endpoint
+  gives whole seconds. A 429 with a code, such as the free tier's lifetime cap, is
+  unchanged. The share events feed now also honours `retry-after` when a refusal of
+  its poll names no wait in its body; the header never reached it before. Whatever
+  wait the endpoint names, the feed waits at least one second: before, a wait of a few
+  milliseconds named in an answer's or a refusal's body made it poll almost as fast as
+  the answers came back.
+- **`export-identity` and a static `SAIHM_AUTH_HEADER`.** A paid identity reached
+  with a static `SAIHM_AUTH_HEADER`, and so with no payment method, was told to set
+  a payment method it does not have. The export now says the token does not carry
+  that header, and to set it where the token is used; the header is never printed.
+- **`saihm_join` no longer says it needs "no website visit".** Its description now
+  ends "No payment.": activation is a one-time sign-in in a browser.
+- **Gemini CLI and `"timeout": 60`.** The generic config block carried
+  `"timeout": 60`, which Gemini CLI reads in milliseconds: copied there, it gave the
+  server 60 ms to start, and the tools never appeared. Gemini CLI's block now sets no
+  timeout (its default is ten minutes). If you copied the old block into Gemini CLI,
+  remove that line.
+- **A malformed answer no longer ends the server.** A redirect whose `Location` is
+  not a usable URL, an answer with a status code above 599, a 204, 205 or 304, and a
+  status text with a control character each stopped the server process. A 204, 205
+  or 304 is now read as an answer with no body, and the others are reported as
+  network errors that name `SAIHM_ENDPOINT_URL`, since the endpoint was reached.
+- **A compressed answer cut off mid-way ends the call.** When the connection dropped
+  part-way through a compressed answer, the call waited past its time limit, and
+  while signing in every later memory call waited too, until the server restarted.
+  It now ends with an error, and the next call tries again.
+
+### Security
+
+- **A redirect to another origin no longer carries your credentials.** When the
+  endpoint answered with a redirect to a different host or port, the client followed
+  it with the same `Authorization` header, so the token reached the other host. It is
+  now dropped there, with any cookie, as browsers' fetch does; a redirect within the
+  endpoint's own origin keeps it. A 307 or 308 to another origin that would also
+  re-send a request body (when signing in, a one-time proof of the identity) is now
+  refused; one without a body is followed, without those credentials. (Present since
+  redirects were followed.)
+
+### Added
+
+- **A Gemini CLI extension.** `gemini extensions install
+  https://github.com/SAIHM-Admin/saihm-mcp-server-pro` adds SAIHM to Gemini CLI, with
+  the same entry as the README's block.
+
+### Changed
+
+- **A setup block for each major client.** The README names the clients by
+  provider: Claude Code and Claude Desktop (Anthropic), Codex CLI and the Agents SDK
+  (OpenAI), Gemini CLI (Google), and GitHub Copilot in VS Code (Microsoft). Each block
+  is in that client's own format, following its provider's documentation, and sets
+  `SAIHM_ENDPOINT_URL` and the start-up limit that client needs. Other clients get one
+  generic section, with Cline's CLI settings file and the shape `cline mcp install`
+  writes. A new section says which clients are started before each release.
+- **What activation needs, said plainly.** The free memory needs one browser sign-in:
+  GitHub, or Google from saihm.net/free. The docs used to suggest it
+  needed nothing from you; so did the registry description of `SAIHM_SELF_JOIN`.
+- **One statement of the tools**: eight protocol tools, plus `saihm_join` (nine by
+  default, eight with `SAIHM_SELF_JOIN=0`).
+- **An interrupted join, explained**: the key is written when the join starts, joining
+  again on the same machine uses that same key, and a join you do not want is stopped
+  by not entering its code.
+- **Hosted agent environments**: the separate note for Cursor's cloud agents is folded
+  into one entry for every other client's cloud agents.
+- **Checking a Claude Code setup**: `claude mcp list`, a `python3 -m json.tool` check that
+  does not print the file, and the
+  non-breaking spaces a copy and paste can carry.
+
 ## [0.12.0] — 2026-10-02
 
 Bring an existing identity anywhere. No protocol tool added or removed; the
@@ -1582,6 +1708,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.12.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.1
 [0.12.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.0
 [0.11.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.2
 [0.11.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.1

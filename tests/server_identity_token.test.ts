@@ -789,7 +789,7 @@ test('onboard refusals: the endpoint reason is cut at its budget, and the remedy
 test('an unreachable endpoint names the network remedy, on the onboard and on the call', async () => {
   for (const [extra, remedy] of [
     [{}, /allow the endpoint's host \(saihm\.net by default\) in its network settings; if traffic must go through a proxy, set HTTPS_PROXY/],
-    [{ SAIHM_AUTH_HEADER: 'Bearer probe' }, /allow that host in its network settings; if traffic must go through a proxy, set HTTPS_PROXY/],
+    [{ SAIHM_AUTH_HEADER: 'Bearer probe' }, /allow that host in its network settings; to use a proxy, set HTTPS_PROXY/],
   ] as const) {
     const home = tempHome('nw');
     try {
@@ -1426,5 +1426,25 @@ test('free-join with self-join off, a key and no SAIHM_TIER names the missing ti
     assert.match(f.stderr, /set SAIHM_TIER/, f.stderr);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('export-identity: a paid tier with no payment method names the static SAIHM_AUTH_HEADER, never its value', async () => {
+  const id = identity();
+  for (const [tag, extra] of [['plain', {}], ['header', { SAIHM_AUTH_HEADER: 'Bearer comp-token-do-not-print' }]] as const) {
+    const home = tempHome(`ah-${tag}`);
+    try {
+      const ex = await exportFrom(home, { SAIHM_MASTER_SECRET_HEX: id.secretHex, SAIHM_TIER: 'PRO_FAST', ...extra });
+      const out = ex.r.stdout + ex.r.stderr;
+      assert.ok(!out.includes('comp-token-do-not-print'), 'the header value is never printed');
+      if (tag === 'header') {
+        assert.match(out, /This shell reaches the endpoint with SAIHM_AUTH_HEADER, which the token does not carry: set it,\nas a secret, where the token is used\./, out);
+        assert.doesNotMatch(out, /carries a paid tier but no payment method/, out);
+      } else {
+        assert.match(out, /This token carries a paid tier but no payment method: set SAIHM_PAYMENT_METHOD as your MCP\nclient does, and export again - or, for an identity reached with a static SAIHM_AUTH_HEADER,\nset that header where the token is used\./, out);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   }
 });
