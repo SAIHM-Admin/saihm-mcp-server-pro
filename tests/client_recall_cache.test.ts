@@ -81,7 +81,7 @@ async function stack(shape: Shape): Promise<Stack> {
       } else if (method === 'saihm_forget') {
         const id = params.id as string;
         store.delete(id);
-        out = { cellId: id, shardId: 's', complete: true, sharesPurged: 0, steps: [], epoch: '1' };
+        out = { cellId: id, shardId: 's', complete: true, destructionAnchor: 'anchor-1', sharesPurged: 0, steps: [], epoch: '1' };
       } else if (method === 'saihm_recall' && typeof params.cellId === 'string') {
         // Single-cell form, used by `remember` to read back what it wrote. Never held.
         const wire = store.get(params.cellId);

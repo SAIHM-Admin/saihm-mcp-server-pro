@@ -715,13 +715,28 @@ export const MAX_STRUCTURED_SCALAR_CHARS = 256;
  *     which refuse on LENGTH before parsing, so they arrive as JS numbers or `null`.
  *   - BOUNDED IN THE CLIENT: `saihm_recall.shared[]` is endpoint-chosen and unauthenticated, and is
  *     capped there on three axes at once — per field, on a running total, and on row count. Nothing
- *     in this module has an opinion about it, and nothing needs to.
+ *     in this module has an opinion about it, and nothing needs to. The same holds for the version
+ *     listing (`saihm_recall.cells`, `next`, `asOf`), whose every entry is checked in the client and
+ *     whose page is refused whole on one it cannot read, and for `saihm_remember.at`, an endpoint
+ *     time the client keeps only when it parses, re-serialised in one form.
  *   - NOT BOUNDED, BY DESIGN: `saihm_recall.memories[]`. `plaintext` is the payload and must arrive
  *     whole; `cellId` and `seq` are CALLER-supplied, which a cut of this comment got wrong in the
  *     other direction by calling them endpoint-chosen. MEASURED: seal a short `cellId` and have the
  *     endpoint replay a long one in the outer row, and the client renders the SEALED value and
  *     discards the outer entirely — `openRow` takes both fields off the opened envelope and never
  *     looks at the server's row label.
+ *
+ *   - `saihm_forget` (structured this release): `.epoch` is CAPPED HERE via `boundedOrMarker`, the
+ *     same treatment as `saihm_status`'s string fields. `.complete` (`boolOrNull`) and
+ *     `.sharesPurged` (`countOrNull`) are BOUNDED BY A DIFFERENT GUARD: a non-boolean/non-numeric
+ *     claim becomes `null`, never a guessed value, the principle `saihm_status`'s counters use.
+ *     `.at`, `.reason` and `.destructionAnchor` are BOUNDED IN THE CLIENT, which resolves each once
+ *     and replaces the raw claim: a zoned time re-serialised or `null`; one of two reasons, beside
+ *     `complete: false` only; an anchor of the agreed shape (at most 256 characters) beside
+ *     `complete: true` only. `error.code`, on every tool, is resolved by `failCode` exactly as the
+ *     text's `SAIHM error [code]` is - fenced and capped at `MAX_ERROR_CODE_CHARS` - and
+ *     `error.status` is always a client-read number. `saihm_recall.found` is CLIENT-COMPUTED
+ *     (whether an own read by id resolved), never endpoint-reachable at all.
  *
  *     CALLER-SUPPLIED IS NOT CALLER-CHOSEN, and a cut of this closed with "the endpoint cannot
  *     choose this field, so capping it would buy nothing … an adversary with no reach". That
@@ -748,6 +763,13 @@ export const MAX_STRUCTURED_SCALAR_CHARS = 256;
  *     `saihm_forget` round-trip for a caller who legitimately chose a long id. The laundering path
  *     is answered in the channel that is actually fenced. REOPEN THIS if `structuredContent` ever
  *     becomes a fenced surface: the decision rests on that premise, not on the reach being absent.
+ *
+ *   - Warm start: `saihm_remember`'s `snapshotId`, `createdAt`, `bytes` and `coversThrough`, `saihm_recall`'s
+ *     `snapshot` and `snapshots`, and `saihm_forget`'s `deleted`. BOUNDED IN THE CLIENT: each snapshot field is
+ *     checked against its shape where the answer is read (a 64-hex id, a re-serialised time, a positive whole number,
+ *     a position of 1 to 64 printable characters), and a listing with an entry it cannot read is refused whole. On a
+ *     put, `bytes` and `coversThrough` are the values this client sent, which the commit must echo (or, when the
+ *     commit's answer was lost, the listing entry with this snapshot's digest and nonce); `deleted` is client-computed.
  *
  * That map is a claim about EVERY structured field on EVERY tool, so it is not left in prose:
  * `server_render_fence.test.ts` derives the tools and their structured keys from `server.ts` and
@@ -1057,12 +1079,35 @@ export function failText(e: unknown): string {
 
 const UNRENDERABLE = '(unrenderable error)';
 
+/**
+ * The code an endpoint error is named by, resolved ONCE for both channels of an error result: the bracket of the text's
+ * `SAIHM error [code]` and `structuredContent.error.code` (see {@link failCode}). `||`, not `??`: a 4xx body of
+ * `{"error":""}` sets `code` to the EMPTY STRING, which `??` retains and renders as `SAIHM error [] (status 400)` — an
+ * absent code reads better as `[unknown]`. `code` is a string, so no legitimate falsy value is swallowed by the change.
+ */
+const endpointCode = (e: SaihmEndpointError): string => safeField(e.code || 'unknown', MAX_ERROR_CODE_CHARS);
+
+/**
+ * The `{code, status}` an error result carries beside its text: the code exactly as the text names it in
+ * `SAIHM error [code]`, and the status the text names — the endpoint's HTTP status, the one this client states for a
+ * failure it classifies itself (408 for a timeout, 502 for an answer it cannot use), or `0` where no answer arrived at
+ * all (the network) — and `{code: 'unknown', status: 0}` for anything that is not an endpoint error (a setting refused
+ * at start, a join waiting for approval). Total, like {@link failText}: whatever was thrown, this answers, and a value that cannot
+ * even be inspected is named like any other unclassified one.
+ */
+export function failCode(e: unknown): { code: string; status: number } {
+  try {
+    if (e instanceof SaihmEndpointError)
+      return { code: endpointCode(e), status: typeof e.status === 'number' && Number.isInteger(e.status) ? e.status : 0 };
+  } catch {
+    /* unclassifiable: below */
+  }
+  return { code: 'unknown', status: 0 };
+}
+
 function failTextOf(e: unknown): string {
   return e instanceof SaihmEndpointError
-    // `||`, not `??`: a 4xx body of `{"error":""}` sets `code` to the EMPTY STRING, which `??`
-    // retains and renders as `SAIHM error [] (status 400)` — an absent code reads better as
-    // `[unknown]`. `code` is a string, so no legitimate falsy value is swallowed by the change.
-    ? `SAIHM error [${safeField(e.code || 'unknown', MAX_ERROR_CODE_CHARS)}] ` +
+    ? `SAIHM error [${endpointCode(e)}] ` +
       `(status ${e.status}): ${safeField(e.message, MAX_ERROR_MESSAGE_CHARS)}`
     // BEFORE the plain-`Error` arm, which this extends — reversing the two makes the wider branch
     // unreachable and the defect silently returns.

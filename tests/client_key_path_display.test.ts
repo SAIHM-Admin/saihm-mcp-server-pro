@@ -217,6 +217,12 @@ test('a refusal names SAIHM_HOME only when it is set; a key-shaped home folder i
     assert.equal(withEnv({ SAIHM_MASTER_SECRET_HEX: 'ab'.repeat(32) }, () => keyShapedHomeRefusal('export')), 'The path of your home folder, where ~/.saihm is, holds what looks like a key, passphrase or token. Set SAIHM_HOME to the full path of a directory whose path does not, then export again.');
     assert.equal(withEnv({ SAIHM_HOME: join(base, REGROUPED) }, () => keyShapedHomeRefusal('export')), 'SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory. Fix SAIHM_HOME, set SAIHM_MASTER_SECRET_FILE to the full path of your key file, then export again.');
     assert.equal(withEnv({}, () => keyShapedHomeRefusal('export')), 'The path of your home folder, where ~/.saihm is, holds what looks like a key, passphrase or token. Set SAIHM_HOME to the full path of a directory whose path does not, and SAIHM_MASTER_SECRET_FILE to the full path of your key file, then export again.');
+    // A key file ALREADY named is not named again (fixed in 0.13.0): the operator set it, and the refusal is about
+    // the folder. Blank counts as unset, as for SAIHM_MASTER_SECRET_HEX.
+    const file = join(base, 'my.key');
+    assert.equal(withEnv({ SAIHM_MASTER_SECRET_FILE: file }, () => keyShapedHomeRefusal('export')), 'The path of your home folder, where ~/.saihm is, holds what looks like a key, passphrase or token. Set SAIHM_HOME to the full path of a directory whose path does not, then export again.');
+    assert.equal(withEnv({ SAIHM_MASTER_SECRET_FILE: file, SAIHM_HOME: join(base, REGROUPED) }, () => keyShapedHomeRefusal('export')), 'SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory. Fix SAIHM_HOME, then export again.');
+    assert.match(withEnv({ SAIHM_MASTER_SECRET_FILE: '  ' }, () => keyShapedHomeRefusal('export')), /and SAIHM_MASTER_SECRET_FILE to the full path of your key file/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

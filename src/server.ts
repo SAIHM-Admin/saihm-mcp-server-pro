@@ -52,9 +52,26 @@ import {
   hexOrMarker,
   scopeOrMarker,
   epochOrMarker,
+  failCode,
   failText,
 } from './render_fence.js';
-import { acceptAbsentToolArguments, optionalInput } from './tool-input.js';
+import { acceptAbsentToolArguments, isBlankInput, optionalInput } from './tool-input.js';
+import {
+  COVERS_THROUGH_PATTERN,
+  SNAPSHOT_ID_PATTERN,
+  WARM_START_TOKEN,
+  WARM_START_TOKEN_PATTERN,
+  WarmStartFileError,
+  dropLatestPayload,
+  dropPutPayload,
+  putFileName,
+  sweepWarmStart,
+  takePutPayload,
+  warmStartFolder,
+  withWarmStartToken,
+  writeLatestPayload,
+  type WarmStartSnapshot,
+} from './warm-start.js';
 
 import { z } from 'zod';
 import { deriveIdentity, toHex } from '@saihm/client-pro';
@@ -86,6 +103,11 @@ import {
   defaultIdentityPath,
   markPathBearing,
   MAX_ANNOUNCEMENT_FIELD_CHARS,
+  withAnswerNotes,
+  featuresOf,
+  relativeDirSetting,
+  relativeDirRefusal,
+  type AnswerNotes,
   type FreeDevicePrompt,
   type FreeEntitlementResult,
 } from './client.js';
@@ -152,6 +174,55 @@ const ok = (text: string, structuredContent?: Record<string, unknown>) => ({
   ...(structuredContent ? { structuredContent } : {}),
 });
 
+/**
+ * `timing` on a tool result: the endpoint's own time and admission from its answer's headers, beside this client's
+ * measurement of the whole call. Declared on every tool whose result is structured, and OPTIONAL: it is present only
+ * when the endpoint's answer sent timing headers, so a server that predates them changes nothing here.
+ */
+const TIMING_SCHEMA = z.object({
+  serverMs: z.number().nullable(),
+  totalMs: z.number(),
+  admission: z.enum(['reserved', 'shared']).nullable(),
+});
+
+/**
+ * `error` on a tool result: what every failed call of every tool carries as structured content beside its text (see
+ * {@link fail}) — the `code` its `SAIHM error [code]` text names and the status that text states (`0` where no answer
+ * arrived; see failCode), or `{code: 'unknown', status: 0}` for a failure that is not the endpoint's.
+ */
+const ERROR_SCHEMA = z.object({
+  code: z.string(),
+  status: z.number(),
+});
+
+/**
+ * The outputSchema a tool with structured results publishes: its success fields, EVERY ONE OPTIONAL, beside `error`.
+ *
+ * A host validates EVERY structured result against the published schema, an error result's included: the MCP SDK's own
+ * client checks `structuredContent` whenever one is present, `isError` or not, and answers a mismatch with a protocol
+ * error in place of the tool's result. An error result is `{error}` alone, so a success field required here would turn
+ * every error of the tool into "Structured content does not match the tool's output schema", its message lost. A
+ * success result is unchanged: every branch still emits every field it always emits (the tests pin each one), so this
+ * widens what the schema promises, never what a result carries.
+ */
+const structuredResult = <S extends z.ZodRawShape>(success: S) => ({
+  ...z.object(success).partial().shape,
+  error: ERROR_SCHEMA.optional(),
+});
+
+/**
+ * The timing `method`'s answer carried, resolved ONCE for both channels: the structured value (undefined, so the key
+ * serializes away, when the answer sent none or sent some this client cannot use), and whether the text must say the
+ * endpoint's timing was malformed. Each render site writes that line itself, as fixed text carrying no byte of it.
+ */
+const timingOf = (
+  notes: ReadonlyMap<string, AnswerNotes>,
+  method: string,
+): { timing: Exclude<AnswerNotes['timing'], 'malformed'>; timingMalformed: boolean } => {
+  const t = notes.get(method)?.timing;
+  return t === 'malformed' ? { timing: undefined, timingMalformed: true } : { timing: t, timingMalformed: false };
+};
+
 /** A memory tool called while this server's join waits for approval. Its message is built from fenced parts. */
 class JoinPendingError extends Error {}
 
@@ -160,7 +231,9 @@ const refusedForNoEntitlement = (e: unknown): boolean =>
   e instanceof SaihmEndpointError && e.status === 401 && e.code === 'verification_failed' && e.message.includes(': no_free_entitlement)');
 
 /** Surface any error as a typed MCP tool error (never crash the server). */
-function fail(e: unknown) {
+function fail(thrown: unknown) {
+  // A warm-start payload file's refusal carries its code like the endpoint's do, with no answer behind it (status 0).
+  const e = thrown instanceof WarmStartFileError ? new SaihmEndpointError(0, thrown.code, thrown.message) : thrown;
   const s = joinState;
   let text: string;
   if (e instanceof JoinPendingError) text = e.message;
@@ -173,7 +246,9 @@ function fail(e: unknown) {
     // a memory call means the identity is already active, and is reported as itself.
     text = `${joinPendingNotice(s)}\n${failText(e)}`;
   } else text = failText(e);
-  return { content: [{ type: 'text' as const, text }], isError: true as const };
+  // The same failure as structured content, for a reader that branches on the code rather than parsing the text. Its
+  // code is resolved once with the text's (see failCode), so the two channels never name different codes.
+  return { content: [{ type: 'text' as const, text }], isError: true as const, structuredContent: { error: failCode(e) } };
 }
 
 /**
@@ -428,6 +503,16 @@ const countOrNull = (v: unknown): number | null => {
 };
 
 /**
+ * An endpoint-chosen boolean, or null when it sent anything else. `saihm_forget`'s own discipline:
+ * `complete` is an ATTESTATION (true only when the destruction is durable), so a value this client cannot even type-check as a boolean
+ * must not be guessed into `true` or `false` — both are plausible-looking values the endpoint did not
+ * actually send, which is exactly what `boundedOrMarker`'s own doc forbids for strings. `null` is a
+ * JSON type the endpoint cannot spell, unlike `(malformed)`, so it is the honest "this client does not
+ * know" signal here, same as every other malformed-endpoint-value site in this file.
+ */
+const boolOrNull = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
+
+/**
  * The device-flow code lifetime in whole minutes, for a line a human reads.
  *
  * A GUARD AT THE RENDER SITE, and today an unreachable one — stated plainly, because an earlier cut
@@ -449,29 +534,122 @@ const expiryMins = (seconds: unknown): number => {
   return n === null || n <= 0 ? 15 : Math.min(1440, Math.max(1, Math.round(n / 60)));
 };
 
+/** A snapshot as a structured result carries it: what the endpoint recorded, every field checked by the client. */
+const SNAPSHOT_SCHEMA = z.object({
+  snapshotId: z.string(),
+  createdAt: z.string(),
+  bytes: z.number(),
+  coversThrough: z.string(),
+});
+
+/** How many snapshots a listing renders as text; the structured result carries them all. */
+const SNAPSHOT_RENDER_LIMIT = 16;
+
+/**
+ * Refused before anything is touched: a warm-start call whose arguments do not make exactly one mode. A warm-start
+ * call never falls through to another kind of call, and no path is built until its token is known to be well formed.
+ */
+const warmStartInvalid = (message: string): SaihmEndpointError => new SaihmEndpointError(0, 'invalid_input', message);
+
+/** The token a warm-start call names its payload file by: required on every warm-start call. */
+function warmStartToken(token: string | undefined): string {
+  if (token === undefined) throw warmStartInvalid('A warm-start call needs token: 16 to 32 characters from a-z and 0-9, chosen at random for the call.');
+  return token;
+}
+
+/**
+ * Where every warm-start call begins, once its arguments make one mode: the token checked against its grammar again
+ * before the folder's path is built from anything, then the leftovers swept. Each mode then reads the offer fresh, so a
+ * call is refused (`warm_start_unavailable`) whenever the endpoint does not offer warm start to this identity. A put's
+ * own payload file is spared by the sweep (`ownPut`): the put takes it, however late the call arrived.
+ */
+function warmStartBegin(token: string, ownPut = false) {
+  if (!WARM_START_TOKEN_PATTERN.test(token)) throw warmStartInvalid('A warm-start token is 16 to 32 characters from a-z and 0-9.');
+  const client = getClient();
+  const folder = warmStartFolder(client.agentIdHash);
+  sweepWarmStart(folder, Date.now(), ownPut ? putFileName(token) : undefined);
+  return { client, folder };
+}
+
+/** Store the payload in `put-<token>.bin` as a snapshot covering `coversThrough`. The file is removed whatever happens. */
+async function warmStartPut(token: string, coversThrough: string): Promise<WarmStartSnapshot> {
+  const { client, folder } = warmStartBegin(token, true);
+  try {
+    const offer = await client.warmStartOffer();
+    const payload = takePutPayload(folder, token, offer.maxBytes);
+    try {
+      return await client.warmStartPut(offer, payload, coversThrough);
+    } finally {
+      payload.fill(0);
+    }
+  } finally {
+    dropPutPayload(folder, token);
+  }
+}
+
+/**
+ * Restore the newest snapshot into `latest-<token>.bin`, or null when there is none. Any earlier file of this token is
+ * removed first, and a restore that fails writes nothing.
+ */
+async function warmStartLatest(token: string): Promise<WarmStartSnapshot | null> {
+  const { client, folder } = warmStartBegin(token);
+  dropLatestPayload(folder, token);
+  const r = await client.warmStartLatest(await client.warmStartOffer());
+  if (r === null) return null;
+  try {
+    writeLatestPayload(folder, token, r.payload);
+  } finally {
+    r.payload.fill(0);
+  }
+  return r.snapshot;
+}
+
 server.registerTool(
   'saihm_remember',
   {
     title: 'Remember',
     description:
-      'Store information in SAIHM persistent memory. Encryption happens in this process and the key never leaves it, so the server holds ciphertext it cannot read. Use this when a fact, decision, or piece of context should outlive the current session. Pass an existing cellId to update that cell instead of adding a new one; when the endpoint reports that the update left shares of the cell on the previous version, they are re-issued for the new version and the result counts them, and a share that was not re-issued needs saihm_share again. Returns the cell id that saihm_forget takes.',
+      'Store information in SAIHM persistent memory. Encryption happens in this process and the key never leaves it, so the server holds ciphertext it cannot read. Use this when a fact, decision, or piece of context should outlive the current session. Pass an existing cellId to update that cell instead of adding a new one; when the endpoint reports that the update left shares of the cell on the previous version, they are re-issued for the new version and the result counts them, and a share that was not re-issued needs saihm_share again. Returns the cell id that saihm_forget takes. With warmStart "put", it instead stores an encrypted warm-start snapshot of the payload file named by token.',
     inputSchema: {
-      content: z.string().describe('Information to remember'),
+      // Optional only for warm start: any other call without it is refused (content_required). A blank content is
+      // still a value off warm start, as it always was.
+      content: z.string().optional().describe('Information to remember. Required unless warmStart is "put".'),
       // Every optional field of every tool reads null and blank values as absent (see tool-input.ts).
       cellId: optionalInput(z.string()).describe('Existing cell id (hex) to update; omit to create a new cell'),
+      warmStart: optionalInput(z.enum(['put'])).describe(
+        '"put" stores the payload file warm-start/put-<token>.bin as an encrypted snapshot, then removes the file. Only coversThrough and token go with it.',
+      ),
+      coversThrough: optionalInput(z.string().regex(COVERS_THROUGH_PATTERN)).describe(
+        'With warmStart "put": the change feed position the payload covers, the cursor of a position marker.',
+      ),
+      token: optionalInput(z.string().regex(WARM_START_TOKEN_PATTERN)).describe(
+        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. It names the payload file.',
+      ),
     },
-    outputSchema: {
+    outputSchema: structuredResult({
       cellId: z.string(),
       seq: z.string(),
       shardId: z.string(),
-      commitmentHash: z.string(),
+      commitmentHash: z.string().describe('Deprecated: the same value as commitment, kept for existing readers.'),
+      // The commitment to the ciphertext this process sealed (sha256, hex): the value a change feed's report of this
+      // write carries, so a consumer can recognise its own write by seq and commitment.
+      commitment: z.string(),
+      // When the origin committed the write (ISO-8601 UTC with milliseconds), as the endpoint states it; null when it
+      // states none this client can read.
+      at: z.string().nullable(),
       // LOCAL: what this client counted while re-issuing the grants a write left on the previous version (see
       // RememberResult.shares); all three are null when the write left none. Nullable and always present, so adding them widens the
       // contract without making a previously valid response invalid (the SDK publishes additionalProperties: false).
       sharesReissued: z.number().nullable(),
       sharesNotReissued: z.number().nullable(),
       sharesIncomplete: z.boolean().nullable(),
-    },
+      timing: TIMING_SCHEMA.optional(),
+      // warmStart "put": the snapshot stored. Each field is checked in the client against what it sent.
+      snapshotId: z.string(),
+      createdAt: z.string(),
+      bytes: z.number(),
+      coversThrough: z.string(),
+    }),
     annotations: {
       title: 'Remember',
       readOnlyHint: false,
@@ -480,9 +658,25 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ content, cellId }) => {
+  async ({ content, cellId, warmStart, coversThrough, token }) => {
     try {
-      const r = await getClient().remember(content, cellId ? { cellId } : {});
+      if (warmStart !== undefined || coversThrough !== undefined || token !== undefined) {
+        // One mode per call: a warm-start put takes coversThrough and token, and nothing that writes a memory.
+        if (warmStart !== 'put') throw warmStartInvalid('coversThrough and token go with warmStart "put".');
+        if ((content !== undefined && !isBlankInput(content)) || cellId !== undefined)
+          throw warmStartInvalid('warmStart "put" takes coversThrough and token only: leave out content and cellId.');
+        if (coversThrough === undefined) throw warmStartInvalid('warmStart "put" needs coversThrough: the change feed position the payload covers.');
+        const s = await warmStartPut(warmStartToken(token), coversThrough);
+        return ok(`SNAPSHOT STORED [${labelSafe(shortScalar(s.snapshotId))}] bytes=${s.bytes}`, {
+          snapshotId: s.snapshotId,
+          createdAt: s.createdAt,
+          bytes: s.bytes,
+          coversThrough: s.coversThrough,
+        });
+      }
+      if (content === undefined) throw new SaihmEndpointError(0, 'content_required', 'content is required: the information to remember.');
+      const { value: r, notes } = await withAnswerNotes(() => getClient().remember(content, cellId ? { cellId } : {}));
+      const { timing, timingMalformed } = timingOf(notes, 'saihm_remember');
       // Resolved ONCE, then rendered into both halves of the response.
       //
       // Bounding each channel separately let them state different things about the same field, which
@@ -521,7 +715,8 @@ server.registerTool(
           // `key=value` pairs with the two-space separator `saihm_status` uses for its local report line.
           (sharesReissued === null || sharesNotReissued === null
             ? ''
-            : `\n  shares-reissued=${labelSafe(safeScalar(String(sharesReissued)))}  shares-not-reissued=${labelSafe(safeScalar(String(sharesNotReissued)))}${sharesIncomplete ? '  shares-unexamined=some' : ''}`),
+            : `\n  shares-reissued=${labelSafe(safeScalar(String(sharesReissued)))}  shares-not-reissued=${labelSafe(safeScalar(String(sharesNotReissued)))}${sharesIncomplete ? '  shares-unexamined=some' : ''}`) +
+          (timingMalformed ? '\n  timing=' + MALFORMED : ''),
         {
           cellId: r.cellId,
           seq: String(r.seq),
@@ -531,9 +726,12 @@ server.registerTool(
           // here while the announcement channel was capped on both. Bound applied above, once.
           shardId,
           commitmentHash: r.commitmentHash,
+          commitment: r.commitmentHash,
+          at: r.at,
           sharesReissued,
           sharesNotReissued,
           sharesIncomplete,
+          timing,
         },
       );
     } catch (e) {
@@ -547,10 +745,10 @@ server.registerTool(
   {
     title: 'Recall',
     description:
-      'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or leave it out to load everything. To read a single cell another agent shared with you, pass their sharerPinnedAgentIdHashHex and sharerRecord together with the cellId; that path is read-only.',
+      'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or leave it out to load everything. Pass cellId alone to read one of your own cells. To read a single cell another agent shared with you, pass their sharerPinnedAgentIdHashHex and sharerRecord together with the cellId; that path is read-only. Pass listOnly to list your cells\' versions without their content. With warmStart "latest", it instead restores the newest encrypted warm-start snapshot into the payload file named by token; "list" lists them.',
     inputSchema: {
       query: optionalInput(z.string()).describe(
-        'Filter your OWN memories by keyword (empty = all). Ignored when reading a shared cell.',
+        'Filter your OWN memories by keyword (empty = all). Ignored when reading one cell by cellId.',
       ),
       sharerPinnedAgentIdHashHex: optionalInput(z.string()).describe(
           "Read a cell shared TO you: the SHARER's agentIdHash (hex), pinned out-of-band. When set, sharerRecord and cellId are also required.",
@@ -562,37 +760,64 @@ server.registerTool(
           mlkemPubKeySelfSig: z.string(),
         }),
       ).describe("The SHARER's published identity record (hex fields). Required with sharerPinnedAgentIdHashHex."),
-      cellId: optionalInput(z.string()).describe('The shared cell id to read. Required when reading a shared cell.'),
+      cellId: optionalInput(z.string()).describe(
+        'The cell id to read: alone, one of your own cells; with the sharer fields, the shared cell (required then).',
+      ),
       shareEntries: optionalInput(z.boolean()).describe(
         'With the share events feed on, also return every entry of the share map; without it, only its summary.',
       ),
+      listOnly: optionalInput(z.boolean()).describe(
+        'List your own cells\' versions (cellId, seq, commitment) without reading any content. Pages: pass the answer\'s next as after until next is null.',
+      ),
+      after: optionalInput(z.string()).describe('With listOnly: the next value of the previous page.'),
+      warmStart: optionalInput(z.enum(['latest', 'list'])).describe(
+        '"latest" restores the newest snapshot into warm-start/latest-<token>.bin (read it, then remove it); "list" lists snapshots. Only token goes with it.',
+      ),
+      token: optionalInput(z.string().regex(WARM_START_TOKEN_PATTERN)).describe(
+        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. It names the payload file.',
+      ),
     },
-    outputSchema: {
+    outputSchema: structuredResult({
       count: z.number(),
       memories: z.array(
         z.object({
           cellId: z.string(),
           seq: z.string(),
           plaintext: z.string(),
-          // A shared read only: the commitment of the version read, and the grant the endpoint says served it (when it
-          // sends one), named as in `shareStates` entries so a copy compares with its entry exactly.
+          // The commitment of the version read (sha256 of its ciphertext, recomputed here), on every memory, own or
+          // shared; and, on a shared read, the grant the endpoint says served it (when it sends one). Named as in
+          // `shareStates` entries so a copy compares with its entry exactly.
           commitment: z.string().optional(),
           grant: z.string().optional(),
         }),
       ),
-      // MUST be declared, and MUST be emitted by every branch — both halves are load-bearing, for
-      // different reasons. DECLARED: this SDK's output validation only throws on failure (it discards
-      // the parsed value), so an undeclared key is not stripped here — but it is also not contractual,
-      // and this SDK publishes the outputSchema with `additionalProperties:false`, so a consumer
-      // validating against it rejects the whole response over an undeclared key. EMITTED EVERYWHERE:
-      // a declared key is REQUIRED, so a branch that omits it fails validation — and the failure mode
-      // is NOT a protocol error the host surfaces. `validateToolOutput` throws an McpError, the tool
-      // dispatcher re-throws only `UrlElicitationRequired`, and everything else is converted into a
-      // normal tool result with `isError: true` whose text is the validation message. So an omitted
-      // key silently degrades a successful recall into an error string handed to the MODEL, inside a
-      // 200 response — visible to the agent, invisible to any caller checking for a JSON-RPC error.
-      // Always present, `[]` when there are none — so gate-off emits a DECLARED
-      // constant rather than drifting.
+      // A version listing only (`listOnly`): the endpoint's index of your own cells, metadata only, one page; `next`
+      // is the `after` for the next page, null on the last. `asOf` is when the origin began the listing, when it says.
+      cells: z
+        .array(z.object({ cellId: z.string(), seq: z.string().nullable(), commitment: z.string() }))
+        .optional(),
+      next: z.string().nullable().optional(),
+      // On EVERY branch now, when the answer is an object that states them: where it was served, "origin"
+      // or a region id, and the origin time it reflects every change up to. A `servedBy` this client cannot accept is
+      // the marker, never absent (absent reads as an origin answer). The full recall without a cache is a JSON array
+      // and carries neither.
+      asOf: z.string().optional(),
+      servedBy: z.string().optional(),
+      // When `sharedTruncated` is true and the answer declared the order it lists grants in, which END this list kept:
+      // `newest` for newest-first, `oldest` for grant order — every pointer left out lies beyond that end. Absent
+      // otherwise, and absent when a row this client could not carry was skipped before the cut: never guessed.
+      sharedKept: z.enum(['newest', 'oldest']).optional(),
+      timing: TIMING_SCHEMA.optional(),
+      // MUST be declared, and MUST be emitted by every success branch — both halves are load-bearing. DECLARED:
+      // this SDK's output validation only throws on failure (it discards the parsed value), so an undeclared key
+      // is not stripped here — but it is also not contractual, and this SDK publishes the outputSchema with
+      // `additionalProperties:false`, so a consumer validating against it rejects the whole response over an
+      // undeclared key. EMITTED EVERYWHERE: a reader takes "no pointers" from `[]`, never from an absent key, and
+      // the schema can no longer say so (every success field is optional, see structuredResult), so the tests
+      // pin it on every branch. Always present, `[]` when there are none — so gate-off emits a DECLARED constant
+      // rather than drifting. The ONE exception is a warm-start result (`warmStart`): it lists no memories and asks
+      // for no pointers, so it carries neither `shared` nor `sharedTruncated`. With both, it would read as a share
+      // listing that is complete and empty: SHM reads `shared` beside `sharedTruncated: false` as the whole list.
       shared: z.array(
         z.object({
           sharer: z.string(),
@@ -634,7 +859,14 @@ server.registerTool(
           ).optional(),
         })
         .optional(),
-    },
+      // An OWN read by a lone cellId: true/false for that one branch (a missing or erased cell is `found: false`,
+      // never an error), absent on every other — listOnly, a shared read, and the full own-memories recall.
+      found: z.boolean().optional(),
+      // warmStart "latest": the snapshot restored into its file, or null when there is none (start cold).
+      snapshot: SNAPSHOT_SCHEMA.nullable(),
+      // warmStart "list": this identity's snapshots, newest first, metadata only.
+      snapshots: z.array(SNAPSHOT_SCHEMA),
+    }),
     annotations: {
       title: 'Recall',
       readOnlyHint: true,
@@ -643,8 +875,98 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId, shareEntries }) => {
+  async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId, shareEntries, listOnly, after, warmStart, token }) => {
     try {
+      // Warm start travels alone and is decided first, so it never falls through to a read of any memory.
+      if (warmStart !== undefined || token !== undefined) {
+        if (warmStart === undefined) throw warmStartInvalid('token goes with warmStart "latest" or "list".');
+        if (
+          query !== undefined || sharerPinnedAgentIdHashHex !== undefined || sharerRecord !== undefined || cellId !== undefined ||
+          shareEntries !== undefined || listOnly !== undefined || after !== undefined
+        )
+          throw warmStartInvalid('warmStart takes token only: leave out every other field.');
+        if (warmStart === 'latest') {
+          const snapshot = await warmStartLatest(warmStartToken(token));
+          return ok(
+            snapshot === null
+              ? 'No snapshot to restore: start cold.'
+              : `SNAPSHOT RESTORED [${labelSafe(shortScalar(snapshot.snapshotId))}] bytes=${snapshot.bytes}: its payload is in the file named by your token`,
+            // No `shared` and no `sharedTruncated`: this result is not a share listing (see `shared` above).
+            { count: 0, memories: [], snapshot },
+          );
+        }
+        const { client } = warmStartBegin(warmStartToken(token));
+        const snapshots = await client.warmStartList(await client.warmStartOffer());
+        return ok(
+          [
+            `SNAPSHOTS ${snapshots.length}, newest first, no content`,
+            // The endpoint's claims about this identity's snapshots: prefixed like every listed claim, each value fenced.
+            ...snapshots
+              .slice(0, SNAPSHOT_RENDER_LIMIT)
+              .map(
+                (x) =>
+                  `  ! SNAPSHOT [${labelSafe(shortScalar(x.snapshotId))}] bytes=${x.bytes} created=${labelSafe(safeScalar(x.createdAt))}`,
+              ),
+            ...(snapshots.length > SNAPSHOT_RENDER_LIMIT
+              ? [`  ! …and ${snapshots.length - SNAPSHOT_RENDER_LIMIT} more withheld from this list.`]
+              : []),
+          ].join('\n'),
+          { count: 0, memories: [], snapshots },
+        );
+      }
+      // Version listing: metadata from the endpoint's index, no content. It travels alone, so a mixed request is
+      // refused rather than read as one of the two things it could mean.
+      if (listOnly === true) {
+        if (sharerPinnedAgentIdHashHex || sharerRecord || cellId !== undefined || query !== undefined) {
+          throw new Error('A version listing takes listOnly and after only: leave out query, cellId and the sharer fields.');
+        }
+        const { value: page, notes } = await withAnswerNotes(() => getClient().listVersions(after));
+        // A page whose `next` is blank cannot be continued through this tool: a blank `after` reads as left out (hosts
+        // fill fields they do not choose with blanks), so passing it on would start the listing over, for ever.
+        if (page.next !== null && page.next.trim() === '') {
+          throw new Error('The version listing cannot be continued through this tool: its next page starts after a cell whose id is blank.');
+        }
+        const { timing, timingMalformed } = timingOf(notes, 'saihm_recall');
+        const LIST_RENDER_LIMIT = 16;
+        const shown = page.cells.slice(0, LIST_RENDER_LIMIT);
+        const withheld = page.cells.length - shown.length;
+        // The banner interpolates nothing the endpoint chose. Every other line is the endpoint's claim about the index,
+        // so each is prefixed `  ! ` like the share pointers, never shaped like a memory, and each value is fenced in
+        // label position.
+        const listLines = [
+          `LIST ${page.cells.length} cell version(s), no content — ` +
+            (page.next === null ? 'the last page: no more follow' : 'more pages follow'),
+          ...shown.map(
+            (c) =>
+              `  ! VERSION cell=${labelSafe(safeScalar(c.cellId))} seq=${labelSafe(safeScalar(c.seq ?? '-'))} commit=${labelSafe(shortScalar(c.commitment))}`,
+          ),
+          ...(withheld > 0 ? [`  ! …and ${withheld} more withheld from this list.`] : []),
+          ...(page.next !== null
+            ? [
+                // The model pages with what it reads here, so the id is shown only when it is shown EXACTLY: one a fence
+                // had to change would go back as a different `after`, and the listing would skip or repeat cells.
+                labelSafe(safeScalar(page.next)) === page.next
+                  ? `  ! NEXT after=${labelSafe(safeScalar(page.next))}`
+                  : "  ! NEXT: this id cannot be shown exactly here; pass the structured result's next as after",
+              ]
+            : []),
+        ];
+        return ok(listLines.join('\n') + (timingMalformed ? '\n  timing=' + MALFORMED : ''), {
+          count: 0,
+          memories: [],
+          shared: [],
+          sharedTruncated: false,
+          cells: page.cells,
+          next: page.next,
+          // Undefined when the endpoint states no time, so the key serializes away.
+          asOf: page.asOf,
+          servedBy: notes.get('saihm_recall')?.servedBy,
+          timing,
+        });
+      }
+      if (after !== undefined) {
+        throw new Error('after pages a version listing: pass it together with listOnly.');
+      }
       // Shared-read branch: read a single cell another agent shared TO this agent. Presence of the
       // sharer pin selects this branch; the sharer record + cellId are then mandatory. The endpoint
       // (blind) only returns a cell for which a live grant to THIS recipient exists; the client
@@ -655,20 +977,27 @@ server.registerTool(
             'To read a shared cell, provide sharerPinnedAgentIdHashHex, sharerRecord, and cellId together.',
           );
         }
-        const cell = await getClient().recallShared({
-          sharerPinnedAgentIdHashHex,
-          sharerRecord,
-          cellId,
-        });
+        const { value: cell, notes } = await withAnswerNotes(() =>
+          getClient().recallShared({
+            sharerPinnedAgentIdHashHex,
+            sharerRecord,
+            cellId,
+          }),
+        );
+        const said = notes.get('saihm_recall');
+        const { timing, timingMalformed } = timingOf(notes, 'saihm_recall');
         // `shared`/`sharedTruncated` are declared on the outputSchema, so this branch emits them too —
         // an omitted key is not the same as an empty one, and a consumer must not have to distinguish
         // "no announcements" from "this branch does not report announcements".
         if (!cell) {
-          return ok('No shared cell found (no live grant to you, or content unavailable).', {
+          return ok('No shared cell found (no live grant to you, or content unavailable).' + (timingMalformed ? '\n  timing=' + MALFORMED : ''), {
             count: 0,
             memories: [],
             shared: [],
             sharedTruncated: false,
+            servedBy: said?.servedBy,
+            asOf: said?.asOf,
+            timing,
           });
         }
         const mem = {
@@ -735,21 +1064,60 @@ server.registerTool(
           .join('\n');
         return ok(
           `SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=${labelSafe(safeScalar(cell.seq))} — content below is ` +
-            `ANOTHER AGENT'S, not your own memory\n${sharedBody}`,
+            `ANOTHER AGENT'S, not your own memory\n${sharedBody}` +
+            (timingMalformed ? '\n  timing=' + MALFORMED : ''),
           {
             count: 1,
             memories: [mem],
             shared: [],
             sharedTruncated: false,
+            servedBy: said?.servedBy,
+            asOf: said?.asOf,
+            timing,
           },
         );
       }
 
-      // Partial shared-read args (record/cellId but no sharer pin) => fail loud rather than silently
-      // returning the caller's OWN memories, which would surprise an agent that intended a shared read.
-      if (sharerRecord || cellId) {
+      // A sharer record without its pin is a partial shared read => fail loud rather than silently read the
+      // caller's OWN cell, which would surprise an agent that intended a shared read.
+      if (sharerRecord) {
         throw new Error(
           'To read a shared cell, provide sharerPinnedAgentIdHashHex, sharerRecord, and cellId together.',
+        );
+      }
+
+      // Own-cell read by id: a cellId with no sharer field reads one of this identity's own cells, opened and
+      // authenticated here exactly as a full recall opens it. The query filter does not apply to a read by id.
+      if (cellId !== undefined) {
+        const { value: own, notes } = await withAnswerNotes(() => getClient().recallOne(cellId));
+        const said = notes.get('saihm_recall');
+        const { timing, timingMalformed } = timingOf(notes, 'saihm_recall');
+        if (!own) {
+          // The same {found:false} the endpoint's wire answers: a missing or erased cell is not an error.
+          return ok('No memory with that cell id (it does not exist, or it was erased).' + (timingMalformed ? '\n  timing=' + MALFORMED : ''), {
+            count: 0,
+            memories: [],
+            shared: [],
+            sharedTruncated: false,
+            servedBy: said?.servedBy,
+            asOf: said?.asOf,
+            timing,
+            found: false,
+          });
+        }
+        return ok(
+          `RECALL 1 memories\n  [${labelSafe(safeScalar(own.cellId))}] seq=${labelSafe(safeScalar(own.seq))} | ${own.plaintext}` +
+            (timingMalformed ? '\n  timing=' + MALFORMED : ''),
+          {
+            count: 1,
+            memories: [{ cellId: own.cellId, seq: String(own.seq), plaintext: own.plaintext, commitment: own.commitmentHash }],
+            shared: [],
+            sharedTruncated: false,
+            servedBy: said?.servedBy,
+            asOf: said?.asOf,
+            timing,
+            found: true,
+          },
         );
       }
 
@@ -757,12 +1125,29 @@ server.registerTool(
       // one call: this client is a process-wide singleton and the SDK does not serialise tool handlers,
       // so reading announcements from client state would let two concurrent recalls cross-attribute
       // their sets — an interleaving a hostile endpoint chooses simply by delaying one response.
-      const { cells, announcements, announcementsTruncated } =
-        await getClient().recallWithShared(query);
+      const {
+        value: { cells, announcements, announcementsTruncated, announcementsSkipped },
+        notes,
+      } = await withAnswerNotes(() => getClient().recallWithShared(query));
+      const said = notes.get('saihm_recall');
+      const { timing, timingMalformed } = timingOf(notes, 'saihm_recall');
+      // Which end the client kept, named only when the list WAS cut, nothing before the cut was skipped, and the answer
+      // declared its order. Then, and only then, the kept pointers are exactly the distinct pointers of the front of
+      // the endpoint's order, every row left out lies after the cut, and the declared order names that end. A row the
+      // client could not carry, skipped before the cut, would leave a hole no end describes. The order is resolved
+      // once, to its closed set, where the answer is read; here it is only translated.
+      const order = said?.sharedOrder;
+      const sharedKept: 'newest' | 'oldest' | undefined =
+        !announcementsTruncated || announcementsSkipped || order === undefined
+          ? undefined
+          : order === 'newest-first'
+            ? 'newest'
+            : 'oldest';
       const memories = cells.map((c) => ({
         cellId: c.cellId,
         seq: String(c.seq),
         plaintext: c.plaintext,
+        commitment: c.commitmentHash,
       }));
       // Pointers to cells OTHER agents granted to this one. Reported separately from `memories` and
       // never folded into `count`: they are unauthenticated endpoint claims carrying no content, and
@@ -812,7 +1197,13 @@ server.registerTool(
           ? []
           : [
               `SHARED WITH YOU: ${announcements.length} unverified pointer(s) — no content, nothing below is authenticated${
-                announcementsTruncated ? ' (LIST TRUNCATED: the endpoint announced more)' : ''
+                announcementsTruncated
+                  ? sharedKept === 'newest'
+                    ? ' (LIST TRUNCATED: the endpoint announced more; this list keeps the newest)'
+                    : sharedKept === 'oldest'
+                      ? ' (LIST TRUNCATED: the endpoint announced more; this list keeps the oldest)'
+                      : ' (LIST TRUNCATED: the endpoint announced more)'
+                  : ''
               }`,
               ...rendered.map(
                 (a) =>
@@ -896,13 +1287,17 @@ server.registerTool(
         counts: states.counts,
         ...(shareEntries === true ? { entries: states.entries } : {}),
       };
-      return ok([...lines, ...sharedLines].join('\n'), {
+      return ok([...lines, ...sharedLines].join('\n') + (timingMalformed ? '\n  timing=' + MALFORMED : ''), {
         count: cells.length,
         memories,
         shared,
         sharedTruncated: announcementsTruncated,
+        sharedKept,
         // Undefined when the feed is not running, so the key serializes away.
         shareStates,
+        servedBy: said?.servedBy,
+        asOf: said?.asOf,
+        timing,
       });
     } catch (e) {
       return fail(e);
@@ -915,8 +1310,43 @@ server.registerTool(
   {
     title: 'Forget (GDPR erasure)',
     description:
-      'Cryptographically erase one memory by its cell id (GDPR Art. 17). Destroying the wrapped key leaves the content unreadable to everyone, the operator included. Irreversible: use it when erasure is the intent, not to tidy a working set.',
-    inputSchema: { id: z.string().describe('Memory cell id (hex) to erase') },
+      'Cryptographically erase one memory by its cell id (GDPR Art. 17). Destroying the wrapped key leaves the content unreadable to everyone, the operator included. Irreversible: use it when erasure is the intent, not to tidy a working set. With warmStart "delete", it instead destroys one encrypted warm-start snapshot, its key first.',
+    inputSchema: {
+      // Optional only for warm start: any other call without it is refused (id_required).
+      id: z.string().optional().describe('Memory cell id (hex) to erase. Required unless warmStart is "delete".'),
+      warmStart: optionalInput(z.enum(['delete'])).describe(
+        '"delete" destroys the snapshot named by snapshotId instead of a memory. Only snapshotId and token go with it.',
+      ),
+      snapshotId: optionalInput(z.string().regex(SNAPSHOT_ID_PATTERN)).describe('With warmStart "delete": the snapshot to destroy.'),
+      token: optionalInput(z.string().regex(WARM_START_TOKEN_PATTERN)).describe(
+        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call.',
+      ),
+    },
+    outputSchema: structuredResult({
+      // NULLABLE — not merely the happy-path shape, MEASURED: a hostile non-boolean `complete` (server_render_
+      // hostile.test.ts sends every field, including this one, as an adversarial string) used to fail OUTPUT
+      // VALIDATION for the WHOLE result, discarding the fenced text and every other field with it — the exact
+      // degradation `saihm_status`'s `activeShardCount` comment already documents for this class of field.
+      // `boolOrNull` refuses a non-boolean to `null` rather than guessing `true`/`false`.
+      complete: z.boolean().nullable(),
+      // Present only beside `complete: false`, when the endpoint named why: an id that never existed (or was already
+      // erased), or a destruction the store could not make durable (forget it again later). Named in the text too.
+      reason: z.enum(['not-found', 'not-attested']).optional(),
+      // NULLABLE for the same measured reason as `complete`: `countOrNull` refuses on type/range, the same guard
+      // `saihm_status` uses for its own endpoint-chosen counts.
+      sharesPurged: z.number().nullable(),
+      // CAPPED HERE (boundedOrMarker): an endpoint-chosen string, same treatment as `saihm_status`'s `snapshotEpoch`.
+      epoch: z.string(),
+      // THE ENDPOINT'S: when it performed the erasure (ISO-8601 UTC with milliseconds), or null when it stated no
+      // zoned time — resolved in the client, the convention of `saihm_remember`'s `at`.
+      at: z.string().nullable(),
+      // THE ENDPOINT'S record of the key destruction, copied verbatim: present only with `complete: true` and an
+      // anchor of the agreed shape — the anchor the erasure line carries (resolved in the client).
+      destructionAnchor: z.string().optional(),
+      timing: TIMING_SCHEMA.optional(),
+      // warmStart "delete": the snapshot is destroyed. One that no longer exists is the error snapshot_not_found.
+      deleted: z.literal(true),
+    }),
     annotations: {
       title: 'Forget (GDPR erasure)',
       readOnlyHint: false,
@@ -925,9 +1355,29 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ id }) => {
+  async ({ id, warmStart, snapshotId, token }) => {
     try {
-      const r = await getClient().forget(id);
+      if (warmStart !== undefined || snapshotId !== undefined || token !== undefined) {
+        // One mode per call: a warm-start delete takes snapshotId and token, and never erases a memory.
+        if (warmStart !== 'delete') throw warmStartInvalid('snapshotId and token go with warmStart "delete".');
+        if (id !== undefined && !isBlankInput(id)) throw warmStartInvalid('warmStart "delete" takes snapshotId and token only: leave out id.');
+        if (snapshotId === undefined) throw warmStartInvalid('warmStart "delete" needs snapshotId: the snapshot to destroy.');
+        const { client } = warmStartBegin(warmStartToken(token));
+        await client.warmStartDelete(await client.warmStartOffer(), snapshotId);
+        return ok(`SNAPSHOT DELETED [${labelSafe(shortScalar(snapshotId))}]`, { deleted: true });
+      }
+      if (id === undefined) throw new SaihmEndpointError(0, 'id_required', 'id is required: the memory cell to erase.');
+      const { value: r, notes } = await withAnswerNotes(() => getClient().forget(id));
+      const { timing, timingMalformed } = timingOf(notes, 'saihm_forget');
+      // RESOLVED ONCE, for both channels. `complete`, `at`, `reason` and `destructionAnchor` arrive resolved: the client
+      // reads each once and replaces the raw claim (see SaihmProClient.forget), so this result states what the erasure
+      // line states. `boolOrNull`/`countOrNull` then resolve the two typed fields once more, and BOTH channels render
+      // that: `null` in the structure, the {@link MALFORMED} marker in the text. Rendering the raw value in the text
+      // instead let `complete: "true"` (a string) read `complete=true` beside a structured `null` and a line that says
+      // false; `safeScalar` passes a string or a number through.
+      const complete = boolOrNull(r.complete);
+      const sharesPurged = countOrNull(r.sharesPurged);
+      const epoch = boundedOrMarker(r.epoch);
       return ok(
         // The cell NAMED here is the one the agent asked to erase, not the one the endpoint echoed
         // back. The echo is an unvalidated cast, so `forget('cellA')` answered with `cellId:'cellB'`
@@ -936,8 +1386,8 @@ server.registerTool(
         // had just destroyed. Fencing the echo makes it harmless to render; not rendering it makes
         // the line correct. The remaining three fields are outcomes only the endpoint can report,
         // so they stay its own — fenced, because that is exactly what an unvalidated cast needs.
-        `FORGOTTEN [${labelSafe(safeScalar(id))}] complete=${labelSafe(safeScalar(r.complete))} ` +
-          `sharesPurged=${labelSafe(safeScalar(r.sharesPurged))} epoch=${labelSafe(safeScalar(r.epoch))}` +
+        `FORGOTTEN [${labelSafe(safeScalar(id))}] complete=${labelSafe(safeScalar(complete ?? MALFORMED))} ` +
+          `sharesPurged=${labelSafe(safeScalar(sharesPurged ?? MALFORMED))} epoch=${labelSafe(safeScalar(epoch))}` +
           // The erasure succeeded; this line says what did NOT. It is rendered because a residual an
           // operator never sees is the same as no residual at all — and this is the one tool where
           // the thing left behind is the plaintext they asked to destroy. The sentence is ours, but
@@ -969,7 +1419,31 @@ server.registerTool(
           // Safe to widen HERE because `client.ts` deletes any endpoint-supplied field of this name
           // before setting its own, exactly as it does for `localCacheResidual`, so no hostile value
           // reaches this render.
-          (r.feedResidual ? `\n  ! ${safePathField(r.feedResidual, MAX_PATH_MESSAGE_CHARS)}` : ''),
+          (r.feedResidual ? `\n  ! ${safePathField(r.feedResidual, MAX_PATH_MESSAGE_CHARS)}` : '') +
+          // Why `complete` is false, when the endpoint said: fixed text per reason, no byte of the endpoint's. An agent
+          // reads this line, not the structured field: `not-attested` is the one outcome it must act on.
+          (r.reason === 'not-found'
+            ? '\n  reason=not-found (no cell has this id: it was never written, or it was already erased)'
+            : r.reason === 'not-attested'
+              ? '\n  ! reason=not-attested (the erasure could not be made durable yet: forget this id again later)'
+              : complete === false
+                ? // An endpoint that states completion with no destruction record (one whose own-cell events are
+                  // off does, for every forget) reads complete=false here: said, so the agent does not report a
+                  // failed erasure.
+                  '\n  (no key destruction is attested: the endpoint sent no destruction record for this erasure)'
+                : '') +
+          (timingMalformed ? '\n  timing=' + MALFORMED : ''),
+        {
+          // An optional field is written as its possibly-undefined value, which serializes away, as `timing` is on
+          // every tool: the keys stay literal, which is what the structured-field sweep in the tests reads.
+          complete,
+          reason: r.reason,
+          sharesPurged,
+          epoch,
+          at: r.at,
+          destructionAnchor: r.destructionAnchor,
+          timing,
+        },
       );
     } catch (e) {
       return fail(e);
@@ -984,7 +1458,7 @@ server.registerTool(
     description:
       'Show the current SAIHM session: the agent identity, which this client derives locally, plus the tier, custody mode, shard and sharing counts, and bfsi score the server reports. No plaintext appears, because the server holds none. Use it to check which identity is active and what is stored and shared.',
     inputSchema: {},
-    outputSchema: {
+    outputSchema: structuredResult({
       agentIdHash: z.string(),
       tier: z.string(),
       custody: z.string(),
@@ -1011,7 +1485,27 @@ server.registerTool(
       // degradation the note above records. Nullable and always present, so adding it widens the
       // contract without making any consumer's previously-valid response invalid.
       seqStateDegraded: z.string().nullable(),
-    },
+      // What THIS identity may use: the endpoint's `features`, passed on whole and unread when it is a plain object
+      // within the client's bounds, else null. Null and always present: absent from the answer is null, which is
+      // what a server that predates the field means. Each feature's own shape is the reader's to check. The one member
+      // this client adds is declared: an offer of warm start it serves carries its token statement (WARM_START_TOKEN).
+      features: z
+        .object({
+          warmStart: z
+            .union([
+              z.object({ [WARM_START_TOKEN.member]: z.literal(WARM_START_TOKEN.value).optional() }).catchall(z.unknown()),
+              z.array(z.unknown()),
+              z.string(),
+              z.number(),
+              z.boolean(),
+              z.null(),
+            ])
+            .optional(),
+        })
+        .catchall(z.unknown())
+        .nullable(),
+      timing: TIMING_SCHEMA.optional(),
+    }),
     annotations: {
       title: 'Status',
       readOnlyHint: true,
@@ -1023,7 +1517,13 @@ server.registerTool(
   async () => {
     try {
       const client = getClient();
-      const d = await client.status();
+      const { value: d, notes } = await withAnswerNotes(() => client.status());
+      const { timing, timingMalformed } = timingOf(notes, 'saihm_status');
+      // Resolved ONCE, like every field here: a refused object is null in the structured channel and named in the text.
+      const { features: offered, malformed: featuresMalformed } = featuresOf(d.features);
+      // The endpoint's offer as sent, with this client's token statement when it serves warm start, and never the
+      // endpoint's own member of that name.
+      const features = withWarmStartToken(offered);
       // The identity is READ LOCALLY, never from the response. `status()` is an unvalidated cast, so
       // `d.agentIdHashHex` is simply what the endpoint chose to say this agent is — and the agent's
       // own identity is the last value that should come from a party it does not trust: reported
@@ -1076,7 +1576,10 @@ server.registerTool(
           // other field, on its own line so it reads as a report rather than a suffix on `epoch`.
           (seqStateDegraded === null
             ? ''
-            : `\n  seq-state=${labelSafe(safeScalar(seqStateDegraded))}  rollback-guard=${seqStatePersisting ? 'persisting' : 'memory-only-this-run'}`),
+            : `\n  seq-state=${labelSafe(safeScalar(seqStateDegraded))}  rollback-guard=${seqStatePersisting ? 'persisting' : 'memory-only-this-run'}`) +
+          // Only when the endpoint sent a `features` this client refused: a valid one is structured output alone.
+          (featuresMalformed ? '\n  features=' + MALFORMED : '') +
+          (timingMalformed ? '\n  timing=' + MALFORMED : ''),
         {
           agentIdHash,
           tier,
@@ -1086,6 +1589,8 @@ server.registerTool(
           bfsi,
           snapshotEpoch,
           seqStateDegraded,
+          features,
+          timing,
         },
       );
     } catch (e) {
@@ -1785,6 +2290,14 @@ function runExportIdentity(): void {
   // this verb prints is inside it, and an export the operator cannot be told the location of is no export.
   if (pathHoldsIdentitySecret(defaultIdentityPath())) {
     process.stderr.write('saihm: not exported - ' + keyShapedHomeRefusal('export') + '\n');
+    process.exitCode = 1;
+    return;
+  }
+  // A RELATIVE SAIHM_HOME is refused too: the export file, token and passphrase both, would be written under the
+  // working directory, which in a hosted agent is a repository checkout an agent may commit.
+  const relativeHome = relativeDirSetting(['SAIHM_HOME']);
+  if (relativeHome !== null) {
+    process.stderr.write('saihm: not exported - ' + relativeDirRefusal(relativeHome, 'export again') + '\n');
     process.exitCode = 1;
     return;
   }

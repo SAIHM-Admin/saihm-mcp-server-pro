@@ -74,6 +74,9 @@ interface MockOpts {
   /** Extra keys merged into the saihm_forget 2xx body — used to inject fields the endpoint has no
    *  business setting, e.g. the client's own `localCacheResidual`. */
   forgetExtra?: Record<string, unknown>;
+  /** Overrides the governance stub's status/body (default 403 governance_unavailable) — used to drive
+   *  errorCodeStatus's `code || 'unknown'` fallback with a 4xx that names no code at all. */
+  governanceError?: { status: number; body: unknown };
 }
 
 /** Mock SAIHM operator endpoint: onboard challenge/verify, hosted checkout, + canned /mcp tool responses. */
@@ -213,6 +216,9 @@ function startMock(opts: MockOpts = {}): {
             cellId: 'abc123',
             shardId: 'sh1',
             complete: true,
+            // The hosted endpoint's attested answer: complete:true WITH its destruction record. Without one the
+            // receipt reads complete=false (the passthrough suite pins that).
+            destructionAnchor: 'anchor-1',
             sharesPurged: 0,
             steps: [],
             epoch: '495000',
@@ -228,7 +234,7 @@ function startMock(opts: MockOpts = {}): {
           return send(
             200,
             params.cellId
-              ? { found: true, wire: opts.recallOneWire }
+              ? opts.recallOneWire === undefined ? { found: false } : { found: true, wire: opts.recallOneWire }
               : (opts.recallAll ?? []),
           );
         if (m === 'saihm_share')
@@ -238,7 +244,9 @@ function startMock(opts: MockOpts = {}): {
             recipient: 'bb'.repeat(16),
           });
         if (m === 'saihm_governance_propose' || m === 'saihm_governance_vote')
-          return send(403, { error: 'governance_unavailable' });
+          return opts.governanceError
+            ? send(opts.governanceError.status, opts.governanceError.body)
+            : send(403, { error: 'governance_unavailable' });
         return send(404, { error: 'unknown_method' });
       });
     }
@@ -352,6 +360,21 @@ const callText = async (
   };
 };
 
+/** Like callText, but also exposes structuredContent and the raw result — for error results and the own read by id. */
+const callFull = async (
+  d: Driver,
+  id: number,
+  name: string,
+  args: unknown,
+): Promise<{ text: string; isError: boolean; structuredContent: any }> => {
+  const r = await d.rpc(id, 'tools/call', { name, arguments: args });
+  return {
+    text: r.result.content[0].text as string,
+    isError: r.result.isError === true,
+    structuredContent: r.result.structuredContent,
+  };
+};
+
 test('server.ts: handshake, tools/list, core tool wiring + fail() path', async () => {
   const mock = startMock(); // recall-all => [] (empty branch)
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
@@ -451,6 +474,163 @@ test('server.ts: recall(non-empty) + share over a REAL sealed envelope', async (
   } finally {
     d.proc.kill();
     await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('every tool error carries structuredContent {error:{code,status}} beside the stable text prefix', async () => {
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp');
+  try {
+    await handshake(d);
+    // Governance is a clean-unavailable stub (403 governance_unavailable): exercises fail() on tools that have NO
+    // outputSchema at all (saihm_governance_propose / _vote), proving the field does not depend on one existing.
+    const gp = await callFull(d, 3, 'saihm_governance_propose', { scope: 'emission_param' });
+    assert.equal(gp.isError, true);
+    assert.match(gp.text, /^SAIHM error \[governance_unavailable\] \(status 403\)/);
+    assert.deepEqual(gp.structuredContent, { error: { code: 'governance_unavailable', status: 403 } });
+    const gv = await callFull(d, 4, 'saihm_governance_vote', { proposalId: 'p1', approve: true });
+    assert.deepEqual(gv.structuredContent, { error: { code: 'governance_unavailable', status: 403 } });
+    // A tool WITH an outputSchema (saihm_recall), on a plain client-thrown Error (no SaihmEndpointError at all):
+    // the generic fallback, never an absent field — every tool error carries it, not only typed ones.
+    const bad = await callFull(d, 5, 'saihm_recall', { sharerRecord: { mldsaPubKey: 'x', mlkemPubKey: 'y', mlkemPubKeySelfSig: 'z' } });
+    assert.equal(bad.isError, true);
+    assert.deepEqual(bad.structuredContent, { error: { code: 'unknown', status: 0 } });
+    // Declared on the published schema wherever one exists; deliberately absent where none does (a decision:
+    // kept minimal rather than forcing the other four tools to also carry structuredContent on their success path).
+    const list = await d.rpc(6, 'tools/list', {});
+    const tools = list.result.tools as Array<{ name: string; outputSchema?: { properties?: Record<string, unknown> } }>;
+    for (const name of ['saihm_remember', 'saihm_recall', 'saihm_status', 'saihm_forget']) {
+      const t = tools.find((x) => x.name === name);
+      assert.ok(t?.outputSchema?.properties && 'error' in t.outputSchema.properties, `${name}: error must be declared on its outputSchema`);
+    }
+    for (const name of ['saihm_share', 'saihm_revoke_share', 'saihm_governance_propose', 'saihm_governance_vote']) {
+      const t = tools.find((x) => x.name === name);
+      assert.equal(t?.outputSchema, undefined, `${name}: deliberately has no outputSchema`);
+    }
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('an endpoint error naming no code answers {code:"unknown"}, never the empty/absent value verbatim', async () => {
+  // `code || 'unknown'`: the EMPTY STRING is also falsy, so a body of {"error":""} must land here too, exactly as
+  // `failText`'s existing text-side fallback already treats it (see render_fence.ts, failTextOf).
+  for (const [label, body] of [['no error key at all', {}], ['an empty string', { error: '' }]] as const) {
+    const mock = startMock({ governanceError: { status: 400, body } });
+    await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+    const d = startServer(mock.base() + '/mcp');
+    try {
+      await handshake(d);
+      const r = await callFull(d, 3, 'saihm_governance_propose', { scope: 'emission_param' });
+      assert.equal(r.isError, true, label);
+      assert.deepEqual(r.structuredContent, { error: { code: 'unknown', status: 400 } }, label);
+    } finally {
+      d.proc.kill();
+      await new Promise<void>((r) => mock.server.close(() => r()));
+    }
+  }
+});
+
+test('an own read by id of a missing cell answers structuredContent {found:false}, never an error', async () => {
+  const mock = startMock(); // saihm_recall with a cellId and no recallOneWire => {found:false}, as the endpoint answers
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const d = startServer(mock.base() + '/mcp');
+  try {
+    await handshake(d);
+    const r = await callFull(d, 3, 'saihm_recall', { cellId: 'nope' });
+    assert.equal(r.isError, false, r.text);
+    assert.match(r.text, /No memory with that cell id/);
+    assert.deepEqual(r.structuredContent, { count: 0, memories: [], shared: [], sharedTruncated: false, found: false });
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
+test('every result, success and error, conforms to its tool\'s published outputSchema through the MCP SDK client', async () => {
+  // A host reads tools through an MCP client, not raw JSON-RPC, and the SDK's client validates structuredContent against
+  // the tool's published outputSchema whenever one is present - an ERROR result's included - answering a mismatch with a
+  // protocol error in place of the result. MEASURED before this test: every error of remember, recall, status and forget
+  // reached such a host as "-32602 Structured content does not match the tool's output schema", its message lost.
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+  const connect = async (endpoint: string) => {
+    const client = new Client({ name: 'schema-conformance', version: '0.0.0' });
+    await client.connect(
+      new StdioClientTransport({
+        command: TSX,
+        args: [SERVER],
+        cwd: resolve(HERE, '..'),
+        stderr: 'pipe',
+        env: {
+          PATH: process.env.PATH ?? '',
+          HOME: TEST_STATE_DIR,
+          SAIHM_ENDPOINT_URL: endpoint,
+          SAIHM_MASTER_SECRET_HEX: MASTER_HEX,
+          SAIHM_TIER: 'PRO',
+          SAIHM_PAYMENT_METHOD: 'stripe',
+          SAIHM_SELF_JOIN: '0',
+          SAIHM_STATE_DIR: TEST_STATE_DIR,
+          SAIHM_HOME: TEST_STATE_DIR,
+        },
+      }),
+    );
+    await client.listTools(); // what a host does first: it is what arms the client's output validation
+    return client;
+  };
+  // SUCCESS: every field a success branch always carries is still there, now that the schema cannot require it.
+  const ALWAYS: Record<string, string[]> = {
+    saihm_remember: ['cellId', 'seq', 'shardId', 'commitmentHash', 'commitment', 'at', 'sharesReissued', 'sharesNotReissued', 'sharesIncomplete'],
+    saihm_recall: ['count', 'memories', 'shared', 'sharedTruncated'],
+    saihm_status: ['agentIdHash', 'tier', 'custody', 'activeShardCount', 'activeSharingContracts', 'bfsi', 'snapshotEpoch', 'seqStateDegraded', 'features'],
+    saihm_forget: ['complete', 'sharesPurged', 'epoch', 'at'],
+  };
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const live = await connect(mock.base() + '/mcp');
+  try {
+    const calls: [string, Record<string, unknown>, string[]][] = [
+      ['saihm_remember', { content: 'conformance' }, []],
+      ['saihm_recall', {}, []],
+      ['saihm_recall', { cellId: 'nope' }, ['found']],
+      ['saihm_status', {}, []],
+      ['saihm_forget', { id: 'abc123' }, []],
+    ];
+    for (const [name, args, extra] of calls) {
+      const r = (await live.callTool({ name, arguments: args })) as { isError?: boolean; structuredContent?: Record<string, unknown>; content: { text: string }[] };
+      assert.notEqual(r.isError, true, `${name}: ${r.content[0]?.text}`);
+      for (const k of [...(ALWAYS[name] as string[]), ...extra]) assert.ok(r.structuredContent && k in r.structuredContent, `${name}: ${k} is on every success result`);
+      assert.equal('error' in (r.structuredContent ?? {}), false, `${name}: a success result carries no error`);
+    }
+  } finally {
+    await live.close();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+  // ERROR: an endpoint nobody answers fails every tool before any answer arrives. Each arrives as the tool's error
+  // result, its text and its structured error, on the tools with an outputSchema and the tools without one alike.
+  const dead = await connect('http://127.0.0.1:9/mcp');
+  try {
+    const record = { mldsaPubKey: 'aa', mlkemPubKey: 'bb', mlkemPubKeySelfSig: 'cc' };
+    const calls: [string, Record<string, unknown>][] = [
+      ['saihm_remember', { content: 'x' }],
+      ['saihm_recall', {}],
+      ['saihm_status', {}],
+      ['saihm_forget', { id: 'x' }],
+      ['saihm_share', { cellId: 'x', recipientPinnedAgentIdHashHex: 'aa'.repeat(32), recipientRecord: record }],
+      ['saihm_revoke_share', { cellId: 'x', recipientHex: 'aa'.repeat(32) }],
+      ['saihm_governance_propose', { scope: 'emission_param' }],
+      ['saihm_governance_vote', { proposalId: 'p1', approve: true }],
+    ];
+    for (const [name, args] of calls) {
+      const r = (await dead.callTool({ name, arguments: args })) as { isError?: boolean; structuredContent?: unknown; content: { text: string }[] };
+      assert.equal(r.isError, true, name);
+      assert.match(r.content[0]?.text ?? '', /^SAIHM error \[network\] \(status 0\)/, name);
+      assert.deepEqual(r.structuredContent, { error: { code: 'network', status: 0 } }, name);
+    }
+  } finally {
+    await dead.close();
   }
 });
 

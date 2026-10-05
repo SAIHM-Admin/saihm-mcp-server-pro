@@ -20,4 +20,8 @@ export type {
   SaihmProClientOpts,
   ShareReissueReport,
   ShareReissueSkip,
+  VersionListing,
+  ListedVersion,
+  WarmStartOffer,
 } from './client.js';
+export type { WarmStartSnapshot } from './warm-start.js';

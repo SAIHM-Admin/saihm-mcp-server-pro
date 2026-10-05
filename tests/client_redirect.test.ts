@@ -229,7 +229,9 @@ test('signing in, an answer that arrived but cannot be used names SAIHM_ENDPOINT
   }
 });
 
-test('a 307 to another origin WITHOUT a body is followed, without credentials (the sign-in challenge GET)', async () => {
+// The challenge GET carries no credential to begin with, so whether one is dropped on the hop is not asked here: the
+// first test in this file asks it of a request that has one (fixed in 0.13.0).
+test('a 307 to another origin WITHOUT a body is followed (the sign-in challenge GET)', async () => {
   const seen: { what: string; auth: string | undefined }[] = [];
   const other = createServer((req, res) => {
     seen.push({ what: `other ${req.method} ${req.url}`, auth: req.headers.authorization });
@@ -253,7 +255,6 @@ test('a 307 to another origin WITHOUT a body is followed, without credentials (t
     ]);
     const hop = seen.find((x) => x.what === 'other GET /api/onboard/challenge');
     assert.ok(hop, `the body-less redirect was followed: ${seen.map((x) => x.what)}`);
-    assert.equal(hop.auth, undefined, 'without credentials');
   } finally {
     for (const [k, v] of saved) if (v === undefined) delete process.env[k];
     else process.env[k] = v;

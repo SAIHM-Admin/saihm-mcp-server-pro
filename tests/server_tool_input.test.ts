@@ -248,6 +248,13 @@ const REQUIRED: Record<string, unknown> = {
   approve: true,
 };
 
+/**
+ * Required unless warmStart: optional in the schemas only so a warm-start call can leave them out. Off warm start a blank
+ * content or id is still a value, stored or erased as it always was, so this sweep gives them a value like the required
+ * fields and varies the rest.
+ */
+const REQUIRED_UNLESS_WARM_START: Record<string, string> = { saihm_remember: 'content', saihm_forget: 'id' };
+
 const blankFor = (schema: { type?: string; properties?: Record<string, unknown> }): unknown =>
   schema.type === 'object' ? Object.fromEntries(Object.keys(schema.properties ?? {}).map((k) => [k, ''])) : schema.type === 'boolean' ? '' : '';
 
@@ -270,7 +277,8 @@ test('every optional field of every tool reads null and blank values as absent, 
     let covered = 0;
     for (const t of tools) {
       const props = t.inputSchema.properties ?? {};
-      const required = t.inputSchema.required ?? [];
+      const unlessWarmStart = REQUIRED_UNLESS_WARM_START[t.name];
+      const required = [...(t.inputSchema.required ?? []), ...(unlessWarmStart !== undefined ? [unlessWarmStart] : [])];
       const optional = Object.keys(props).filter((k) => !required.includes(k));
       const base = Object.fromEntries(required.map((k) => [k, REQUIRED[k]]));
       for (const k of required) assert.notEqual(REQUIRED[k], undefined, `${t.name}.${k} needs a value in REQUIRED`);
@@ -351,7 +359,6 @@ test('a partly given shared read still fails loud, and a value of the wrong type
     const together = /provide sharerPinnedAgentIdHashHex, sharerRecord, and cellId together/;
     for (const args of [
       { sharerPinnedAgentIdHashHex: '', sharerRecord: { mldsaPubKey: 'aa', mlkemPubKey: '', mlkemPubKeySelfSig: '' }, cellId: '' },
-      { sharerPinnedAgentIdHashHex: null, sharerRecord: null, cellId: HEX('ab') },
       { sharerPinnedAgentIdHashHex: HEX('cd'), sharerRecord: { mldsaPubKey: '', mlkemPubKey: '', mlkemPubKeySelfSig: '' }, cellId: HEX('ab') },
       { sharerPinnedAgentIdHashHex: HEX('cd'), sharerRecord: null, cellId: '  ' },
     ]) {
@@ -359,6 +366,11 @@ test('a partly given shared read still fails loud, and a value of the wrong type
       assert.equal(r.isError, true, JSON.stringify(args));
       assert.match(r.text ?? '', together, JSON.stringify(args));
     }
+    // Blank sharer fields are absent, so a cellId beside them is an own-cell read: it goes to the endpoint (unreachable
+    // here) instead of being refused as a partial shared read.
+    const own = await d.call('saihm_recall', { sharerPinnedAgentIdHashHex: null, sharerRecord: null, cellId: HEX('ab') });
+    assert.equal(own.isError, true);
+    assert.doesNotMatch(own.text ?? '', together);
     for (const [name, args] of [
       ['saihm_recall', { query: 5 }],
       ['saihm_recall', { shareEntries: 'yes' }],
@@ -387,9 +399,10 @@ test('the schemas a host is shown are the plain ones: every optional field has i
     const tools: { name: string; inputSchema: { properties?: Record<string, any>; required?: string[] } }[] = (await d.rpc('tools/list', {})).result.tools;
     const required = Object.fromEntries(tools.map((t) => [t.name, [...(t.inputSchema.required ?? [])].sort()]));
     assert.deepEqual(required, {
-      saihm_remember: ['content'],
+      // Required unless warmStart (content for "put", id for "delete"): a call without it is refused in the tool.
+      saihm_remember: [],
       saihm_recall: [],
-      saihm_forget: ['id'],
+      saihm_forget: [],
       saihm_status: [],
       saihm_share: ['cellId', 'recipientPinnedAgentIdHashHex', 'recipientRecord'],
       saihm_revoke_share: ['cellId', 'recipientHex'],
@@ -412,6 +425,21 @@ test('the schemas a host is shown are the plain ones: every optional field has i
       'saihm_recall.sharerRecord': 'object',
       'saihm_recall.cellId': 'string',
       'saihm_recall.shareEntries': 'boolean',
+      // 0.13.0: the version listing's two optional fields, the only additions to any input schema.
+      'saihm_recall.listOnly': 'boolean',
+      'saihm_recall.after': 'string',
+      // Warm start: the mode, its token, the put's position and the delete's snapshot, each with its grammar; content and
+      // id, required unless warmStart, are listed here because the schema can no longer mark them required.
+      'saihm_remember.content': 'string',
+      'saihm_remember.warmStart': 'string:put',
+      'saihm_remember.coversThrough': 'string:^[!-~]{1,64}$',
+      'saihm_remember.token': 'string:^[a-z0-9]{16,32}$',
+      'saihm_recall.warmStart': 'string:latest|list',
+      'saihm_recall.token': 'string:^[a-z0-9]{16,32}$',
+      'saihm_forget.id': 'string',
+      'saihm_forget.warmStart': 'string:delete',
+      'saihm_forget.snapshotId': 'string:^[0-9a-f]{64}$',
+      'saihm_forget.token': 'string:^[a-z0-9]{16,32}$',
       'saihm_share.scope': 'string:read|write|readwrite',
       'saihm_share.expiryEpoch': 'string:^[0-9]+$',
       'saihm_governance_propose.paramKey': 'string',

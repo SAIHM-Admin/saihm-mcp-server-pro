@@ -23,7 +23,7 @@ the bootstrap tool that answers "Join SAIHM": on by default, removed by
 
 The server is local (stdio), starts with `npx`, and needs Node.js 20 or later.
 Write the entry in the host's own format, and merge it into what is there rather
-than overwriting it. Per host (from each provider's documentation, October 2026;
+than overwriting it. Per host (from each provider's documentation;
 `README.md` has a ready block for each):
 
 - **Claude Code:** `claude mcp add --env SAIHM_ENDPOINT_URL=https://saihm.net/mcp --transport stdio --scope user saihm -- npx -y @saihm/mcp-server-pro`.
@@ -65,7 +65,7 @@ than overwriting it. Per host (from each provider's documentation, October 2026;
 }
 ```
 
-Host note (2026-09-23): From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which serves the identical service until 2026-12-31 and is then discontinued: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly.
+Host note: From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which is being retired: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly.
 
 **The start-up setting is required, not decorative.** The first start downloads
 the package with `npx`, which takes longer than some hosts wait by default: the Cline
@@ -169,7 +169,7 @@ only by them (never by pasting it into the chat) and point at it with
 `SAIHM_MASTER_SECRET_HEX` for the reason given in step 1: an inline secret lands
 in the config store itself, which is frequently synced between machines. Have
 the user write the value; do not ask them to read it out to you. Full option
-table: see `README.md`.
+table: see `REFERENCE.md`.
 
 ## Troubleshooting
 

@@ -70,6 +70,7 @@ export function readFeedState(path: string): PersistedFeed | undefined {
     v: 1, ...(typeof d.savedAt === 'string' ? { savedAt: d.savedAt } : {}),
     ...(typeof d.reconciledAt === 'string' ? { reconciledAt: d.reconciledAt } : {}),
     ...(typeof d.capped === 'boolean' ? { capped: d.capped } : {}),
+    ...(typeof d.ownCells === 'boolean' ? { ownCells: d.ownCells } : {}),
     operator, cursor, since,
     entries: entries as unknown as readonly (ShareStateEntry & { readonly changedAt: string })[],
     seen,

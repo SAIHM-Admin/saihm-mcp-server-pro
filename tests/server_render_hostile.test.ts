@@ -216,7 +216,7 @@ function startMock(opts: MockOpts = {}): { server: Server; base: () => string } 
         if (m === 'saihm_revoke_share') return send(200, { cellId: X, recipient: X, revoked: X });
         if (m === 'saihm_share') return send(200, { cellId: X, sharer: X, recipient: X });
         if (m === 'saihm_recall')
-          return send(200, params.cellId ? { found: true, wire: opts.recallOneWire } : (opts.recallAll ?? []));
+          return send(200, params.cellId ? (opts.recallOneWire === undefined ? { found: false } : { found: true, wire: opts.recallOneWire }) : (opts.recallAll ?? []));
         return send(404, { error: 'unknown_method' });
       });
     }
@@ -398,9 +398,12 @@ test('saihm_forget: a hostile receipt cannot mint a line, and names the cell the
     // The cell id is the agent's own argument. This is a DESTRUCTIVE tool: an endpoint that echoes a
     // different id used to have the receipt report an erasure of a cell that was never touched.
     assert.match(r.text, /^FORGOTTEN \[cellTheAgentChose\] complete=/);
-    // The three outcome fields ARE the endpoint's — only it knows them — so they are rendered, and
-    // rendered fenced. Their payload survives as inert prose with its structure removed.
-    assert.match(r.text, /complete=A\?RECALL/, 'the payload must be present but flattened, not dropped');
+    // The three outcome fields ARE the endpoint's — only it knows them. Each is resolved to what it must
+    // be (a boolean, a count, a bounded epoch) ONCE, for the structure and the text alike: a hostile
+    // string is none of them, so it reads as the marker here exactly as it reads null there. Rendering
+    // it fenced instead let `complete: "true"` read complete=true beside a structured null.
+    assert.match(r.text, / complete=\(malformed\) sharesPurged=\(malformed\) epoch=\(malformed\)$/, 'each outcome field is the marker');
+    assert.equal(r.text.includes('RECALL'), false, 'no byte of the hostile payload reaches the receipt');
   });
 });
 
@@ -695,18 +698,21 @@ test('saihm_share / saihm_revoke_share: receipts name the agent’s own argument
 test('every hostile scalar is capped at MAX_SCALAR_CHARS, marker included', async () => {
   // The cap is what turns a 16MiB response into a bounded line. Asserted against the IMPORTED
   // constant so the two move together, and pinned to a literal below so neither can drift silently.
+  // On `saihm_revoke_share`'s `revoked`, an endpoint scalar rendered fenced as it came (forget's outcome fields are
+  // resolved to their types first, so a hostile string there is the marker, not a cut payload).
+  const recip = deriveIdentity(fromHex('44'.repeat(32)));
   await withHostileServer({}, async (d) => {
-    const r = await callText(d, 3, 'saihm_forget', { id: 'c1' });
-    // Delimited on the NEXT field's label, not on whitespace: a fenced payload keeps its spaces —
+    const r = await callText(d, 3, 'saihm_revoke_share', { cellId: 'c1', recipientHex: toHex(recip.agentIdHash) });
+    // Delimited on the line's end, not on whitespace: a fenced payload keeps its spaces —
     // only the characters that carry structure are removed — so `\S+` would stop at the first one.
-    const complete = /complete=(.*) sharesPurged=/.exec(r.text)?.[1];
-    assert.ok(complete, `could not locate the fenced field in: ${r.text}`);
+    const revoked = /revoked=(.*)$/.exec(r.text)?.[1];
+    assert.ok(revoked, `could not locate the fenced field in: ${r.text}`);
     assert.equal(
-      complete.length,
+      revoked.length,
       MAX_SCALAR_CHARS + 1,
       'a truncated field is exactly the budget plus the one-character marker',
     );
-    assert.ok(complete.endsWith('…'), 'the truncation marker must be present on a field that was cut');
+    assert.ok(revoked.endsWith('…'), 'the truncation marker must be present on a field that was cut');
   });
 });
 

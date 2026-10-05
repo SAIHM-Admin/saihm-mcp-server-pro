@@ -65,16 +65,33 @@ export const SHARE_STATES_FILENAME = 'share-states.json';
 /** The share feed's position and map across restarts. */
 export const FEED_STATE_FILENAME = 'feed-state.json';
 
-const OUR_FILENAMES: readonly string[] = [FEED_FILENAME, SHARE_STATES_FILENAME, FEED_STATE_FILENAME];
+/** Changes to this identity's own cells, as the event feed reports them (written only by the lease holder). */
+export const CHANGES_FILENAME = 'changes.ndjson';
+
+/** The lease naming the one process that polls and writes this tenant directory's event files. */
+export const FEED_LOCK_FILENAME = 'feed.lock';
+
+/** The one fixed name a rotated line file moves to, replacing the previous one. */
+export const PREDECESSOR_SUFFIX = '.1';
+
+const OUR_FILENAMES: readonly string[] = [
+  FEED_FILENAME, SHARE_STATES_FILENAME, FEED_STATE_FILENAME, CHANGES_FILENAME, FEED_LOCK_FILENAME,
+  `${FEED_FILENAME}${PREDECESSOR_SUFFIX}`, `${CHANGES_FILENAME}${PREDECESSOR_SUFFIX}`,
+];
+
+/** The folder warm-start payloads pass through (warm-start.ts), which SHM may create before any file here exists. */
+export const WARM_START_FOLDER = 'warm-start';
 
 /**
  * Whether a tenant directory's entries make it this package's: empty, holding one of its files, or holding only what
- * a write of one of them leaves while it runs (its lock and temporary file). They live beside each other under one
- * root, and any of them may create the directory first, so whichever arrives first must not read as another store's.
+ * a write of one of them leaves while it runs (its lock and temporary file) and the warm-start folder. They live beside
+ * each other under one root, and any of them may create the directory first, so whichever arrives first must not read
+ * as another store's. The warm-start folder alone never makes a directory ours when anything foreign sits beside it:
+ * another store can use a folder of that name.
  */
 export function tenantDirIsOurs(entries: readonly string[]): boolean {
   return entries.length === 0 || entries.some((e) => OUR_FILENAMES.includes(e))
-    || entries.every((e) => OUR_FILENAMES.some((n) => e.startsWith(`${n}.`)));
+    || entries.every((e) => e === WARM_START_FOLDER || OUR_FILENAMES.some((n) => e.startsWith(`${n}.`)));
 }
 
 /** Max bytes for one serialized line INCLUDING its terminating newline. */
@@ -102,8 +119,11 @@ export const FEED_VERSION = 1;
  */
 export const MAX_FEED_CELL_ID_CHARS = 64;
 
-/** Which emit site produced a line. Consumers use it to explain an INCOMPLETE in a report. */
-export type ErasureFeedSource = 'mcp-client' | 'blind-endpoint-pre' | 'blind-endpoint-post';
+/**
+ * Which emit site produced a line. Consumers use it to explain an INCOMPLETE in a report. `server-event` is an erasure
+ * the event feed reported, made by another process or device of this identity.
+ */
+export type ErasureFeedSource = 'mcp-client' | 'blind-endpoint-pre' | 'blind-endpoint-post' | 'server-event';
 
 export interface ErasureFeedRecord {
   readonly cellId: string;
@@ -119,6 +139,11 @@ export interface ErasureFeedRecord {
    */
   readonly at: string;
   /**
+   * A `server-event` line only: this client's clock when the event arrived, in the same form as `at` (which is then
+   * the server's time of the erasure). The two split the erasure's lag into server-to-client and client-to-consumer.
+   */
+  readonly receivedAt?: string;
+  /**
    * TRUE only where the per-cell key is actually destroyed. On an access-control-erasure runtime
    * this is permanently `false` and that is not a defect — the consumer records INCOMPLETE with the
    * reason and purges its derived artifacts regardless. Never forward an endpoint's `complete`
@@ -126,6 +151,16 @@ export interface ErasureFeedRecord {
    * site that cannot produce an anchor must state `false`.
    */
   readonly complete: boolean;
+  /**
+   * Why `complete` is false, exactly as the forget answer or the `cell-erased` event states it, after the same
+   * narrowing at both emit sites: given only beside the endpoint's own `complete: false`, and only as one of these two.
+   * `not-found`: there is nothing (more) to erase, the id was never written or is erased already; that is not a
+   * failed erasure, and the line is still written, so a reader can drop what it still derives from an id erased before.
+   * `not-attested`: the destruction could not be made durable yet; forget the id again later. A reason the endpoint
+   * does not give, or gives as anything else, is OMITTED, never mapped onto the nearest of these: a plausible reason
+   * the endpoint did not state is a statement nobody made. Never beside `complete: true`.
+   */
+  readonly reason?: 'not-found' | 'not-attested';
   /** Verbatim from the erasure receipt. REQUIRED when `complete` is true; omitted otherwise. */
   readonly destructionAnchor?: string;
   readonly source: ErasureFeedSource;
@@ -143,8 +178,9 @@ const HEX64 = /^[0-9a-f]{64}$/;
  * it in a `finally` still leaks on the one path that matters, the throwing one.
  */
 export function resolveFeedRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const explicit = env['SAIHM_ERASURE_FEED_DIR'];
-  // Blank counts as unset, as for the identity's folder: spaces alone are not a place to write.
+  // Blank counts as unset, for both, as for the identity's folder: spaces alone are not a place to write. A blank
+  // SAIHM_ERASURE_FEED_DIR (an empty install-form field) threw while a blank SAIHM_HOME fell back to the default.
+  const explicit = env['SAIHM_ERASURE_FEED_DIR']?.trim() ? env['SAIHM_ERASURE_FEED_DIR'] : undefined;
   const home = env['SAIHM_HOME']?.trim() ? env['SAIHM_HOME'] : undefined;
   const root = explicit ?? home ?? pathJoin(homedir(), '.saihm');
   if (!isAbsolute(root)) {
@@ -235,13 +271,26 @@ export function buildFeedLine(rec: ErasureFeedRecord): string {
         `otherwise, and a refused line purges nothing. Emit complete:false where no anchor exists.`,
     );
   }
+  // REFUSED, not dropped, as above: a reason says why an erasure is NOT attested, so beside complete:true it
+  // contradicts the line, and outside the two agreed values it is a reason no reader can act on. Both emit sites
+  // narrow first, so only a programming error reaches this; the value is not echoed, as it would be endpoint-chosen
+  // text in a receipt.
+  if (rec.reason !== undefined && (rec.complete || (rec.reason !== 'not-found' && rec.reason !== 'not-attested'))) {
+    throw new ErasureFeedError(
+      `a reason travels only beside complete:false, and only as not-found or not-attested; this record ` +
+        `states one ${rec.complete ? 'beside complete:true' : 'outside those two'}. Omit a reason the endpoint did ` +
+        `not state as one of them, rather than write a line that says something nobody said.`,
+    );
+  }
   const obj: Record<string, unknown> = {
     v: FEED_VERSION,
     cellId: rec.cellId,
     agentIdHash: rec.agentIdHash.toLowerCase(),
     at: rec.at,
-    complete: rec.complete,
   };
+  if (rec.receivedAt !== undefined) obj['receivedAt'] = rec.receivedAt;
+  obj['complete'] = rec.complete;
+  if (rec.reason !== undefined) obj['reason'] = rec.reason;
   if (rec.destructionAnchor !== undefined) obj['destructionAnchor'] = rec.destructionAnchor;
   obj['source'] = rec.source;
 
@@ -313,6 +362,42 @@ export function appendFeedLine(path: string, line: string): void {
     throw e;
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Append several lines to one file: each line its own write (so no line is ever split between two appends), one flush
+ * for all of them, before any of them is relied on. A line cut short is taken back exactly as {@link appendFeedLine}
+ * takes one back, and the first failure is thrown: the lines before it were written, the rest were not attempted.
+ */
+export function appendFeedLines(path: string, lines: readonly string[]): void {
+  if (lines.length === 0) return;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // Not `fd`: a source sweep keys an open by the name it is bound to, and that name belongs to the single append above.
+  const out = openSync(path, 'a', 0o600);
+  try {
+    for (const line of lines) {
+      const buf = Buffer.from(line, 'utf8');
+      const sizeBefore = fstatSync(out).size;
+      let off = 0;
+      try {
+        while (off < buf.length) {
+          const n = writeSync(out, buf, off, buf.length - off);
+          if (n <= 0) throw new ErasureFeedError(`a feed line could not be written in full: ${buf.length - off} of ${buf.length} bytes still owed`);
+          off += n;
+        }
+      } catch (e) {
+        try {
+          if (off > 0 && fstatSync(out).size === sizeBefore + off) ftruncateSync(out, sizeBefore);
+        } catch {
+          /* the line stays partial and the caller is told */
+        }
+        throw e;
+      }
+    }
+    fsyncSync(out);
+  } finally {
+    closeSync(out);
   }
 }
 

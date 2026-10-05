@@ -162,6 +162,8 @@ function startMock(
           lastRecallParams = params;
           // A shared-read carries {sharer, cellId}; default to no live grant (null path).
           if (params.sharer) return send(200, sharedReply ?? { found: false });
+          // An own cell read by id: no such cell here.
+          if (params.cellId !== undefined) return send(200, { found: false });
           // Own recall-all => empty.
           return send(200, []);
         }
@@ -365,17 +367,25 @@ test('saihm_recall shared-read: EACH partial-arg shape is rejected before any ne
   }
 });
 
-test('saihm_recall shared-read: record/cellId WITHOUT the sharer pin fails loud (no silent own-recall)', async () => {
+test('saihm_recall shared-read: a record WITHOUT the sharer pin fails loud; a lone cellId reads an OWN cell', async () => {
   const mock = startMock();
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   const d = startServer(mock.base() + '/mcp');
   try {
     await handshake(d);
-    const r = await callText(d, 3, 'saihm_recall', { cellId: 'cellShared9' });
-    assert.equal(r.isError, true);
-    assert.match(r.text, /sharerPinnedAgentIdHashHex, sharerRecord, and cellId together/);
-    // Must NOT have fallen through to an own-recall call.
-    assert.equal(mock.lastRecall(), null, 'partial shared-read args must not trigger own recall');
+    const record = encodeIdentityRecord(deriveIdentity(new Uint8Array(32).fill(63)).identityRecord);
+    for (const [i, args] of [{ sharerRecord: record }, { sharerRecord: record, cellId: 'cellShared9' }].entries()) {
+      const r = await callText(d, 3 + i, 'saihm_recall', args);
+      assert.equal(r.isError, true, JSON.stringify(Object.keys(args)));
+      assert.match(r.text, /sharerPinnedAgentIdHashHex, sharerRecord, and cellId together/);
+    }
+    // Must NOT have fallen through to any recall call.
+    assert.equal(mock.lastRecall(), null, 'partial shared-read args must not trigger a recall');
+    // A cellId with no sharer field is an own-cell read: the endpoint is asked for that one cell, never as a shared read.
+    const own = await callText(d, 9, 'saihm_recall', { cellId: 'cellShared9' });
+    assert.equal(own.isError, false, own.text);
+    assert.match(own.text, /^No memory with that cell id/);
+    assert.deepEqual(mock.lastRecall(), { cellId: 'cellShared9' });
   } finally {
     d.proc.kill();
     await new Promise<void>((r) => mock.server.close(() => r()));

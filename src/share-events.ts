@@ -6,6 +6,7 @@
  * reconcile against the listing. Nothing here opens content: entries carry public identifiers only, and a sender stays
  * unverified until the cell is read and its signature checked.
  */
+import { isoTime } from './change-feed.js';
 
 export interface EventsCapability {
   readonly v: readonly number[];
@@ -18,6 +19,8 @@ export interface EventsCapability {
   readonly maxPollsPerIdentity: number;
   readonly minEmptyPollMs: number;
   readonly maxCellIdBytes: number;
+  /** The kinds the operator can send, when it lists them; absent means the v1 share kinds only. */
+  readonly kinds?: readonly string[];
 }
 
 export interface PollAnswer {
@@ -31,6 +34,8 @@ export interface PollBody {
   readonly cursor: string | null;
   readonly waitMs: number;
   readonly max: number;
+  /** The additional kinds this poll asks for: the own-cell kinds, only from the writer of the tenant directory. */
+  readonly kinds?: readonly string[];
 }
 
 export interface ListingEntry {
@@ -115,11 +120,58 @@ export interface PersistedFeed {
   readonly since: string | null;
   readonly entries: readonly (ShareStateEntry & { readonly changedAt: string })[];
   readonly seen: readonly [string, number][];
+  /**
+   * True when every own-cell event before `cursor` has a line in the tenant directory's files, or a gap marker covers
+   * it: only then may a writer resume from this cursor without a gap marker. Absent from a state saved by a poll that
+   * did not ask for own-cell events.
+   */
+  readonly ownCells?: boolean;
 }
 
 export interface FeedStore {
   load(): PersistedFeed | undefined;
   save(state: PersistedFeed): void;
+}
+
+/** The own-cell event kinds a poll can ask for. */
+export const OWN_CELL_KINDS: readonly string[] = ['cell-written', 'cell-erased'];
+
+/** One poll answer, as the writer of the own-cell files receives it. */
+export interface OwnAnswer {
+  /** Every event of the answer, as sent; the writer picks the own-cell kinds and resyncs. */
+  readonly events: readonly unknown[];
+  /** Whether this process has already applied an event id (its line was written then). */
+  readonly seen: (id: string) => boolean;
+  /** The answer's cursor. */
+  readonly cursor: string;
+  /** Whether the answer moved the cursor (a `position` marker is owed). */
+  readonly moved: boolean;
+  /** The operator reported a gap. */
+  readonly gap: boolean;
+  /** This writer does not continue from a cursor whose own-cell events are all covered: a gap marker is owed. */
+  readonly fresh: boolean;
+  /**
+   * The cursor this poll presented, or null when it asked from the head. With `fresh`, it names the gap: a cursor
+   * presented without coverage moved past own-cell events no line records — minted by polls that did not ask for them
+   * (an upgraded device's saved cursor, or this process's own while it polled without them): `kinds-changed`; asking
+   * from the head (no state, a state refused, discarded or another operator's): `fresh-start`.
+   */
+  readonly from: string | null;
+  /** This client's clock when the answer arrived. */
+  readonly receivedAt: string;
+}
+
+/** The writer of a tenant directory's own-cell files and its lease (see change-feed.ts). */
+export interface OwnCellWriter {
+  /** Become, or stay, the one writer of the directory. */
+  lead(): 'held' | 'busy' | 'unavailable';
+  /** Whether this process still holds the lease. */
+  holds(): boolean;
+  /** Write one answer's lines and markers. Nothing of the answer may be applied unless this says `written`. */
+  writeAnswer(answer: OwnAnswer): 'written' | 'refused' | 'lost';
+  /** Rewrite the share map file, after the answer's lines and markers and before the cursor is persisted. */
+  committed(states: ShareStates): void;
+  release(): void;
 }
 
 export interface ShareEventsFeedOptions {
@@ -134,6 +186,12 @@ export interface ShareEventsFeedOptions {
   readonly minWaitMs?: number;
   /** Called after any change to the map (for a host that surfaces resource updates). */
   readonly onChange?: () => void;
+  /**
+   * The writer of the tenant directory's own-cell files. Used only while the operator lists both own-cell kinds: then
+   * the process holding the writer's lease polls for them and writes the files, and any other process waits for the
+   * lease instead of polling. Without it, or without those kinds, the feed polls exactly as before they existed.
+   */
+  readonly own?: OwnCellWriter;
 }
 
 const DAY_MS = 86_400_000;
@@ -166,6 +224,15 @@ const HELD_POLL_BUDGET_MS = 1_000;
 const PERSIST_MIN_INTERVAL_MS = 1_000;
 const INFO_RETRY_MS = 5_000;
 const INFO_RETRY_MAX_MS = 900_000;
+/** How often a process that is not the writer tries for the lease (the holder's lease goes stale at 30 s). */
+const LEASE_RETRY_MS = 10_000;
+/** A process that just became the writer reads the info document again when what it holds is older than this. */
+const LEAD_INFO_MAX_AGE_MS = 60_000;
+/** How long a status's word that the own-cell kinds are offered holds, when the offer read here disagrees with it. */
+const STATUS_OFFER_MS = 600_000;
+/** A refused write is retried after this, doubling up to the maximum. */
+const WRITE_RETRY_MS = 1_000;
+const WRITE_RETRY_MAX_MS = 60_000;
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 type Entry = Mutable<ShareStateEntry> & { changedAt: string };
@@ -189,10 +256,16 @@ export function capabilityFrom(raw: unknown): EventsCapability | null {
   if (!Array.isArray(r.v) || !r.v.includes(1)) return null;
   if (typeof r.path !== 'string' || r.path.length > 256 || !EVENTS_PATH.test(r.path)) return null;
   if (typeof r.operator !== 'string' || !HEX32.test(r.operator)) return null;
-  return withOperator(r, r.path, r.operator);
+  // Names only, bounded: the list says what may be asked for, and a kind this client does not know is never asked for.
+  const kinds = Array.isArray(r.kinds)
+    ? r.kinds.slice(0, 64).filter((k): k is string => typeof k === 'string' && k.length <= 64)
+    : undefined;
+  return withOperator(r, r.path, r.operator, kinds);
 }
 
-function withOperator(r: Record<string, unknown> | EventsCapability, path: string, operator: string): EventsCapability {
+function withOperator(
+  r: Record<string, unknown> | EventsCapability, path: string, operator: string, kinds: readonly string[] | undefined,
+): EventsCapability {
   return {
     v: [1], path, operator,
     maxWaitMs: intIn(r.maxWaitMs, 0, 25_000, 25_000),
@@ -202,7 +275,13 @@ function withOperator(r: Record<string, unknown> | EventsCapability, path: strin
     maxPollsPerIdentity: intIn(r.maxPollsPerIdentity, 1, 64, 4),
     minEmptyPollMs: intIn(r.minEmptyPollMs, 0, 60_000, 5_000),
     maxCellIdBytes: intIn(r.maxCellIdBytes, 1, MAX_CELL_ID_BYTES, 256),
+    ...(kinds !== undefined ? { kinds } : {}),
   };
+}
+
+/** Whether the operator lists BOTH own-cell kinds: one without the other would leave changes it cannot report. */
+export function offersOwnCells(caps: EventsCapability): boolean {
+  return caps.kinds !== undefined && OWN_CELL_KINDS.every((k) => caps.kinds!.includes(k));
 }
 
 /**
@@ -308,6 +387,7 @@ export class ShareEventsFeed {
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   private readonly minWaitMs: number;
   private readonly onChange: (() => void) | undefined;
+  private readonly own: OwnCellWriter | undefined;
 
   private caps: EventsCapability | null = null;
   private operator: string | null = null;
@@ -329,6 +409,27 @@ export class ShareEventsFeed {
   private restoredAt: number | null = null;
   private lastPersistAt = -Infinity;
   private headerKey = '';
+  /** When the capability was last read from the info document. */
+  private capsAt = -Infinity;
+  /** Every own-cell event before `cursor` has a line, or a gap marker covers it (see `PersistedFeed.ownCells`). */
+  private ownCovered = false;
+  /** This process holds the writer's lease: it polls for the own-cell kinds and writes the tenant directory's files. */
+  private leading = false;
+  /**
+   * Another process holds the lease, or this one gave it up while it does not poll: it neither polls nor writes, and
+   * tries for the lease from time to time.
+   */
+  private waiting = false;
+  /** The operator offered both own-cell kinds when the offer was last read: the share map is then the writer's alone. */
+  private ownOffered = false;
+  /** Until when the last status's word that this identity may use both own-cell kinds holds (see noteStatusOffer). */
+  private statusOwnUntil = -Infinity;
+  /**
+   * This process gave the lease up when it stopped. A host can stop the feed twice (stdin's `end`, then `close`); a
+   * second stop must not save again, because the position is no longer this process's: another process may already
+   * have taken the lease and saved a later one.
+   */
+  private gaveUpLead = false;
   /** Why the loop stopped, when it did: `unsupported`, `tier`, `erased`. */
   stopped: FeedStopped | null = null;
 
@@ -341,7 +442,12 @@ export class ShareEventsFeed {
     this.sleep = opts.sleep ?? defaultSleep;
     this.minWaitMs = opts.minWaitMs ?? 1_000;
     this.onChange = opts.onChange;
-    const saved = this.store?.load();
+    this.own = opts.own;
+    this.restore(this.store?.load());
+  }
+
+  /** Take up a persisted state: the one this process starts from, or the one a previous writer left. */
+  private restore(saved: PersistedFeed | undefined): void {
     if (saved && saved.v === 1) {
       this.operator = saved.operator;
       this.cursor = saved.cursor;
@@ -352,6 +458,8 @@ export class ShareEventsFeed {
         if (entry) this.entries.set(keyOf(entry.sharer, entry.cellId), entry);
       }
       for (const [id, at] of saved.seen) this.rememberId(id, at);
+      // A cursor saved by a poll that did not ask for own-cell events has moved past events no line records.
+      this.ownCovered = saved.ownCells === true && saved.cursor !== null;
       // A restored cursor is a position in this operator's log, so the listing can wait for the first answer instead
       // of being fetched again. The map is NOT complete until that answer comes: a previous process's map must not
       // read as one this process confirmed.
@@ -370,6 +478,29 @@ export class ShareEventsFeed {
         if (!Number.isNaN(r)) this.lastReconcile = r;
       }
     }
+  }
+
+  /**
+   * This process just became the writer: it continues from what the previous writer persisted, not from its own
+   * position, which stopped moving when it began to wait. Without a state to continue from it starts cold, and its
+   * first answer is preceded by a fresh-start gap marker.
+   */
+  private reloadForLead(): void {
+    this.ownCovered = false;
+    if (!this.store) return;
+    this.entries.clear();
+    this.seen.clear();
+    this.operator = null;
+    this.cursor = null;
+    this.since = null;
+    this.capped = false;
+    this.pendingReconcile = true;
+    this.warm = false;
+    this.restoredAt = null;
+    this.lastReconcile = -Infinity;
+    this.asOf = null;
+    this.restore(this.store.load());
+    this.changed();
   }
 
   /** The map as a consumer reads it. */
@@ -408,17 +539,79 @@ export class ShareEventsFeed {
 
   start(): void {
     if (this.running) return;
+    this.gaveUpLead = false;
     if (this.startedAt === null) this.startedAt = new Date(this.now()).toISOString();
     this.abort = new AbortController();
     this.running = this.loop(this.abort.signal).catch(() => undefined).finally(() => { this.running = undefined; });
   }
 
-  /** Ends the loop, including a poll in flight. */
-  async stop(): Promise<void> {
+  /**
+   * Ends the loop, including a poll in flight. `final` runs before the writer's lease is given up, so a last write of
+   * the share map is still the writer's.
+   */
+  async stop(final?: () => void): Promise<void> {
     this.abort?.abort();
     await this.running;
     // The last position, whatever the interval above would have said: this is the save a restart reads.
     this.persist(true);
+    final?.();
+    if (this.leading) { this.leading = false; this.gaveUpLead = true; this.own?.release(); }
+  }
+
+  /**
+   * `solo`: the feed polls as before own-cell events existed (one of possibly several processes doing so). `writer`:
+   * this process holds the lease and writes the tenant directory's files. `waiting`: another process does; this one
+   * reads the share map from the file.
+   */
+  get role(): 'solo' | 'writer' | 'waiting' {
+    return this.waiting ? 'waiting' : this.leading ? 'writer' : 'solo';
+  }
+
+  /**
+   * Whether this process may write the share map file. While the operator offers the own-cell kinds, the file is the
+   * heartbeat of the own-cell files as well (its `asOf` says nothing changed that no line records), so only the holder
+   * of the writer's lease writes it — not a process waiting for the lease, and not one that cannot follow own cells at
+   * all (its erasure feed off, or a directory it cannot write): its polls carry share events only, and a fresh `asOf`
+   * from it would vouch for own-cell files nobody is writing. Without those kinds every process writes it, as before.
+   */
+  mayWriteMap(): boolean {
+    if (this.leading) return this.own!.holds();
+    return !this.ownOffered && !this.statusOwn();
+  }
+
+  /** Whether a status within the last STATUS_OFFER_MS offered both own-cell kinds: a status's word is fresh, not lasting. */
+  private statusOwn(): boolean {
+    return this.now() < this.statusOwnUntil;
+  }
+
+  /**
+   * Stop being the writer, where this process is it, so another process may lead while this one does not poll. First,
+   * as at a stop, while the lease is still held: the position a successor resumes from, then the map, which is how a
+   * reader learns why following stopped (`stopped`, and `complete` false); once the lease is given up no process writes
+   * the map while the offer last read names the own-cell kinds. From then on the position and the map are the next
+   * writer's: this process saves neither, as one waiting for the lease does, until it leads again.
+   */
+  private giveUpLead(): void {
+    if (!this.leading) return;
+    this.persist(true);
+    if (this.own!.holds()) this.own!.committed(this.snapshot());
+    this.leading = false;
+    this.waiting = true;
+    this.own!.release();
+  }
+
+  /**
+   * What the identity's status says it may use (`features.events.kinds`), as it says it. This feed reads the server's
+   * offer only at start and daily, so when the status offers both own-cell kinds and the offer last read does not (the
+   * operator has just turned them on, or the offer was read stale), the offer is read again at once — and every minute
+   * while the two disagree — and meanwhile only the writer of the own-cell files writes the share map: a reader that
+   * decides from the status must not take a share-only poller's fresh asOf for own-cell files nobody writes yet.
+   */
+  noteStatusOffer(kinds: readonly unknown[] | undefined): void {
+    const offered = kinds !== undefined && OWN_CELL_KINDS.every((k) => kinds.includes(k));
+    // Its word holds for STATUS_OFFER_MS: an operator that withdraws the kinds later is then followed by the offer alone.
+    this.statusOwnUntil = offered ? this.now() + STATUS_OFFER_MS : -Infinity;
+    if (offered && this.own !== undefined && this.caps !== null && !offersOwnCells(this.caps)) this.caps = null;
   }
 
   // ── the loop ──
@@ -427,6 +620,7 @@ export class ShareEventsFeed {
     let networkBackoff = 1_000;
     let authBackoff = 1_000;
     let infoBackoff = INFO_RETRY_MS;
+    let writeBackoff = WRITE_RETRY_MS;
     while (!signal.aborted) {
       this.noteHeader();
       if (!this.caps) {
@@ -443,32 +637,58 @@ export class ShareEventsFeed {
         if (signal.aborted) break;
         infoBackoff = INFO_RETRY_MS;
         this.caps = capabilityFrom(raw);
+        this.capsAt = this.now();
         if (!this.caps) {
           // An answer that offers no feed: the map is not followed until a later reconciliation completes.
           this.stopped = 'unsupported';
           this.pendingReconcile = true;
           this.noteHeader();
+          // A day without polling is no day to hold the writer's lease: another process may find a feed sooner.
+          this.giveUpLead();
           await this.sleep(DAY_MS, signal);
           continue;
         }
         this.stopped = null;
-        if (this.operator !== this.caps.operator) this.restartFor(this.caps.operator);
-        // A restore older than the operator keeps events for holds a cursor it will certainly refuse. One rejected
-        // poll per restart is nothing here and a great deal in aggregate, so reconcile without asking.
-        if (this.warm && this.restoredAt !== null && this.now() - this.restoredAt > this.caps.retentionS * 1000) {
-          this.cursor = null;
-          this.warm = false;
-          this.pendingReconcile = true;
-        }
-        this.restoredAt = null;
+        this.adoptCaps(this.caps);
         this.noteHeader();   // before the first poll, which can wait the whole long poll
       }
       const caps = this.caps;
+      // Own-cell events: asked for only while the operator offers both kinds, and only by the writer of the tenant
+      // directory. Anything else polls exactly as before those kinds existed.
+      let own = this.own !== undefined && offersOwnCells(caps);
+      if (own) {
+        const lead = this.own!.lead();
+        if (lead === 'busy') {
+          // Another process writes this directory and polls for it: this one does neither until the lease is free.
+          this.leading = false;
+          this.waiting = true;
+          await this.sleep(LEASE_RETRY_MS + Math.floor(this.random() * LEASE_RETRY_MS), signal);
+          if (this.now() - this.capsAt >= DAY_MS) this.caps = null;
+          continue;
+        }
+        if (lead === 'unavailable') {
+          own = false;   // no process can write this directory's files: poll as before
+        } else if (!this.leading) {
+          this.leading = true;
+          this.waiting = false;
+          this.reloadForLead();
+          // What this process read may predate the writer it replaces by a day: read the offer again first.
+          if (this.now() - this.capsAt > LEAD_INFO_MAX_AGE_MS) { this.caps = null; continue; }
+          this.adoptCaps(caps);
+        }
+      }
+      if (!own) {
+        if (this.leading) { this.leading = false; this.own!.release(); }
+        this.waiting = false;
+      }
       // A warm process asks for what it missed and gets it at once; only a confirmed map waits on a long poll.
       const waitMs = this.cursor === null || this.warm ? 0 : caps.maxWaitMs;
+      const pollBody: PollBody = own
+        ? { v: 1, cursor: this.cursor, waitMs, max: caps.maxEvents, kinds: OWN_CELL_KINDS }
+        : { v: 1, cursor: this.cursor, waitMs, max: caps.maxEvents };
       let answer: PollAnswer;
       try {
-        answer = await this.transport.poll(caps.path, { v: 1, cursor: this.cursor, waitMs, max: caps.maxEvents }, waitMs + 10_000, signal);
+        answer = await this.transport.poll(caps.path, pollBody, waitMs + 10_000, signal);
         networkBackoff = 1_000;
       } catch {
         if (signal.aborted) break;
@@ -486,25 +706,57 @@ export class ShareEventsFeed {
         if (typeof body.operator === 'string' && body.operator !== caps.operator) {
           // The operator's event data changed under this URL. Its answer says so; the info route may still be cached.
           if (!HEX32.test(body.operator)) { await this.sleep(10_000, signal); continue; }
-          this.caps = withOperator(caps, caps.path, body.operator);
+          this.caps = withOperator(caps, caps.path, body.operator, caps.kinds);
           this.restartFor(body.operator);
           continue;
         }
-        this.apply(Array.isArray(body.events) ? body.events : []);
+        // An answer that names no events array cannot say what it moved past: with own-cell kinds asked for it is asked
+        // for again rather than applied, as one without a cursor is; a share-only poll reconciles the map instead.
+        if (own && !Array.isArray(body.events)) { await this.sleep(10_000, signal); continue; }
+        const events = Array.isArray(body.events) ? body.events : [];
+        if (own) {
+          // Lines and markers first: nothing of an answer is applied, and no cursor moves, before they are written.
+          const written = this.own!.writeAnswer({
+            events, seen: (id) => this.seen.has(id), cursor: body.cursor, moved: body.cursor !== pollBody.cursor,
+            gap: body.gap === true, fresh: !this.ownCovered, from: pollBody.cursor,
+            receivedAt: new Date(this.now()).toISOString(),
+          });
+          if (written === 'lost') { this.leading = false; this.own!.release(); continue; }
+          if (written === 'refused') {
+            // Not even a gap marker could be written: ask for the same position again once one can be.
+            await this.sleep(writeBackoff, signal);
+            writeBackoff = Math.min(WRITE_RETRY_MAX_MS, writeBackoff * 2);
+            continue;
+          }
+          writeBackoff = WRITE_RETRY_MS;
+          this.ownCovered = true;
+        } else {
+          this.ownCovered = false;
+        }
+        this.apply(events, own);
         this.cursor = body.cursor;
         this.asOf = new Date(this.now()).toISOString();
         this.warm = false;
         if (body.gap === true) this.pendingReconcile = true;
         const due = this.pendingReconcile || this.now() - this.lastReconcile >= DAY_MS;
         if (due && this.now() >= this.nextReconcileAt) await this.reconcile(signal);
+        // The share map after the lines and markers, the cursor last: its `asOf` moves with every answer, and a restart
+        // never resumes from a cursor ahead of what the files cover.
+        if (own && this.own!.holds()) this.own!.committed(this.snapshot());
         this.persist();
+        // The info document, at least daily, whatever is followed: an operator that starts or stops offering the
+        // own-cell kinds is seen within a day, by a process polling for share events alone too; and every minute while
+        // the identity's status offers own-cell kinds the offer read here does not (see noteStatusOffer).
+        const disagrees = this.statusOwn() && this.own !== undefined && !offersOwnCells(caps);
+        if (this.now() - this.capsAt >= (disagrees ? LEAD_INFO_MAX_AGE_MS : DAY_MS)) this.caps = null;
         // A wait named in a 200 answer gets the same floor as one named in a refusal.
         if (retryAfterMs !== undefined) await this.sleep(Math.max(this.minWaitMs, retryAfterMs), signal);
         continue;
       }
-      if (answer.status === 400 && body.error === 'bad_cursor') { this.cursor = null; this.pendingReconcile = true; continue; }
+      if (answer.status === 400 && body.error === 'bad_cursor') { this.cursor = null; this.ownCovered = false; this.pendingReconcile = true; continue; }
       if (answer.status === 402) {
         this.stopped = 'tier'; this.caps = null; this.pendingReconcile = true; this.noteHeader();
+        this.giveUpLead();
         await this.sleep(DAY_MS, signal);
         continue;
       }
@@ -552,8 +804,27 @@ export class ShareEventsFeed {
   private restartFor(operator: string): void {
     this.operator = operator;
     this.cursor = null;
+    this.ownCovered = false;
     this.warm = false;
     this.pendingReconcile = true;
+  }
+
+  /**
+   * What follows a read of the offer: whether it offers own cells (which decides who writes the share map), and that
+   * another operator's position is no position here, nor is one past retention.
+   */
+  private adoptCaps(caps: EventsCapability): void {
+    this.ownOffered = offersOwnCells(caps);
+    if (this.operator !== caps.operator) this.restartFor(caps.operator);
+    // A restore older than the operator keeps events for holds a cursor it will certainly refuse. One rejected
+    // poll per restart is nothing here and a great deal in aggregate, so reconcile without asking.
+    if (this.warm && this.restoredAt !== null && this.now() - this.restoredAt > caps.retentionS * 1000) {
+      this.cursor = null;
+      this.ownCovered = false;
+      this.warm = false;
+      this.pendingReconcile = true;
+    }
+    this.restoredAt = null;
   }
 
   // ── events ──
@@ -566,7 +837,7 @@ export class ShareEventsFeed {
     }
   }
 
-  private apply(events: readonly unknown[]): void {
+  private apply(events: readonly unknown[], own = false): void {
     const window = (this.caps?.retentionS ?? DEFAULT_RETENTION_S) * 1000;
     let changed = false;
     for (const raw of events) {
@@ -576,8 +847,15 @@ export class ShareEventsFeed {
       if (id === null || this.seen.has(id)) continue;
       this.rememberId(id, this.now());
       if (ev.shrunk === true) continue;
-      const at = typeof ev.at === 'string' && !Number.isNaN(Date.parse(ev.at)) ? new Date(Date.parse(ev.at)).toISOString() : new Date(this.now()).toISOString();
-      if (ev.kind === 'resync') { this.pendingReconcile = true; continue; }
+      // Asked for by this poll and already written to the own-cell files: they name no sharer and change no share.
+      if (own && (ev.kind === 'cell-written' || ev.kind === 'cell-erased')) continue;
+      // In the one form the map holds (and a map read back is checked against): a time it cannot be is this client's.
+      const at = isoTime(ev.at) ?? new Date(this.now()).toISOString();
+      if (ev.kind === 'resync') {
+        // An own-cell resync is the writer's gap marker; the share map lost nothing.
+        if (!(own && ev.own === true)) this.pendingReconcile = true;
+        continue;
+      }
       const sharer = matching(ev.sharer, HEX64);
       // Every field is bounded here, whatever the endpoint sends: a cell id within the operator's advertised bound
       // (never more than 4,096 bytes), digit strings, a hex commitment and a known scope.
@@ -694,7 +972,11 @@ export class ShareEventsFeed {
       }
       this.pendingReconcile = false;
       if (this.since === null) this.since = nowIso;
-      this.asOf = nowIso;
+      // A completed listing proves the SHARE map current, and in share-only polling that is all the heartbeat vouches
+      // for. The writer of the own-cell files is different: its `asOf` also says no own-cell change is missing from
+      // those files, which only a poll answer naming the own-cell kinds can say. A listing run while the events route
+      // holds the writer back (a 429 or 503 at a restart or takeover) must not make the files read live meanwhile.
+      if (!this.leading) this.asOf = nowIso;
       this.reconcileRetryMs = RECONCILE_RETRY_MS;
       this.nextReconcileAt = now + RECONCILE_SPACING_MS;
     } else {
@@ -727,6 +1009,9 @@ export class ShareEventsFeed {
 
   private persist(force = false): void {
     if (!this.store) return;
+    // The cursor is the writer's: a process waiting for the lease, one that has just lost it, or one that gave it up
+    // when it stopped, never moves it.
+    if (this.waiting || this.gaveUpLead || (this.leading && !this.own!.holds())) return;
     const now = this.now();
     if (!force && now - this.lastPersistAt < PERSIST_MIN_INTERVAL_MS) return;
     this.lastPersistAt = now;
@@ -735,6 +1020,7 @@ export class ShareEventsFeed {
       ...(Number.isFinite(this.lastReconcile) ? { reconciledAt: new Date(this.lastReconcile).toISOString() } : {}),
       operator: this.operator, cursor: this.cursor, since: this.since,
       entries: [...this.entries.values()], seen: [...this.seen.entries()],
+      ...(this.leading && this.ownCovered ? { ownCells: true } : {}),
     });
   }
 

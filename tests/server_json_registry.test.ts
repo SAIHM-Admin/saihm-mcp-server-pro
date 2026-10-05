@@ -92,6 +92,14 @@ describe("RM2: the manifest cannot drift from the package it describes", () => {
       new RegExp(`^\\[${pkg.version.replace(/\./g, "\\.")}\\]:`, "m").test(changelog),
       `CHANGELOG.md has no '[${pkg.version}]:' link definition`,
     );
+    // The `[Unreleased]` link compares from THIS release's tag (it compared from v0.7.1, stale since that release).
+    // Derived from package.json, so a release commit that bumps the version and leaves the link behind fails here.
+    const unreleased = changelog.match(/^\[Unreleased\]: (.*)$/m)?.[1];
+    assert.equal(
+      unreleased,
+      `https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v${pkg.version}...HEAD`,
+      "CHANGELOG.md's [Unreleased] link does not compare from this version's tag",
+    );
   });
 
   // Gemini CLI installs the repository as an extension from this file, and shows its version: it ships with the

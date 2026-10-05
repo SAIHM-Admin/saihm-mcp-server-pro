@@ -36,6 +36,7 @@ import {
   hexOrMarker,
   scopeOrMarker,
   epochOrMarker,
+  failCode,
   failText,
 } from '../src/render_fence.js';
 import {
@@ -342,15 +343,19 @@ const seedOf = (n: ts.Node): string | null => {
   return t !== null && SEEDS.includes(t) ? t : null;
 };
 
-/** The same treatment for a LOCAL declaration - a helper that is never exported, such as `ok`. */
+/** The same treatment for a LOCAL declaration - a helper that is never exported, such as `ok` or `fail`. */
 const localSymbol = (file: string, name: string): ts.Symbol => {
   const sf = SOURCES().find((x) => x.file === file)?.sf;
   assert.ok(sf, `${file} is no longer under src/`);
   const decl = walk(sf).find(
-    (n) => ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name,
+    (n) =>
+      (ts.isVariableDeclaration(n) || ts.isFunctionDeclaration(n)) &&
+      n.name !== undefined &&
+      ts.isIdentifier(n.name) &&
+      n.name.text === name,
   );
   assert.ok(decl, `${file} no longer declares \`${name}\``);
-  const s = CHECKER().getSymbolAtLocation((decl as ts.VariableDeclaration).name);
+  const s = CHECKER().getSymbolAtLocation((decl as ts.VariableDeclaration | ts.FunctionDeclaration).name as ts.Identifier);
   assert.ok(s, `${file}: \`${name}\` has no symbol`);
   return s;
 };
@@ -399,6 +404,8 @@ const RENDER_SITES_PIN: Record<string, number> = {
   'erasure-feed.ts': 0,
   // 0 - the share events feed renders nothing; its caller surfaces the map as structured data.
   'share-events.ts': 0,
+  // 0 - the own-cell event writer renders nothing: it writes lines for a program and reports outcomes as values.
+  'change-feed.ts': 0,
   // 0 - the share map file writer renders nothing: it writes a file, and its caller swallows a failure.
   'share-states-file.ts': 0,
   // 0 - the feed state file neither renders nor reports: a state it cannot read is simply not restored.
@@ -413,6 +420,9 @@ const RENDER_SITES_PIN: Record<string, number> = {
   'identity-token.ts': 0,
   // 0 - the tool argument mapping renders nothing: it maps values before validation and wraps a transport.
   'tool-input.ts': 0,
+  // 0 - the warm-start module renders nothing: it seals, opens, checks answers and handles the payload files, and throws
+  // refusals whose text names no value; the tools render what it returns.
+  'warm-start.ts': 0,
   // 23 `ok(...)` + 8 `stdout.write` + 12 `stderr.write`. The third `stderr.write` is the `free-join`
   // failure guidance, written BEFORE the rethrow so it survives whatever `main` does with the
   // error, and to stderr so a caller piping stdout still sees it. The identity-token release added
@@ -428,7 +438,12 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // under a paid SAIHM_TIER, on the tool (`ok(tierRefusal)`) and on `free-join` (`stderr`); and on
   // `export-identity`, refusing a plan name this version does not know (`stderr`) and relaying the token's own
   // refusal of a value it cannot carry with the verb's prefix (`stderr`).
-  'server.ts': 43,
+  // Three more in 0.13.0, all `ok` in `saihm_recall`: the version listing (its values fenced in label position), and
+  // the own-cell read by id, found (the own-memory line's own fences) and not found (fixed text). And one `stderr.write`:
+  // `export-identity` refusing a relative SAIHM_HOME, fixed text naming the variable.
+  // Four more, all `ok`, one per warm-start mode: the put's receipt (`saihm_remember`), the restore and the listing
+  // (`saihm_recall`), and the delete (`saihm_forget`). Each renders a snapshot id fenced in label position and numbers.
+  'server.ts': 51,
 };
 // Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. The bar for an
 // entry is a sentence explaining why a delimiter, a label or a newline cannot reach it - no count is
@@ -453,6 +468,28 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'creates is disclosed on the sharedLines block in the same handler. Note what bounds it: every ' +
     'OTHER field on that line is fenced and labelSafe-d, so plaintext cannot forge a neighbouring ' +
     'pair - it can only be itself',
+  'server.ts:own.plaintext':
+    'the PAYLOAD of the own-cell read by id (0.13.0), raw by design exactly as `c.plaintext` above: the memory ' +
+    'the agent asked for, opened and authenticated by this client. Every other field on its line is fenced and ' +
+    'labelSafe-d, so the plaintext cannot forge a neighbouring pair - it can only be itself',
+  "server.ts:listLines.join('\\n') + (timingMalformed ? '\\n timing=' + MAL":
+    'the version listing (0.13.0). Its banner interpolates only a client-computed count and fixed text; every ' +
+    'other line is prefixed `  ! ` and each endpoint value on it - cell, seq, commit, after - is ' +
+    'labelSafe(safeScalar|shortScalar) in label position, and the withheld count is client-computed. The `+` ' +
+    'appends the timing marker: fixed text and the MALFORMED constant, chosen by a boolean. Reported only because ' +
+    'the predicate does not follow an array built above the join',
+  "server.ts:[...lines, ...sharedLines].join('\\n') + (timingMalformed ? '":
+    'the full recall (0.13.0 appended the timing marker): own-memory lines fenced as `c.plaintext` above records, ' +
+    'pointer lines prefixed `  ! ` with every endpoint value labelSafe-d or a closed-set checker, and a banner of ' +
+    'counts and fixed text (the kept end is one of two fixed phrases). The `+` adds fixed text and the MALFORMED ' +
+    'constant, chosen by a boolean. Reported only because the predicate does not follow arrays built above the join',
+  "server.ts:`RECALL 1 memories\\n [${labelSafe(safeScalar(own.cellId))}] ":
+    'the own-cell read by id (0.13.0) with the timing marker appended: cellId and seq labelSafe(safeScalar), the ' +
+    'plaintext the PAYLOAD as `own.plaintext` records, and the `+` adding fixed text and the MALFORMED constant ' +
+    'chosen by a boolean. Reported as a whole because a template inside a `+` chain is read as one piece',
+  "server.ts:'saihm: not exported - ' + relativeDirRefusal(relativeHome, ":
+    'export-identity refusing a relative SAIHM_HOME (0.13.0): a fixed prefix and `relativeDirRefusal`, fixed ' +
+    'text around the NAME of the variable from the fixed list `relativeDirSetting` checks, never its value',
   'server.ts:temporaryHomeVariable':
     "inside `ephemeralJoinRefusal`: the NAME of the variable that marked the home temporary, taken " +
     'from the fixed list `ephemeralHomeSignal` checks. A name we wrote, never a value anyone set',
@@ -506,14 +543,17 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'if a fourth occurrence appeared unfenced. Reported only because the predicate cannot see ' +
     'through a call boundary to the fence on the other side',
 };
-const SAFESCALAR_SITES_PIN = 30; // +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts; +1: `export-identity`'s tier in its summary; +1: `saihm_join`'s paid-plan answer; +2: the plan name meant, in the join's tier answer and in `export-identity`'s refusal of a tier slip
+const SAFESCALAR_SITES_PIN = 37; // +1 (warm start): a listed snapshot's `created=` time; +1 (0.13.0 review): the version listing tests whether the next page's `after` renders EXACTLY, and says so instead when it would not; +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts; +1: `export-identity`'s tier in its summary; +1: `saihm_join`'s paid-plan answer; +2: the plan name meant, in the join's tier answer and in `export-identity`'s refusal of a tier slip; +2 (0.13.0): the own-cell read by id, its cellId and seq in label position as on every own-memory line; +3 (0.13.0): the version listing, each entry's cellId and seq and the next page's `after`, all endpoint claims
 const RENDER_HELPER_EXPORTS: string[] = [
   'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
   'MAX_JOIN_FIELD_CHARS', 'MAX_PATH_FIELD_CHARS', 'MAX_PATH_MESSAGE_CHARS', 'MAX_SCALAR_CHARS',
   'MAX_STRUCTURED_SCALAR_CHARS', 'MAX_URL_FIELD_CHARS', 'MAX_URL_MESSAGE_CHARS',
-  'boundedOrMarker', 'epochOrMarker', 'failText', 'hexOrMarker', 'labelSafe', 'safeField',
+  'boundedOrMarker', 'epochOrMarker', 'failCode', 'failText', 'hexOrMarker', 'labelSafe', 'safeField',
   'safePathField', 'safeScalar', 'scopeOrMarker', 'shortScalar'
 ];
+// `failCode` is NOT a fence: it renders nothing. It answers the `{code, status}` an error result carries as
+// structured content, its code resolved by the same `safeField` call as `failText`'s bracket, so the two channels
+// never name different codes; the structured-field sweep and the error-result tests in server.test.ts read what it answers.
 const SCALAR_FENCES = [
   'safeField', 'safePathField', 'safeScalar', 'shortScalar', 'boundedOrMarker',
 ];
@@ -1207,6 +1247,12 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       MAX_SHARED_ANNOUNCEMENTS: 256,
       MAX_ANNOUNCEMENT_FIELD_CHARS: 64,
       MAX_ANNOUNCEMENT_TOTAL_CHARS: 32 * 1024,
+      // 0.13.0, what an answer says about itself: the longest Server-Timing value parsed (longer is refused whole), and
+      // the bounds a status answer's `features` must keep to pass whole (deeper or larger is null). The depth bound is
+      // what keeps a nested object from passing here and failing where the result is serialised.
+      MAX_SERVER_TIMING_CHARS: 4096,
+      MAX_FEATURES_DEPTH: 16,
+      MAX_FEATURES_CHARS: 16384,
       // Minimum age before an orphaned identity temp is swept. Not a render budget: it is the
       // margin that keeps the sweep from deleting a CONCURRENT mint that is between its write and
       // its rename. Stated as the literal it evaluates to, not as `60 * 60 * 1000`, per the
@@ -1234,6 +1280,17 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       // A TUPLE, and the first constant the widened sweep reached that no arm had ever seen. These
       // are the percentages a user is warned at; a silent edit changes what they are told and when.
       QUOTA_NAG_THRESHOLDS: [80, 95, 100],
+      // 0.13.0, the version listing: the most entries one page may hold (a longer page is refused, never cut) and the
+      // longest cell id or `next` it may carry. Bounds on what is accepted, not render budgets.
+      MAX_LISTING_PAGE: 4096,
+      MAX_LISTED_CELL_ID_CHARS: 4096,
+      // Warm start: the most an answer other than a part or the listing may hold, the most a listing may hold, the room
+      // a part read leaves for a refusal's body, and how many times a part or a commit is sent before its refusal is the
+      // answer.
+      WARM_START_ANSWER_BYTES: 65536,
+      WARM_START_LIST_BYTES: 1048576,
+      WARM_START_REFUSAL_BYTES: 4096,
+      WARM_START_ATTEMPTS: 3,
     },
     // The erasure feed's two declared numbers. `MAX_FEED_LINE_BYTES` bounds what ONE line may
     // carry, and it is enforced by REFUSAL rather than truncation - a truncated NDJSON line is not a
@@ -1264,18 +1321,32 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       DAY_MS: 86_400_000, DEFAULT_RETENTION_S: 604_800, MAX_ENTRIES: 4096, MAX_CELL_ID_BYTES: 4096, MAX_SEEN: 65536,
       RECONCILE_RETRY_MS: 60000, RECONCILE_RETRY_MAX_MS: 3600000, RECONCILE_SPACING_MS: 10000,
       INFO_RETRY_MS: 5000, INFO_RETRY_MAX_MS: 900000, HELD_POLL_BUDGET_MS: 1000, PERSIST_MIN_INTERVAL_MS: 1000,
+      // 0.13.0, the own-cell writer's lease and retries: how often a process that is not the writer tries for the lease
+      // (under the 30 s staleness), the age past which a new writer reads the offer again first, and the backoff of a
+      // refused write.
+      LEASE_RETRY_MS: 10000, LEAD_INFO_MAX_AGE_MS: 60000, WRITE_RETRY_MS: 1000, WRITE_RETRY_MAX_MS: 60000,
+      // And how long a status's word that the own-cell kinds are offered holds against an offer that disagrees.
+      STATUS_OFFER_MS: 600000,
     },
+    // The own-cell event writer's bounds, none a render budget: the size past which a line file rotates, how often the
+    // holder touches its lease, and how many of this process's own erasures it remembers, for how long, so the feed's
+    // report of them is not written twice.
+    'change-feed.ts': { ROTATE_BYTES: 4194304, LEASE_REFRESH_MS: 10000, MAX_OWN_ERASURES: 4096, DEFAULT_OWN_ERASURE_MS: 604800000 },
     // The share map file's lock bounds, the recall cache's shape with a shorter wait: how long a writer blocks the event
     // loop for a live holder before giving up (the next change or the minute write tries again), when a held lock counts
     // as abandoned, and the grace for a lock file still being written.
-    'share-states-file.ts': { LOCK_WAIT_MS: 500 },
+    // 0.13.0: the ceilings a share map READ back from the file may reach (a process that is not the writer reports it),
+    // and the longest cell id the feed itself holds, so a map read back carries none the writer could not have written.
+    'share-states-file.ts': { LOCK_WAIT_MS: 500, MAX_SHARE_STATES_BYTES: 8388608, MAX_READ_ENTRIES: 4096, MAX_CELL_ID_BYTES: 4096 },
     // The feed state file's bounds: the same short wait as the share map's, the ceilings a restored state may reach
     // (the feed's own map and seen-id ceilings, so a file cannot make a process hold more than the feed would), and
     // the size above which the file is refused unread.
     'feed-state-file.ts': { LOCK_WAIT_MS: 500, MAX_RESTORED_ENTRIES: 4096, MAX_RESTORED_SEEN: 4096, MAX_STATE_BYTES: 8388608 },
     // The lock's own bounds, held here now that both files take the same lock: when a held lock counts as abandoned,
     // and the grace for a lock file still being written. The wait belongs to each caller, not to the lock.
-    'file-lock.ts': { LOCK_STALE_MS: 30000, LOCK_MALFORMED_GRACE_MS: 1000 },
+    // 0.13.0 review: and how long a lease whose holder's process is gone must also have gone untouched (0 for the
+    // per-operation lock: at once, as before; the own-cell writer passes its refresh period).
+    'file-lock.ts': { LOCK_STALE_MS: 30000, LOCK_MALFORMED_GRACE_MS: 1000, deadAfterMs: 0 },
     'index.ts': {},
     // The identity token's format bounds. None is a render budget - the module renders nothing - but
     // each is a number a reader must be able to check: the clear label's width, the passphrase's
@@ -1288,12 +1359,23 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     },
     // The tool argument mapping declares no bound: it reads blankness, not size.
     'tool-input.ts': {},
+    // Warm start's format and bounds: how old a leftover payload file must be before it is removed, the key envelope's
+    // layout byte and size, the snapshot key, nonce, GCM nonce and tag sizes, the part sizes this client accepts from
+    // the endpoint, and the longest key envelope the endpoint stores.
+    'warm-start.ts': {
+      LEFTOVER_AGE_MS: 300000, KEY_ENVELOPE_VERSION: 1, SNAPSHOT_KEY_BYTES: 32, SNAPSHOT_NONCE_BYTES: 16, GCM_IV_BYTES: 12,
+      GCM_TAG_BYTES: 16, MIN_PART_BYTES: 1024, MAX_PART_BYTES: 16777216, MAX_KEY_ENVELOPE_CHARS: 4096, KEY_ENVELOPE_BYTES: 61,
+    },
     // Budgets, but not exports: `server.ts` exports nothing at all and calls `main()` at module
     // scope, so importing it to read them off would start a server. They are derived from its SOURCE
     // instead, below. Listed here so every module is pinned in one place.
     'server.ts': {
       MAX_NUMERIC_CHARS: 32,
       RENDER_LIMIT: 16,
+      // 0.13.0: the version-listing lines rendered as text; the page itself stays whole in structuredContent.
+      LIST_RENDER_LIMIT: 16,
+      // Warm start: the listed snapshots rendered as text; the structured result carries them all.
+      SNAPSHOT_RENDER_LIMIT: 16,
     },
   };
   // The module set is DERIVED from `src/`, not listed here, and that is this test's THIRD correction
@@ -2134,7 +2216,9 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     // `client.ts` renders ONE line: a stderr advisory naming the secret file. It was long declared
     // `{}` here - "renders nothing" - which was false, and the false comment sat in the guard built
     // for exactly this class while the value went out raw.
-    'client.ts': { 'safePathField:MAX_PATH_FIELD_CHARS': 1 },
+    // And (0.13.0 review) the refusal of a relative directory setting naming the working directory, where files an
+    // earlier version wrote under it are: a path, at the path budget.
+    'client.ts': { 'safePathField:MAX_PATH_FIELD_CHARS': 2 },
     // {} - the share events feed calls no fence: it renders nothing, and its snapshot is surfaced
     // as structured data by its caller.
     'share-events.ts': {},
@@ -2144,11 +2228,15 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     'feed-state-file.ts': {},
     // {} - the lock calls no fence.
     'file-lock.ts': {},
+    // {} - the own-cell event writer calls no fence: it writes lines for a program to read and renders nothing.
+    'change-feed.ts': {},
     'index.ts': {},
     // {} - the identity token module calls no fence: its errors carry no value to fence, by design.
     'identity-token.ts': {},
     // {} - the tool argument mapping calls no fence: it returns values and renders nothing.
     'tool-input.ts': {},
+    // {} - the warm-start module calls no fence: it renders nothing.
+    'warm-start.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
   // module under `src/` with a wrong-budget call site stayed green, and `index.ts` was missing
@@ -2305,6 +2393,10 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // caller-chosen path can arrive at `failText` through it. It also names no env path - the
     // directory is always the DEFAULT identity path, never `SAIHM_MASTER_SECRET_FILE`.
     'client.ts:sweepStaleIdentityTemps': 1,
+    // ONE OPEN THAT WRITES NOTHING (0.13.0): the erasure feed is opened READ-ONLY (`'r'`) for its first line, so a file
+    // recreated on a reused inode with the same size and time is still read again. Counted because the census counts
+    // every open whatever its flags; keyed by its binding, which names what it does.
+    'client.ts:firstLineReader': 1,
     // THREE, and not one of them touches the seq/cell cache. They write the GDPR Art.17 erasure
     // feed - `<root>/tenants/<agentIdHash>/erasures.ndjson` - which is append-only, never read back
     // by this package, and never rewritten, truncated or rotated in place. `ensureTenantDir` creates
@@ -2326,6 +2418,15 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // an observation about the census, not a gap in it: the open is what creates or extends the
     // file, and it is the call whose failure names a path.
     'erasure-feed.ts:fd': 1,
+    // 0.13.0, the batch append (`appendFeedLines`) that writes an answer's lines: the same tenant directory re-created
+    // first (mkdirSync), and its own open, bound as `out` so that it does not sum under `fd` above. Event-feed lines,
+    // never the seq/cell cache.
+    'erasure-feed.ts:appendFeedLines': 1,
+    'erasure-feed.ts:out': 1,
+    // 0.13.0, the own-cell event writer, none touching the seq/cell cache: the tenant directory before it takes the
+    // lease (mkdirSync), and a line file moved to its one predecessor name when it grows past the size (renameSync).
+    'change-feed.ts:lead': 1,
+    'change-feed.ts:toPredecessor': 1,
     // SEVEN, none touching the seq/cell cache. They write the share map another process reads,
     // `<root>/tenants/<agentIdHash>/share-states.json`, which this package never reads back as state.
     // `writeShareStates`: the tenant directory (mkdirSync), the temporary file (writeFileSync `wx`), the rename over the
@@ -2338,9 +2439,24 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // (writeFileSync `wx`), the rename over the state, and the unlink of its own temporary file when the rename fails.
     // It reaches no seq/cell cache: the feed's map is the operator's public listing, never own-cell state.
     'feed-state-file.ts:writeFeedState': 4,
-    // THREE, moved here whole from the share map writer when both files stopped keeping their own copy of the lock:
-    // the lock file (writeFileSync `wx`), the unlink of an abandoned lock, and the unlink of its own lock on release.
-    'file-lock.ts:withFileLock': 3,
+    // TWO, moved here whole from the share map writer when both files stopped keeping their own copy of the lock: the
+    // lock file (writeFileSync `wx`) and the unlink of its own lock on release. The unlink of an ABANDONED lock moved in
+    // 0.13.0 to `clearIfAbandoned`, the one takeover rule the lock and the lease share.
+    'file-lock.ts:withFileLock': 2,
+    'file-lock.ts:clearIfAbandoned': 1,
+    // The writer's lease, `feed.lock`: created with `wx` when taken, unlinked on release only while it is still ours.
+    'file-lock.ts:acquire': 1,
+    'file-lock.ts:release': 1,
+    // Warm start, none touching the seq/cell cache: the payload files SHM and this client exchange under
+    // `<root>/tenants/<agentIdHash>/warm-start/`. `sweepWarmStart` removes leftovers past their age; `takePutPayload`
+    // opens a put's payload READ-ONLY (counted because every open is); `dropPayload` removes one payload file by name;
+    // `writeLatestPayload` creates the folder (mkdirSync, 0700), renames its temporary file over the restored payload and
+    // unlinks that temporary file when the rename fails; its temporary file's open is bound as `tmpFd`.
+    'warm-start.ts:sweepWarmStart': 1,
+    'warm-start.ts:takePutPayload': 1,
+    'warm-start.ts:dropPayload': 1,
+    'warm-start.ts:writeLatestPayload': 3,
+    'warm-start.ts:tmpFd': 1,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
@@ -2808,7 +2924,9 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // `erasure-feed.ts: 0` - it reaches no `persist()`. It writes a DIFFERENT artifact through its
     // own `node:fs` calls, censused in `FS_WRITES` above; there is nothing here for a wrapper to
     // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
-    { 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0, 'tool-input.ts': 0 },
+    // `change-feed.ts: 0` - like the erasure feed, it writes its own artifacts (censused in `FS_WRITES`) and reaches no
+    // `persist()`.
+    { 'change-feed.ts': 0, 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0, 'tool-input.ts': 0, 'warm-start.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -2854,11 +2972,37 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name &&
     fsOrigin(n.expression);
   const perFile: Record<string, number> = {};
+  // The function a call sits in, by its declared name.
+  const enclosingFn = (n: ts.Node): string => {
+    for (let p: ts.Node | undefined = n.parent; p !== undefined; p = p.parent) {
+      if ((ts.isMethodDeclaration(p) || ts.isFunctionDeclaration(p)) && p.name !== undefined && ts.isIdentifier(p.name)) return p.name.text;
+    }
+    return '<module scope>';
+  };
+  let rotations = 0;
   for (const { file, sf } of SOURCES()) {
     perFile[file] = 0;
     for (const n of walk(sf)) {
       if (!isFsCall(n, 'renameSync')) continue;
       const line = sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+      // A ROTATION is not a tmp-then-rename, and it is the one rename exempt here, by name: its source is the LIVE line
+      // file (`changes.ndjson`, `erasures.ndjson`), moved whole to its one predecessor name. Unlinking that source when
+      // the rename fails would delete the very feed it exists to keep, so at this site the property is INVERTED and
+      // checked as such: the rename is inside a try, and its catch never unlinks the source.
+      if (file === 'change-feed.ts' && enclosingFn(n) === 'toPredecessor') {
+        rotations++;
+        const src = n.arguments[0];
+        assert.ok(src !== undefined && ts.isIdentifier(src), `${file}:${line}: the rotation's source must be a plain identifier`);
+        let r: ts.Node | undefined = n;
+        while (r !== undefined && !(ts.isTryStatement(r) && r.catchClause !== undefined)) r = r.parent;
+        assert.ok(r !== undefined, `${file}:${line}: a rotation that throws must be caught: the next answer tries again`);
+        const srcSym = CHECKER().getSymbolAtLocation(src as ts.Identifier);
+        const unlinksLive = walk((r as ts.TryStatement).catchClause as ts.Node).some(
+          (u) => isFsCall(u, 'unlinkSync') && u.arguments.some((a) => ts.isIdentifier(a) && CHECKER().getSymbolAtLocation(a) === srcSym),
+        );
+        assert.equal(unlinksLive, false, `${file}:${line}: a failed rotation must leave the live file where it is`);
+        continue;
+      }
       perFile[file]++;
       const tmpArg = n.arguments[0];
       assert.ok(
@@ -2914,9 +3058,15 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // `feed-state-file.ts: 1` - the feed state is replaced whole the same way, and that arm unlinks its own temporary
     // file when the rename fails. `file-lock.ts: 0` - the lock is created and removed, never renamed.
     // `identity-token.ts: 0` - it writes no file at all; the export verb in `server.ts` writes once, with `wx`, no rename.
-    { 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1, 'tool-input.ts': 0 },
+    // `change-feed.ts: 0` - its one rename is the rotation, exempt above and counted below: the event files are
+    // appended to, never replaced whole.
+    // `warm-start.ts: 1` - a restored payload is written to a temporary file and renamed over `latest-<token>.bin`, and
+    // the arm unlinks its own temporary file when the rename fails. Its behavioural test (`warm_start.test.ts`) checks
+    // that a failed restore leaves no file, and the warm-start folder's sweep removes any temporary file a crash leaves.
+    { 'change-feed.ts': 0, 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1, 'tool-input.ts': 0, 'warm-start.ts': 1 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
+  assert.equal(rotations, 1, 'the rotation exemption names exactly one rename');
 });
 
 test('the error budgets are PINNED, not merely self-consistent', () => {
@@ -3339,9 +3489,28 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       seq: "this client's monotonic counter",
       shardId: 'CAPPED HERE (boundedOrMarker)',
       commitmentHash: 'read off the envelope this process sealed',
+      commitment: 'the same value as commitmentHash, read off the envelope this process sealed',
+      at: 'BOUNDED IN THE CLIENT: a zoned ISO-8601 time re-serialised by this client (at most 27 characters), or null',
       sharesReissued: 'CLIENT-ORIGIN: grants this client re-issued after the write, counted locally',
       sharesNotReissued: 'CLIENT-ORIGIN: grants this client could not re-issue, counted locally',
       sharesIncomplete: 'CLIENT-ORIGIN: whether this client stopped before examining every listed grant',
+      timing:
+        'BOUNDED IN THE CLIENT: totalMs measured by this client; serverMs a decimal of at most 9 integer digits from a ' +
+        'Server-Timing value of at most 4,096 characters; admission a closed set; or absent',
+      // warmStart "put": the commit's answer (or, when that answer was lost, the listing entry of this snapshot), kept
+      // only when it names a snapshot of exactly what was sent.
+      snapshotId:
+        "BOUNDED IN THE CLIENT: the stored snapshot's id, 64 lowercase hex, from the commit's answer or, when that answer " +
+        'was lost, from the listing entry with this snapshot\'s digest and nonce; else the call fails',
+      createdAt: 'BOUNDED IN THE CLIENT: a zoned ISO-8601 time re-serialised by this client, else the call fails',
+      bytes: 'CLIENT-ORIGIN: the sealed size this client sent, which the commit (or that listing entry) must echo',
+      coversThrough:
+        'CALLER-SUPPLIED: the position the caller passed (1 to 64 printable characters), which the commit (or that listing ' +
+        'entry) must echo',
+      error:
+        "CLIENT-COMPUTED from the caught error, in `fail()` for every tool that calls it: {code, status} with the " +
+        "code resolved once with the 'SAIHM error [code]' text's (failCode: fenced, at most 64 characters), or " +
+        "{code:'unknown', status:0} for anything that is not a SaihmEndpointError",
     },
     saihm_recall: {
       count: 'client-computed from the opened cells',
@@ -3349,6 +3518,22 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       shared: 'BOUNDED IN THE CLIENT: per field, running total, and row count',
       sharedTruncated: 'client-computed',
       shareStates: 'BOUNDED IN THE CLIENT: hex ids, digit strings, a scope enum, cell ids within the advertised bound (at most 4,096 bytes), at most 4,096 entries',
+      cells: 'BOUNDED IN THE CLIENT: at most 4,096 entries, cell ids of at most 4,096 characters, digit strings or null, 64-hex commitments; a page with anything else is refused whole',
+      next: 'BOUNDED IN THE CLIENT: null, or a cell id of at most 4,096 characters',
+      asOf: 'BOUNDED IN THE CLIENT: a zoned ISO-8601 time re-serialised by this client, or absent',
+      servedBy: 'BOUNDED IN THE CLIENT: 1 to 64 of [A-Za-z0-9._:-], the marker, or absent',
+      sharedKept: 'CLIENT-COMPUTED: a closed set, from the cut and a closed-set order the answer declared, or absent',
+      timing: 'BOUNDED IN THE CLIENT: as on saihm_remember',
+      // True/false ONLY on an own read by a lone cellId (CLIENT-COMPUTED from whether `recallOne` answered null);
+      // absent on every other branch (listOnly, a shared read, the full own-memories recall).
+      found: 'CLIENT-COMPUTED: true/false on an own read by id only, absent on every other branch',
+      // warmStart "latest" and "list": snapshot metadata from the endpoint's listing, every entry checked in the client
+      // (a listing with one it cannot read is refused whole).
+      snapshot:
+        'BOUNDED IN THE CLIENT: null, or a listed snapshot whose parts all opened: a 64-hex id, a re-serialised time, a ' +
+        'positive whole number of bytes and a position of 1 to 64 printable characters',
+      snapshots: 'BOUNDED IN THE CLIENT: the listing within 1 MiB, each entry as `snapshot`, refused whole on one it cannot read',
+      error: 'CLIENT-COMPUTED from the caught error: as on saihm_remember',
     },
     saihm_status: {
       agentIdHash: "this client's own — never the endpoint's `agentIdHashHex`",
@@ -3364,7 +3549,34 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       // no endpoint budget applies. Bounded anyway on the TEXT side by `safeScalar`, because the
       // errno inside it comes from Node rather than from a list this file controls.
       seqStateDegraded: 'CLIENT-ORIGIN: local filesystem state, never endpoint-reachable',
+      // ENDPOINT-CHOSEN, and passed on whole: the one structured field here that is an object rather than a scalar. It
+      // is bounded, not checked: a plain object of at most 16 levels and 16,384 JSON characters, else null.
+      features: 'BOUNDED IN THE CLIENT: a plain object of at most 16 levels and 16,384 JSON characters, or null',
+      timing: 'BOUNDED IN THE CLIENT: as on saihm_remember',
+      error: 'CLIENT-COMPUTED from the caught error: as on saihm_remember',
     },
+    // New this release: forget had no structured output at all before it.
+    saihm_forget: {
+      // NULLABLE, not merely the happy-path shape: `complete` is an endpoint-chosen boolean this client only
+      // casts; a non-boolean claim is `null` (boolOrNull), never a guessed true/false. MEASURED: a hostile
+      // non-boolean here used to fail output validation for the WHOLE result (server_render_hostile.test.ts).
+      complete: 'NULLABLE (boolOrNull refuses a non-boolean to null, never true/false)',
+      reason: "ENDPOINT-CHOSEN, narrowed IN THE CLIENT to a closed set ('not-found' | 'not-attested'), beside complete:false only, or absent",
+      sharesPurged: 'NUMERIC GUARD (countOrNull refuses on type/range) — same guard as saihm_status\'s counts',
+      epoch: 'CAPPED HERE (boundedOrMarker)',
+      at: 'BOUNDED IN THE CLIENT: a zoned ISO-8601 time re-serialised by this client (at most 27 characters), or null',
+      destructionAnchor:
+        "BOUNDED IN THE CLIENT: THE ENDPOINT'S anchor, 1 to 256 of [A-Za-z0-9._:-], only beside complete:true - the anchor the erasure line carries - or absent",
+      deleted: 'CLIENT-COMPUTED: true once the endpoint answered a warm-start delete with 204',
+      timing: 'BOUNDED IN THE CLIENT: as on saihm_remember',
+      error: 'CLIENT-COMPUTED from the caught error: as on saihm_remember',
+    },
+    // The remaining four tools carry NO structured output of their own on success (adding one would put a `{}` on
+    // every success result, which can change what a host shows) — only `error` on failure, from `fail()`.
+    saihm_share: { error: 'CLIENT-COMPUTED from the caught error: as on saihm_remember' },
+    saihm_revoke_share: { error: 'CLIENT-COMPUTED from the caught error: as on saihm_remember' },
+    saihm_governance_propose: { error: 'CLIENT-COMPUTED from the caught error: as on saihm_remember' },
+    saihm_governance_vote: { error: 'CLIENT-COMPUTED from the caught error: as on saihm_remember' },
   };
 
   // Every tool the server registers, so this sweep cannot go blind on a whole tool the way the prose
@@ -3419,6 +3631,23 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
     }
     return null;
   };
+
+  // THE SHARED ERROR RESULT. `fail` is the one place a tool's error result is built, so the structured content written
+  // there belongs to EVERY tool whose handler calls it: each of them is found by the same containment question, asked
+  // of the call sites. A call to `fail` outside every registration would make that set unknowable, so it fails, as a
+  // literal outside every registration does.
+  const failSym = localSymbol('server.ts', 'fail');
+  const failDecl = failSym.declarations?.[0];
+  assert.ok(failDecl, '`fail` has no declaration to attribute its structured content from');
+  const insideFail = new Set<ts.Node>(walk(failDecl));
+  const failCallers: string[] = [];
+  for (const n of nodes) {
+    if (!ts.isCallExpression(n) || calleeSymbol(n) !== failSym) continue;
+    const caller = ownerOf(n);
+    assert.ok(caller !== null, '`fail` is called outside every registerTool call, so its structured output cannot be attributed');
+    if (!failCallers.includes(caller)) failCallers.push(caller);
+  }
+  assert.ok(failCallers.length > 0, 'no tool calls `fail` - the matcher is broken');
 
   const found = new Map<string, Set<string>>();
   const okSym = localSymbol('server.ts', 'ok');
@@ -3476,23 +3705,25 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       ts.isObjectLiteralExpression(literal),
       `structured output is not an object literal this sweep can read: ${literal.getText(sf).slice(0, 60)}`,
     );
-    const owner = ownerOf(n);
-    assert.ok(owner !== null, 'structured output sits outside every registerTool call');
-    const set = found.get(owner) ?? new Set<string>();
-    for (const prop of literal.properties) {
-      // A spread or a computed key contributes fields this sweep cannot name, and the regex cut
-      // dropped both SILENTLY - `...rest` simply failed to match an identifier and was filtered out,
-      // so a whole family of endpoint-chosen keys could enter `structuredContent` through one and
-      // leave every declaration below still looking complete. It is now a failure, not a gap.
-      const key = prop.name;
-      assert.ok(
-        key !== undefined && (ts.isIdentifier(key) || ts.isStringLiteralLike(key)),
-        `${owner}: a structured field has no literal key - a spread or a computed key hides fields ` +
-          'from this sweep, so the declarations below cannot claim to cover them. Write the keys out',
-      );
-      set.add((key as ts.Identifier | ts.StringLiteralLike).text);
+    const owners = insideFail.has(n) ? failCallers : [ownerOf(n)];
+    for (const owner of owners) {
+      assert.ok(owner !== null, 'structured output sits outside every registerTool call');
+      const set = found.get(owner) ?? new Set<string>();
+      for (const prop of literal.properties) {
+        // A spread or a computed key contributes fields this sweep cannot name, and the regex cut
+        // dropped both SILENTLY - `...rest` simply failed to match an identifier and was filtered out,
+        // so a whole family of endpoint-chosen keys could enter `structuredContent` through one and
+        // leave every declaration below still looking complete. It is now a failure, not a gap.
+        const key = prop.name;
+        assert.ok(
+          key !== undefined && (ts.isIdentifier(key) || ts.isStringLiteralLike(key)),
+          `${owner}: a structured field has no literal key - a spread or a computed key hides fields ` +
+            'from this sweep, so the declarations below cannot claim to cover them. Write the keys out',
+        );
+        set.add((key as ts.Identifier | ts.StringLiteralLike).text);
+      }
+      found.set(owner, set);
     }
-    found.set(owner, set);
   }
 
   assert.ok(found.size > 0, 'the sweep found no structured output at all — the matcher is broken');
@@ -3745,7 +3976,12 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // THREE, after one reader took every test of whether it is set: `saihmHomeSetting` reads it once, blank counting
       // as unset; `identityHomeName` returns its NAME as a literal; and the boot refusal's list names it. A message names
       // the folder in use; the value is never read into text.
-      SAIHM_HOME: 3,
+      // SEVEN (0.13.0), four more NAMES and no value: the refusal of a relative directory setting - its type, its default
+      // list, and the mint's call naming SAIHM_HOME to the test and to the sentence. The test reads the value only to ask
+      // `isAbsolute`; the sentence names the variable.
+      // EIGHT: that refusal compares the NAME it was given with the literal, to say a key may be among the files an
+      // earlier version left under the working directory. A name, never the value.
+      SAIHM_HOME: 8,
       // FOUR: the helper's declaration and its three readers - defaultIdentityPath, identityHomeName and
       // keyShapedHomeRefusal. The first builds the key path; the other two only test whether it is set.
       saihmHomeSetting: 4,
@@ -3785,7 +4021,10 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // name before ours is set, and the guarded assignment. It tracks `localCacheResidual` exactly
       // because it gets exactly the same hostile-endpoint treatment; if the two ever diverge, one of
       // them has lost a guard, and that divergence is what this pair of numbers is for.
-      feedResidual: 7,
+      // EIGHT since 0.13.0: one more than its sibling, and the one that is not a guard: `forget` tests that the own
+      // erasure line was written (`feedResidual === undefined`) before it tells the change-feed writer that this
+      // process recorded the erasure itself. A comparison; it renders nothing.
+      feedResidual: 8,
       // NINE. Seven came with the configured-but-empty secret becoming a named configuration error;
       // two more when the hex-validation failures stopped naming SAIHM_MASTER_SECRET_HEX whatever
       // the secret's actual source was, and started naming the file they were really about.
@@ -3825,12 +4064,16 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'feed-state-file.ts': {},
     // {} - the lock reads no caller-chosen value; it is given a path and returns or throws.
     'file-lock.ts': {},
+    // {} - the own-cell event writer reads no variable itself; its root comes from the erasure feed's resolver.
+    'change-feed.ts': {},
     'index.ts': {},
     'render_fence.ts': {},
     // {} - the identity token module is handed its two values and reads no caller-chosen name.
     'identity-token.ts': {},
     // {} - the tool argument mapping reads no variable.
     'tool-input.ts': {},
+    // {} - the warm-start module reads no variable itself; its root comes from the erasure feed's resolver.
+    'warm-start.ts': {},
     'server.ts': {
       // An env read into a local, the same shape as the `client.ts` allowance above. It is here
       // because `persistCheckoutUrl` now honours `SAIHM_HOME` as a fallback for `SAIHM_STATE_DIR`:
@@ -3839,6 +4082,8 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
       // NONE read directly any more. THREE through the helper: its import, the failed join's sentence about where the
       // key is (one of two fixed sentences, under SAIHM_HOME or in ~/.saihm), and the checkout file's folder.
       saihmHomeSetting: 3,
+      // ONE (0.13.0): export-identity names SAIHM_HOME to the relative-directory test - a NAME, never its value.
+      SAIHM_HOME: 1,
       localCacheResidual: 1, // truthiness selecting whether the residual line renders at all
       feedResidual: 1, // the same, for the second residual line
       savedTo: 2, // parameter declaration, and the truthiness guarding its (fenced) render
@@ -3955,7 +4200,12 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // object of empty strings reads as the field left out. It returns a boolean; no value it reads reaches a renderer.
   // client.ts: 7 - a redirect to another origin drops the credentials by reading the request's OWN headers whole: the
   // client built them, nothing from outside is in them, and it passes them on minus the credential, to no renderer.
-  const ANON: Record<string, number> = { 'client.ts': 7, 'share-events.ts': 4, 'tool-input.ts': 1 };
+  // change-feed.ts: 1 - the record of this process's own erasures drops its oldest entry at its cap: a cell id this
+  // process erased, used only as a key, read from the writer's own map. It reaches no renderer.
+  // client.ts: 8 (0.13.0) - a status answer's `features` is walked whole to bound its DEPTH before it may pass to
+  // structured output. The walk reads no value into anything: it pushes children and compares a counter, and the object
+  // then passes unread or becomes null. Nothing it reads reaches a renderer.
+  const ANON: Record<string, number> = { 'change-feed.ts': 1, 'client.ts': 8, 'share-events.ts': 4, 'tool-input.ts': 1 };
   // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
   // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
   // measured green, which is this round's whole lesson landing on the fix for this round's finding.
@@ -4951,6 +5201,33 @@ test('the render-helper export set is PINNED, so a sixth fence cannot join unnot
     assert.ok(!SCALAR_FENCES.includes(f), `${f} is in both fence lists; a composer is not a scalar fence`);
 });
 
+test('failCode: the structured code of an error result IS the code its text names, whatever was thrown', () => {
+  // ONE resolution for both channels: for every endpoint code - plain, empty, forged, over-long - the structured code
+  // equals the one the text's `SAIHM error [code]` names, and the status the one the text states.
+  for (const code of ['tier_required', '', 'x]\n[status 200] forged', `${String.fromCharCode(0x202e)}rtl`, 'a'.repeat(200)]) {
+    const e = new SaihmEndpointError(418, code, 'the message');
+    const named = /^SAIHM error \[([^\]]*)\] \(status (\d+)\)/.exec(failText(e));
+    assert.ok(named, `the text names a code: ${failText(e)}`);
+    assert.deepEqual(failCode(e), { code: named[1], status: Number(named[2]) }, JSON.stringify(code));
+  }
+  // Not the endpoint's error: named, never omitted.
+  for (const e of [new Error('x'), new SaihmConfigError('a setting', 'path'), 'a string', undefined, null])
+    assert.deepEqual(failCode(e), { code: 'unknown', status: 0 }, String(e));
+  // TOTAL, like failText: a throwable that cannot even be inspected is answered, never rethrown.
+  const revoked = (() => {
+    const r = Proxy.revocable({}, {});
+    r.revoke();
+    return r.proxy;
+  })();
+  const trapped = new Proxy(new SaihmEndpointError(400, 'c', 'm'), {
+    get() {
+      throw new Error('trap');
+    },
+  });
+  for (const e of [revoked, trapped, new Proxy({}, { getPrototypeOf() { throw new Error('trap'); } })])
+    assert.deepEqual(failCode(e), { code: 'unknown', status: 0 });
+});
+
 test('a fenced value is never rendered INSIDE a delimiter it could close', () => {
   // NON-VACUITY, which the sibling label sweep carries and this one did not. Every predicate failure
   // this sweep has had presented the same way: GREEN because nothing was examined. A count, not a
@@ -5018,7 +5295,22 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // three in the `+`-chain arm (the first and third again, and the unreadable-file sentence chosen on `shown`).
   // `secretSource.label` became `shownLabel` and the advisory's `safePathField(secretFile, ...)` became
   // `safePathField(shown, ...)`: renames.
-  const EXAMINED_SPANS_PIN = 101;
+  // +6 (0.13.0), measured by listing the spans: the own-cell read by id renders its cellId and seq as every own-memory
+  // line does (+2), and the version listing renders each entry's cell, seq and commit and the next page's `after`
+  // (+4), each fenced and in label position, none inside a delimiter it could close.
+  // +5 (0.13.0), measured by listing the spans in both trees: the inline `timing=` marker joins four renders into a `+` chain, so the
+  // concatenation arm now also examines the own read's cellId and seq (+2) and the two joined arrays of the version
+  // listing and the full recall (+2); and `export-identity` refusing a relative SAIHM_HOME (+1). None inside a delimiter.
+  // +1 (0.13.0 review), measured by listing the spans in both trees (the only difference): the relative-directory
+  // refusal's clause that tests the NAME `SAIHM_HOME` to add "your key among them" - a fixed string either way, no value,
+  // inside no delimiter.
+  // +2 (0.13.0 review), measured the same way: the same refusal names the working directory through `safePathField`
+  // (counted by both arms, as every `+` chain piece here is). The forget receipt's complete/sharesPurged spans were
+  // rewritten to render the resolved value, one for one: no change.
+  // +5 (warm start), one per fenced value the four warm-start renders add: the snapshot id on the put's receipt, the
+  // restore's and the delete's, and on each listed snapshot its id and its `created=` time. Each sits in label position
+  // or in a bracket slot it cannot close (the fences scrub brackets), none inside another delimiter.
+  const EXAMINED_SPANS_PIN = 120;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
@@ -5288,7 +5580,10 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
   };
   // Pinned, not derived: the count of fenced values this sweep finds in a label position across
   // `src/`. Measured, and updated deliberately when a labelled render line is added or removed.
-  const LABELLED_SLOTS = 25;
+  // +6 (0.13.0): the own-cell read's `[cellId] seq=` (+2) and the listing's `cell= seq= commit=` and `after=` (+4).
+  // +4 (warm start): the snapshot id in the bracket slot of the put's and the restore's receipt lines (each beside
+  // `bytes=`), and a listed snapshot's id and `created=` time. The delete's line carries no `label=` pair.
+  const LABELLED_SLOTS = 35;
   let checkedSlots = 0;
   const scan = (sf: ts.SourceFile, file: string, out: string[], requireApplied = true): void => {
     const staticText = (xs: ts.Expression[]): string =>

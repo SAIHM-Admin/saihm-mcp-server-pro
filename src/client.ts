@@ -62,6 +62,7 @@
  * a typed stale-seq error (no corruption); serialize same-cell updates if you need both to land.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes } from 'node:crypto';
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest, type RequestOptions as HttpsRequestOptions } from 'node:https';
@@ -71,17 +72,20 @@ import type { Duplex, Transform } from 'node:stream';
 import { Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join as pathJoin } from 'node:path';
+import { basename, dirname, isAbsolute, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 
 import {
@@ -109,9 +113,29 @@ import {
   SeqHighWaterMark,
 } from '@saihm/client-pro';
 import { ShareEventsFeed, type FeedStore, type ShareEventsTransport, type ShareStates } from './share-events.js';
+import {
+  COVERS_THROUGH_PATTERN,
+  SNAPSHOT_ID_PATTERN,
+  begunUpload,
+  committedSnapshot,
+  contentDigestOf,
+  contentDigestSha256,
+  listedSnapshots,
+  openSnapshotKey,
+  openSnapshotParts,
+  partsDigest,
+  sealSnapshot,
+  warmStartLimits,
+  warmStartRoute,
+  type ListedSnapshot,
+  type WarmStartLimits,
+  type WarmStartRoute,
+  type WarmStartSnapshot,
+} from './warm-start.js';
 import { FileFeedStore, feedStatePath } from './feed-state-file.js';
-import { shareStatesPath, writeShareStates } from './share-states-file.js';
-import { safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
+import { readShareStates, shareStatesPath, writeShareStates } from './share-states-file.js';
+import { ChangeFeedWriter, DESTRUCTION_ANCHOR, isoTime } from './change-feed.js';
+import { MALFORMED, safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
 import {
   openIdentityToken,
   cleanPastedValue,
@@ -125,6 +149,7 @@ import {
 } from './identity-token.js';
 import {
   MAX_FEED_CELL_ID_CHARS,
+  PREDECESSOR_SUFFIX,
   emitErasureLineReporting,
   ensureTenantDir,
   feedPathFor,
@@ -348,7 +373,12 @@ function assertEndpointUrl(endpoint: string): void {
       // several settings fields would otherwise come back in a reply an agent repeats.
       endpointValueHoldsSecret(endpoint)
         ? 'SAIHM_ENDPOINT_URL is not a valid URL, and what it holds looks like a key, passphrase or token, so it is not shown.'
-        : `SAIHM_ENDPOINT_URL is not a valid URL: ${endpoint}`,
+        : // Nor when it holds an `@`. A URL that does not parse has no userinfo this client can find, so
+          // `https://admin:pw@host:99999/mcp` came back whole, password included. Where a user name or password
+          // ends is a guess in a string that does not parse (either may hold `/`, `?` or `#`), so none of it is shown.
+          endpoint.includes('@')
+          ? 'SAIHM_ENDPOINT_URL is not a valid URL, and it holds an @, so it may carry a user name or password and is not shown.'
+          : `SAIHM_ENDPOINT_URL is not a valid URL: ${unparseableEndpointShown(endpoint)}`,
       'url',
     );
   }
@@ -381,6 +411,15 @@ function assertEndpointUrl(endpoint: string): void {
     `SAIHM_ENDPOINT_URL must use https:// (got ${url.protocol}//). ` +
       `Plain http:// is only allowed for 127.0.0.1 or localhost (dev).`,
   );
+}
+
+/**
+ * An endpoint that does not parse, as a message may show it: cut before any query or fragment, which may carry a token,
+ * as {@link safeEndpoint} drops them from one that does. Only called once the value holds no `@`.
+ */
+function unparseableEndpointShown(v: string): string {
+  const cut = v.search(/[?#]/);
+  return cut === -1 ? v : `${v.slice(0, cut)} (its query and fragment are not shown)`;
 }
 
 /** Refresh a self-onboard JWT this long before its `exp` (cushions clock skew + in-flight latency). */
@@ -974,7 +1013,13 @@ function proxyTunnelAgent(proxy: URL): ProxyTunnelAgent {
 }
 
 /** Transport codes for an answer that ARRIVED but cannot be used: the endpoint was reached, so network advice misleads. */
-const UNUSABLE_ANSWER = new Set(['REDIRECT_CROSS_ORIGIN', 'REDIRECT_LOCATION_INVALID', 'STATUS_OUT_OF_RANGE', 'RESPONSE_INVALID']);
+const UNUSABLE_ANSWER = new Set([
+  'REDIRECT_CROSS_ORIGIN',
+  'REDIRECT_LOCATION_INVALID',
+  'REDIRECT_SCHEME_UNSUPPORTED',
+  'STATUS_OUT_OF_RANGE',
+  'RESPONSE_INVALID',
+]);
 
 function decodeBody(stream: Readable, encoding: string | undefined): Readable {
   let decoder: Transform;
@@ -1001,6 +1046,12 @@ function decodeBody(stream: Readable, encoding: string | undefined): Readable {
   return stream.pipe(decoder);
 }
 
+/** An answer's two timing headers, raw and by name (see `keepAliveFetch`); `endpointTiming` decides what they say. */
+const answerHeaders = new WeakMap<Response, { readonly serverTiming: string | undefined; readonly admission: string | undefined }>();
+
+/** An answer's `Content-Digest`, raw and by name: a warm-start part's, checked against its bytes before it is used. */
+const answerDigests = new WeakMap<Response, string>();
+
 /** Drop-in replacement for `fetch` over a keep-alive agent. Same contract, warm sockets. */
 async function keepAliveFetch(
   url: string,
@@ -1010,7 +1061,8 @@ async function keepAliveFetch(
   const target = new URL(url);
   const signal = init.signal as AbortSignal | null | undefined;
   const method = (init.method ?? 'GET').toUpperCase();
-  const body = typeof init.body === 'string' ? init.body : undefined;
+  // A string, or the raw bytes of a warm-start part. Anything else is not a body this transport sends.
+  const body = typeof init.body === 'string' || init.body instanceof Uint8Array ? init.body : undefined;
   const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
   if (body !== undefined && headers['content-length'] === undefined) {
     headers['content-length'] = String(Buffer.byteLength(body));
@@ -1060,6 +1112,12 @@ async function keepAliveFetch(
             next = new URL(location, target);
           } catch {
             reject(codedError('REDIRECT_LOCATION_INVALID'));
+            return;
+          }
+          // So is one to a scheme this transport does not speak (ftp:, data:, file:). Followed, Node refused it as
+          // ERR_INVALID_PROTOCOL, which read as a network failure and sent the reader to check the network.
+          if (next.protocol !== 'https:' && next.protocol !== 'http:') {
+            reject(codedError('REDIRECT_SCHEME_UNSUPPORTED'));
             return;
           }
           // 301/302/303 downgrade to GET and drop the body, matching fetch; 307/308 preserve both.
@@ -1117,6 +1175,19 @@ async function keepAliveFetch(
           reject(codedError('RESPONSE_INVALID'));
           return;
         }
+        // TWO MORE HEADERS ARE READ BY NAME, and kept BESIDE the Response rather than copied onto it: the two the
+        // latency objective rides (`Server-Timing` and `SAIHM-Admission`). A value a Response refuses would turn a
+        // usable answer into RESPONSE_INVALID, so they are held raw here and judged once, in `endpointTiming`.
+        const serverTiming = res.headers['server-timing'];
+        const admission = res.headers['saihm-admission'];
+        // ONE MORE, the same way: `Content-Digest`, which a restore checks each part against (RFC 9530).
+        const contentDigest = res.headers['content-digest'];
+        if (typeof contentDigest === 'string') answerDigests.set(response, contentDigest);
+        if (typeof serverTiming === 'string' || typeof admission === 'string')
+          answerHeaders.set(response, {
+            serverTiming: typeof serverTiming === 'string' ? serverTiming : undefined,
+            admission: typeof admission === 'string' ? admission : undefined,
+          });
         resolve(response);
       },
     );
@@ -1138,6 +1209,30 @@ async function keepAliveFetch(
     if (body === undefined) req.end();
     else req.end(body);
   });
+}
+
+/** A body as bytes, refused past `max`: a warm-start part, or an answer read before it is parsed. */
+async function readBytesCapped(res: Response, max: number, method: string): Promise<Uint8Array> {
+  const tooLarge = (): SaihmEndpointError =>
+    new SaihmEndpointError(0, 'response_too_large', `SAIHM endpoint ${method} response exceeded ${max}B`);
+  const body = res.body;
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel();
+        throw tooLarge();
+      }
+      chunks.push(value);
+    }
+  }
+  return Buffer.concat(chunks);
 }
 
 async function readBodyCapped(
@@ -1175,6 +1270,200 @@ async function readBodyCapped(
   return Buffer.concat(chunks).toString('utf-8');
 }
 
+/**
+ * The timing a tool result passes on: `totalMs` measured by this client, from just before the request
+ * is sent to the last byte received; `serverMs` from the answer's `Server-Timing: saihm;dur=<ms>`; `admission` from its
+ * `SAIHM-Admission`. A field the answer did not send is null; `totalMs` is always this client's own measurement.
+ */
+export interface EndpointTiming {
+  readonly serverMs: number | null;
+  readonly totalMs: number;
+  readonly admission: 'reserved' | 'shared' | null;
+}
+
+/**
+ * What one endpoint answer said about itself beyond its result, as this client read it. `timing` is `'malformed'` when
+ * the answer sent timing this client cannot use, and absent when it sent none. The rest are read from a recall answer
+ * only, and only from one that is an object: the full recall without a cache is a JSON array and carries none of them.
+ */
+export interface AnswerNotes {
+  readonly timing?: EndpointTiming | 'malformed';
+  /** Where the answer was served: "origin" or a region id; {@link MALFORMED} when it said something else. */
+  readonly servedBy?: string;
+  /** The origin time the answer reflects every change up to, re-serialised; absent when it stated none this client reads. */
+  readonly asOf?: string;
+  /** The order the answer lists the grants shared with this identity in, when it declares one this client knows. */
+  readonly sharedOrder?: 'newest-first' | 'grant-order';
+}
+
+/**
+ * The answers of ONE tool call, per endpoint method, the last answer of each method kept. Held in the call's async
+ * context, so two tool calls in flight at once never read each other's answers, and a write's follow-up calls under
+ * another method (the share re-issue after a remember) cannot stand in for the write's own answer.
+ */
+const answerNotes = new AsyncLocalStorage<Map<string, AnswerNotes>>();
+
+/** Run `fn` and return, beside its value, what each endpoint method's last answer during it said about itself. */
+export async function withAnswerNotes<T>(fn: () => Promise<T>): Promise<{ value: T; notes: ReadonlyMap<string, AnswerNotes> }> {
+  const notes = new Map<string, AnswerNotes>();
+  const value = await answerNotes.run(notes, fn);
+  return { value, notes };
+}
+
+/** The longest `Server-Timing` value read; a longer one is refused whole, never read in part. */
+const MAX_SERVER_TIMING_CHARS = 4_096;
+/** A `dur` as this client takes it: plain decimal milliseconds, at most nine integer digits, never an exponent. */
+const SERVER_TIMING_DUR = /^[0-9]{1,9}(?:\.[0-9]+)?$/;
+
+/**
+ * The `dur` of the `saihm` metric in a `Server-Timing` value (W3C Server Timing: comma-separated metrics, each a name
+ * and `;`-separated parameters whose values are tokens or quoted strings). Null when no metric is named `saihm`: other
+ * metrics are an intermediary's, and ignored. `'malformed'` when the value cannot be split, when two metrics are named
+ * `saihm`, or when the one there has no single `dur` in plain decimal milliseconds: a missing `dur` is never read as 0.
+ */
+export function saihmServerMs(header: string): number | null | 'malformed' {
+  if (header.length > MAX_SERVER_TIMING_CHARS) return 'malformed';
+  // Split outside quoted strings: a `desc` may hold a comma or a semicolon.
+  const metrics: string[][] = [];
+  let fields: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < header.length; i++) {
+    const c = header.charAt(i);
+    if (quoted) {
+      if (c === '\\') {
+        field += c + header.charAt(++i);
+        continue;
+      }
+      if (c === '"') quoted = false;
+      field += c;
+    } else if (c === '"') {
+      quoted = true;
+      field += c;
+    } else if (c === ';' || c === ',') {
+      fields.push(field.trim());
+      field = '';
+      if (c === ',') {
+        metrics.push(fields);
+        fields = [];
+      }
+    } else field += c;
+  }
+  if (quoted) return 'malformed';
+  fields.push(field.trim());
+  metrics.push(fields);
+  let found = false;
+  let dur: number | null = null;
+  for (const [name, ...params] of metrics) {
+    if (name !== 'saihm') continue;
+    if (found) return 'malformed';
+    found = true;
+    const durs = params.filter((p) => /^dur\s*=/i.test(p)).map((p) => p.slice(p.indexOf('=') + 1).trim());
+    if (durs.length !== 1) return 'malformed';
+    const raw = durs[0] as string;
+    const v = raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+    if (!SERVER_TIMING_DUR.test(v)) return 'malformed';
+    dur = Number(v);
+  }
+  return found ? dur : null;
+}
+
+/**
+ * The timing of one answer, or `'malformed'`, or undefined when the answer sent neither timing header: this client
+ * never states a timing for a server that states none. Both headers are judged before anything is passed on, and either
+ * one unusable withholds the whole, so a malformed header never travels beside a plausible-looking measurement.
+ */
+export function endpointTiming(
+  h: { readonly serverTiming: string | undefined; readonly admission: string | undefined } | undefined,
+  totalMs: number,
+): EndpointTiming | 'malformed' | undefined {
+  const serverMs = h?.serverTiming === undefined ? null : saihmServerMs(h.serverTiming);
+  if (serverMs === 'malformed') return 'malformed';
+  const said = h?.admission?.trim();
+  if (said !== undefined && said !== 'reserved' && said !== 'shared') return 'malformed';
+  const admission = said ?? null;
+  if (serverMs === null && admission === null) return undefined;
+  return { serverMs, totalMs: Math.round(totalMs * 1000) / 1000, admission };
+}
+
+/** "origin" or a region id: what a recall answer's `servedBy` may say. */
+const SERVED_BY = /^[A-Za-z0-9._:-]{1,64}$/;
+
+/**
+ * Record what an answer said about itself, for the tool call it belongs to (nothing outside one). `servedBy` that is
+ * present but not a name this client accepts becomes {@link MALFORMED}, never absent: absent reads as a server that
+ * predates replicas, which answers from the origin, and a miss at the origin is one a reader may act on. `asOf` that is not
+ * a time is left out, as the version listing's always was: absent only leaves the answer's lag unbounded.
+ */
+function noteAnswer(method: string, res: Response, totalMs: number, body: unknown): void {
+  const notes = answerNotes.getStore();
+  if (notes === undefined) return;
+  const timing = endpointTiming(answerHeaders.get(res), totalMs);
+  const o =
+    method === 'saihm_recall' && typeof body === 'object' && body !== null && !Array.isArray(body)
+      ? (body as { servedBy?: unknown; asOf?: unknown; sharedOrder?: unknown })
+      : undefined;
+  const servedBy =
+    o?.servedBy === undefined ? undefined : typeof o.servedBy === 'string' && SERVED_BY.test(o.servedBy) ? o.servedBy : MALFORMED;
+  const asOf = o === undefined ? null : isoTime(o.asOf);
+  const sharedOrder = o?.sharedOrder === 'newest-first' || o?.sharedOrder === 'grant-order' ? o.sharedOrder : undefined;
+  notes.set(method, {
+    ...(timing !== undefined ? { timing } : {}),
+    ...(servedBy !== undefined ? { servedBy } : {}),
+    ...(asOf !== null ? { asOf } : {}),
+    ...(sharedOrder !== undefined ? { sharedOrder } : {}),
+  });
+}
+
+/** The deepest a status answer's `features` may nest. The four features defined today need five levels. */
+const MAX_FEATURES_DEPTH = 16;
+/** The most JSON characters a status answer's `features` may take. The four features defined today take about one KiB. */
+const MAX_FEATURES_CHARS = 16_384;
+
+/**
+ * What THIS identity may use, from a status answer: its `features` object, or null. Absent and null are
+ * null: a server that predates the field sends none, and none means no feature. An object passes whole and unread when
+ * it is a plain object within both bounds; anything else is null with `malformed` set, so the text can say so.
+ *
+ * DEPTH IS BOUNDED, not only size, and MEASURED (node 20): `JSON.parse` accepts a million levels of nesting while
+ * `JSON.stringify` throws a RangeError near four thousand, inside eight KiB. Passed on, such an object would fail where
+ * the tool result is serialised, after this function had already called it acceptable.
+ */
+export function featuresOf(v: unknown): { readonly features: Record<string, unknown> | null; readonly malformed: boolean } {
+  if (v === undefined || v === null) return { features: null, malformed: false };
+  if (typeof v !== 'object' || Array.isArray(v) || !boundedJson(v, MAX_FEATURES_DEPTH, MAX_FEATURES_CHARS))
+    return { features: null, malformed: true };
+  let chars: number;
+  try {
+    chars = JSON.stringify(v).length;
+  } catch {
+    return { features: null, malformed: true };
+  }
+  return chars <= MAX_FEATURES_CHARS ? { features: v as Record<string, unknown>, malformed: false } : { features: null, malformed: true };
+}
+
+/**
+ * Whether a parsed JSON value nests no deeper than `maxDepth` levels and holds no more than `maxValues` values in all.
+ * Iterative, since the value may be far deeper than the stack; and COUNTED, so a value far larger than any it could pass
+ * as is refused at once rather than walked whole (and then serialised) first: JSON text of N characters holds fewer
+ * than N values, so a count over the character bound already decides it.
+ */
+function boundedJson(root: object, maxDepth: number, maxValues: number): boolean {
+  let values = 0;
+  const stack: [unknown, number][] = [[root, 1]];
+  for (let top = stack.pop(); top !== undefined; top = stack.pop()) {
+    const [v, depth] = top;
+    values++;
+    if (typeof v !== 'object' || v === null) continue;
+    if (depth > maxDepth) return false;
+    const children: unknown[] = Array.isArray(v) ? v : Object.values(v);
+    // Every value found so far counts - walked, waiting, and these - so one over the bound is refused before the rest.
+    if (values + stack.length + children.length > maxValues) return false;
+    for (const child of children) stack.push([child, depth + 1]);
+  }
+  return true;
+}
+
 // ── Result shapes (the blind endpoint's JSON; bigint -> decimal string, bytes -> hex) ────────────
 /**
  * The receipt for one write. Three of the four fields are LOCAL — {@link SaihmProClient.remember}
@@ -1197,6 +1486,11 @@ export interface RememberResult {
    * envelope sealed in this process. An endpoint-supplied commitment would commit to nothing.
    */
   commitmentHash: string;
+  /**
+   * THE ENDPOINT'S: when the origin committed this write (ISO-8601 UTC with milliseconds), or null when the endpoint
+   * did not state a time this client can read. Lets a consumer of the change feed match this write's own report.
+   */
+  at: string | null;
   /**
    * Present when this write left existing grants of the cell on the previous version. Every write seals the cell
    * under a new key and a grant carries the key of one version, so a grant made before this write cannot open it
@@ -1336,15 +1630,44 @@ export interface RecallWithShared {
   /** `true` when the endpoint announced more than the cap and the list was cut. Surface it: a silently
    *  truncated listing reads as "these are all your grants" when it is not. */
   announcementsTruncated: boolean;
+  /**
+   * `true` when an announcement was left out BEFORE any cut: one this client cannot carry (a field that is not the
+   * type it must be, or over {@link MAX_ANNOUNCEMENT_FIELD_CHARS}). Such a row is skipped wherever it stands, so the
+   * kept list is then not one END of the endpoint's order, and no end may be named for it. A repeat of a pointer
+   * already kept is not counted: it withholds nothing.
+   */
+  announcementsSkipped: boolean;
 }
 
 export interface ForgetResult {
   cellId: string;
   shardId: string;
+  /**
+   * Whether the erasure is ATTESTED: true only when the endpoint states `complete: true` WITH a destruction anchor of
+   * the agreed shape (then `destructionAnchor` carries it), false for any other boolean it states — the value the
+   * erasure line carries. False means this client cannot point at the destruction, not that none happened.
+   */
   complete: boolean;
+  /**
+   * THE ENDPOINT'S: why `complete` is false — `'not-found'` for an id that never existed or was already erased,
+   * `'not-attested'` when the store could not persist the deletion durably (forget the id again later). Present only
+   * beside `complete: false`, and only as one of these two; undefined when the endpoint names none (an older server).
+   */
+  reason?: 'not-found' | 'not-attested';
+  /**
+   * THE ENDPOINT'S record of the key destruction: present only when it states `complete: true` with an anchor of the
+   * agreed shape (1 to 256 of `A-Z a-z 0-9 . _ : -`), copied verbatim — the same anchor the erasure line carries.
+   * Store it; compare it only for equality; never interpret it.
+   */
+  destructionAnchor?: string;
   sharesPurged: number;
   steps: ReadonlyArray<{ step: string; success: boolean; detail: string }>;
   epoch: string;
+  /**
+   * THE ENDPOINT'S: when it performed the erasure (ISO-8601 UTC with milliseconds), or null when it states none this
+   * client can read — same convention as {@link RememberResult.at}.
+   */
+  at: string | null;
   /**
    * Set by THIS CLIENT, never by the endpoint, when the erasure succeeded but the local plaintext
    * cache could not be purged. `undefined` on every other path. See {@link SaihmProClient.forget}.
@@ -1361,6 +1684,81 @@ export interface ForgetResult {
   feedResidual?: string;
 }
 
+/** One own cell in a version listing, as the endpoint's index states it: metadata only, no content. */
+export interface ListedVersion {
+  /** THE ENDPOINT'S claim of the cell id. */
+  cellId: string;
+  /** The version's sequence number (decimal string), or null when the endpoint's index does not state one. */
+  seq: string | null;
+  /** The commitment to that version's ciphertext (64 hex). Two versions are equal only when seq AND commitment are. */
+  commitment: string;
+}
+
+/**
+ * One page of the version listing of this identity's own cells (`saihm_recall` with `listOnly`). The listing is
+ * complete once a page answers `next: null`; only a complete listing may end anything.
+ */
+export interface VersionListing {
+  cells: ListedVersion[];
+  /** The `after` for the next page, or null on the last one. */
+  next: string | null;
+  /** When the origin began the listing, when it says (ISO-8601 UTC with milliseconds). */
+  asOf?: string;
+}
+
+/** The most entries one page may hold; endpoints send far fewer, and a page above this is refused, never cut. */
+export const MAX_LISTING_PAGE = 4_096;
+/** The longest cell id (and `next`) a listing may carry. */
+const MAX_LISTED_CELL_ID_CHARS = 4_096;
+const LIST_DIGITS = /^[0-9]{1,20}$/;
+const LIST_HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * A version listing page, checked whole. A page that drops or alters an entry would read, once complete, as an erasure
+ * of the cell left out, so any entry this client cannot read refuses the PAGE: nothing is skipped and nothing is cut.
+ * An answer that is not a listing (an endpoint without the listing answers with a recall) is refused by name.
+ */
+export function versionListingFrom(r: unknown): VersionListing {
+  const malformed = (what: string): never => {
+    throw new SaihmEndpointError(502, 'malformed_response', `endpoint returned a malformed version listing (${what})`);
+  };
+  if (Array.isArray(r) || (typeof r === 'object' && r !== null && (r as { mode?: unknown }).mode !== 'list')) {
+    throw new SaihmEndpointError(
+      501,
+      'listing_unsupported',
+      'the endpoint does not offer a version listing: it answered with a recall instead',
+    );
+  }
+  if (typeof r !== 'object' || r === null) return malformed('not an object');
+  const o = r as { cells?: unknown; next?: unknown; asOf?: unknown };
+  const cells = o.cells;
+  const next = o.next;
+  const asOf = o.asOf;
+  if (!Array.isArray(cells)) return malformed('no cells');
+  if (cells.length > MAX_LISTING_PAGE) return malformed('page too long');
+  if (!(next === null || (typeof next === 'string' && next.length > 0 && next.length <= MAX_LISTED_CELL_ID_CHARS))) {
+    return malformed('next');
+  }
+  const out: ListedVersion[] = [];
+  const ids = new Set<string>();
+  for (const raw of cells as unknown[]) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return malformed('entry');
+    const e = raw as { cellId?: unknown; seq?: unknown; commitment?: unknown };
+    const cellId = e.cellId;
+    const seq = e.seq;
+    const commitment = e.commitment;
+    if (typeof cellId !== 'string' || cellId.length === 0 || cellId.length > MAX_LISTED_CELL_ID_CHARS) return malformed('cellId');
+    if (!(seq === null || (typeof seq === 'string' && LIST_DIGITS.test(seq)))) return malformed('seq');
+    if (typeof commitment !== 'string' || !LIST_HEX64.test(commitment)) return malformed('commitment');
+    if (ids.has(cellId)) return malformed('a cell listed twice');
+    ids.add(cellId);
+    out.push({ cellId, seq, commitment });
+  }
+  // Optional, and only a helper: a value that is not a time is left out rather than passed on.
+  const at = isoTime(asOf);
+  return { cells: out, next, ...(at !== null ? { asOf: at } : {}) };
+}
+
 export interface StatusSnapshot {
   agentIdHashHex: string;
   tier: string;
@@ -1372,6 +1770,8 @@ export interface StatusSnapshot {
   prsInstrumented: boolean;
   snapshotEpoch: string;
   custody: string;
+  /** What this identity may use, as the endpoint sent it: unchecked here, judged by `featuresOf`. */
+  features?: unknown;
 }
 
 export interface ShareResult {
@@ -1578,6 +1978,39 @@ export function saihmHomeSetting(): string | undefined {
   return v !== undefined && v.trim() !== '' ? v : undefined;
 }
 
+/** The directory settings whose files this server writes, and so whose relative values it refuses. */
+type DirSetting = 'SAIHM_HOME' | 'SAIHM_STATE_DIR';
+
+/**
+ * The first of `names` set to a path that is not absolute, or null; blank counts as unset, as everywhere. A relative
+ * value, or one that begins with a space, resolves against the working directory - in a hosted agent a repository
+ * checkout an agent may commit - and the key, an export, the sequence marks and the plaintext recall cache land there.
+ */
+export function relativeDirSetting(names: readonly DirSetting[] = ['SAIHM_HOME', 'SAIHM_STATE_DIR']): DirSetting | null {
+  for (const name of names) {
+    const v = process.env[name];
+    if (v !== undefined && v.trim() !== '' && !isAbsolute(v)) return name;
+  }
+  return null;
+}
+
+/**
+ * Why nothing is written under a relative directory setting, and what fixes it. Names the variable, never its value. An
+ * earlier version wrote under such a value, so the refusal says where those files are: a key among them, for
+ * SAIHM_HOME, and pointing it at an empty directory instead would leave a join free to make a new, empty identity.
+ */
+export function relativeDirRefusal(name: DirSetting, then: string): string {
+  return (
+    `${name} is not a full path, so nothing is written there: a relative path, or one that begins with a space, ` +
+    `lands under the working directory. Set ${name} to the full path of a directory (JSON settings do not expand ~), ` +
+    `then ${then}. Any files an earlier version wrote under this setting are in the folder it names inside the working ` +
+    `directory of the run that wrote them (a leading ~ there is a folder named ~)` +
+    (name === 'SAIHM_HOME' ? ', your key among them' : '') +
+    // The path last, outside every delimiter: a path may hold any character a delimiter is made of.
+    `: move them into that directory first. This run's working directory: ${safePathField(process.cwd(), MAX_PATH_FIELD_CHARS)}`
+  );
+}
+
 /** Default on-disk location of a self-generated FREE identity (written mode 600). */
 export function defaultIdentityPath(): string {
   const home = saihmHomeSetting() ?? pathJoin(homedir(), '.saihm');
@@ -1598,7 +2031,12 @@ export function keyShapedHomeRefusal(verb: 'join' | 'export'): string {
   // An export reads the key this machine boots, which lives under that folder: once SAIHM_HOME moves, only naming the
   // key file as well lets the export find it.
   // Only a key that lives in a file needs naming: one given inline (SAIHM_MASTER_SECRET_HEX) or as a token has none.
-  const namesKeyFile = verb === 'export' && !process.env['SAIHM_MASTER_SECRET_HEX']?.trim() && !identityTokenConfigured();
+  // Nor one already named: telling an operator to set SAIHM_MASTER_SECRET_FILE when it is set sends them to a done step.
+  const namesKeyFile =
+    verb === 'export' &&
+    !process.env['SAIHM_MASTER_SECRET_HEX']?.trim() &&
+    !process.env['SAIHM_MASTER_SECRET_FILE']?.trim() &&
+    !identityTokenConfigured();
   const keyFile = namesKeyFile ? ', and SAIHM_MASTER_SECRET_FILE to the full path of your key file' : '';
   return saihmHomeSetting() !== undefined
     ? `SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory${consequence}. ` +
@@ -1742,10 +2180,24 @@ export function defaultRecallCachePath(agentIdHashHex: string): string {
   return pathJoin(dirname(defaultIdentityPath()), `recall.${agentIdHashHex.slice(0, 16)}.json`);
 }
 
+/** A file's first line, read no further than the longest line the feed writes (1 KiB, its newline included). */
+function firstLineOf(path: string): string {
+  const firstLineReader = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(1024);
+    const n = readSync(firstLineReader, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, n).toString('utf8');
+    const nl = text.indexOf('\n');
+    return nl < 0 ? text : text.slice(0, nl);
+  } finally {
+    closeSync(firstLineReader);
+  }
+}
+
 /**
- * The cellIds this identity's erasure feed records, re-read only when the feed file changed. Never
- * throws: no feed yet, an unreadable one or a misconfigured root all mean "nothing known to be erased",
- * which leaves the cache exactly as it was before this reader existed.
+ * The cellIds this identity's erasure feed records, re-read only when a feed file (the current one or its rotated
+ * predecessor) changed. Never throws: no feed yet, an unreadable one or a misconfigured root all mean "nothing known to
+ * be erased", which leaves the cache exactly as it was before this reader existed.
  */
 function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlySet<string> {
   let seen = '';
@@ -1753,16 +2205,37 @@ function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlySet<string> 
   return () => {
     try {
       const file = feedPathFor(resolveFeedRoot(), agentIdHashHex);
-      const st = statSync(file);
-      const key = `${st.size}:${st.mtimeMs}`;
+      // The predecessor too: a rotation must not make a session forget an erasure it has to keep off the disk.
+      const files = [`${file}${PREDECESSOR_SUFFIX}`, file];
+      // What identifies a file's content cheaply. Inode, size and time alone can repeat: an inode is reused once its
+      // file is gone, and a coarse clock gives a recreated file of the same size the same time. The first line (at
+      // most one line's worth) tells a recreated or rotated file from the one read before.
+      const stats = files.map((f) => {
+        try {
+          const st = statSync(f);
+          return `${st.ino}:${st.size}:${st.mtimeMs}:${JSON.stringify(firstLineOf(f))}`;
+        } catch {
+          return '-';
+        }
+      });
+      if (stats[1] === '-' && stats[0] === '-') throw new Error('no feed');
+      const key = stats.join('|');
       if (key !== seen) {
         const next = new Set<string>();
-        for (const line of readFileSync(file, 'utf-8').split('\n')) {
+        for (const f of files) {
+          let text: string;
           try {
-            const r = JSON.parse(line) as { cellId?: unknown };
-            if (typeof r.cellId === 'string') next.add(r.cellId);
+            text = readFileSync(f, 'utf-8');
           } catch {
-            /* a torn or empty line names no cell */
+            continue;
+          }
+          for (const line of text.split('\n')) {
+            try {
+              const r = JSON.parse(line) as { cellId?: unknown };
+              if (typeof r.cellId === 'string') next.add(r.cellId);
+            } catch {
+              /* a torn or empty line names no cell */
+            }
           }
         }
         ids = next;
@@ -1911,6 +2384,9 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
     // in their own words; this keeps any other caller from creating a key whose path is a secret.
     if (pathHoldsIdentitySecret(keyPath))
       throw new SaihmConfigError(keyShapedHomeRefusal('join'), 'path');
+    // Nor under a relative one: the key would be created under the working directory.
+    if (relativeDirSetting(['SAIHM_HOME']) !== null)
+      throw new SaihmConfigError(relativeDirRefusal('SAIHM_HOME', 'join again'), 'path');
     try {
       const secretHex = randomBytes(32).toString('hex');
       mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
@@ -2934,8 +3410,11 @@ class RecallCache {
    * feed; a second running session that still holds the cell in memory would otherwise write its
    * plaintext back on its next save — after the endpoint's copy was crypto-shredded, the only plaintext
    * left. Applied after load and before every save. With the feed off (SAIHM_ERASURE_FEED=0) the next
-   * recall's live-cell list is what evicts it. A cellId written again after its erasure is only fetched
-   * again on each recall instead of being cached — slower, never stale.
+   * recall's live-cell list is what evicts it. A cellId written again after its erasure stays dropped
+   * too, for as long as the feed names it: the erasure keeps winning, so nothing erased is ever written
+   * back, and the newer cell is never cached. A delta recall answers from this cache, so it does not
+   * return that cell at all (stale, not merely slower); only a full recall's answer, the endpoint's list
+   * as sent, still carries it. A known limitation until the two are ordered by the endpoint's sequence.
    */
   private dropErased(): boolean {
     const erased = this.erasedElsewhere?.();
@@ -3162,6 +3641,51 @@ class RecallCache {
   }
 }
 
+/** What this identity may use of warm start, as one call takes it (see `SaihmProClient.warmStartOffer`). */
+export type WarmStartOffer = WarmStartLimits & WarmStartRoute;
+
+/** One warm-start answer: its status, its body, its `Content-Digest` and the wait it asks for, all read by name. */
+interface WarmStartAnswer {
+  readonly status: number;
+  readonly bytes: Uint8Array;
+  readonly digest: string | undefined;
+  readonly retryAfterS: number | null;
+}
+
+interface WarmStartRequestOpts {
+  readonly body?: Uint8Array | string;
+  readonly headers?: Readonly<Record<string, string>>;
+  /** The most bytes the answer may hold. */
+  readonly cap: number;
+}
+
+/** The most a warm-start answer other than a part or the listing may hold. */
+const WARM_START_ANSWER_BYTES = 65_536;
+/** The most a snapshot listing may hold. */
+const WARM_START_LIST_BYTES = 1_048_576;
+/** Room for a refusal's body where an answer is otherwise held to what a snapshot has left. */
+const WARM_START_REFUSAL_BYTES = 4096;
+/** How many times a part or a commit is sent before its refusal is the call's answer. */
+const WARM_START_ATTEMPTS = 3;
+/**
+ * A commit's failures that do not say its snapshot was NOT stored: the upload gone (a commit sent again after an answer
+ * that never came back finds it committed), the front unable to reach or relay the operator, or no answer at all.
+ */
+const COMMIT_FATE_UNKNOWN: ReadonlySet<string> = new Set(['upload_not_found', 'upstream_unavailable', 'bad_gateway', 'network', 'timeout']);
+
+/** An answer's JSON, or undefined when it is not JSON. */
+const parsedAnswer = (bytes: Uint8Array): unknown => {
+  try {
+    return JSON.parse(Buffer.from(bytes).toString('utf-8'));
+  } catch {
+    return undefined;
+  }
+};
+
+/** Wait the seconds an answer asks for, between 1 and 30, plus up to a second of jitter. */
+const warmStartPause = (seconds: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, Math.min(30, Math.max(1, seconds)) * 1000 + Math.floor(Math.random() * 1000)));
+
 export class SaihmProClient {
   private readonly endpoint: string;
   /** A static Authorization header (e.g. `"Bearer <JWT>"`), or `undefined` in self-onboard mode. */
@@ -3180,6 +3704,8 @@ export class SaihmProClient {
   /** The share events feed, when started (SAIHM_EVENTS=1). Memory only: a new map and `since` at each start. */
   private shareFeed?: ShareEventsFeed;
   private shareStatesWriter?: { soon: () => void; stop: () => void };
+  /** The writer of this identity's own-cell event files, when the feed runs and the erasure feed is on. */
+  private ownChanges: ChangeFeedWriter | undefined;
   private lastFeedRenewAt = -Infinity;
   private readonly recallCache: RecallCache;
   /** The uncached-recall notice is written at most once per process. */
@@ -3315,6 +3841,11 @@ export class SaihmProClient {
           'path',
         );
     }
+    // A RELATIVE STATE DIRECTORY is refused next, for the reason above: this server's writers would create it under
+    // the working directory. After the secret check, so a secret pasted there is refused as one, unshown.
+    const relativeDir = relativeDirSetting();
+    if (relativeDir !== null)
+      throw new SaihmConfigError(relativeDirRefusal(relativeDir, 'start a new session'), 'path');
     // A SECRET IN A PLAN OR PAYMENT FIELD - the fields beside the secret ones in an install form - is
     // refused rather than sent to the endpoint as the tier or the payment method.
     for (const name of ['SAIHM_TIER', 'SAIHM_PAYMENT_METHOD'] as const) {
@@ -3934,7 +4465,8 @@ export class SaihmProClient {
       }
     } catch (e) {
       if (e instanceof SaihmEndpointError) throw e;
-      if (e instanceof Error && e.name === 'AbortError') {
+      // A timeout whatever the error is called: see `doCall`, whose body read stalls the same way.
+      if ((e instanceof Error && e.name === 'AbortError') || ctrl.signal.aborted) {
         throw new SaihmEndpointError(
           408,
           'timeout',
@@ -4149,6 +4681,8 @@ export class SaihmProClient {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
     try {
+      // From just before the request is sent to the last byte received: the client's half of `timing`.
+      const sentAt = performance.now();
       const res = await keepAliveFetch(this.endpoint, {
         method: 'POST',
         headers: {
@@ -4159,6 +4693,7 @@ export class SaihmProClient {
         signal: ctrl.signal,
       });
       const text = await readBodyCapped(res, MAX_RESPONSE_BYTES, method);
+      const totalMs = performance.now() - sentAt;
       if (!res.ok) {
         let code: string | undefined;
         try {
@@ -4187,8 +4722,9 @@ export class SaihmProClient {
             (code ? ` (${code})` : ''),
         );
       }
+      let parsed: unknown;
       try {
-        return JSON.parse(text) as T;
+        parsed = JSON.parse(text);
       } catch {
         throw new SaihmEndpointError(
           res.status,
@@ -4196,9 +4732,13 @@ export class SaihmProClient {
           `SAIHM endpoint ${method} returned a non-JSON 2xx response`,
         );
       }
+      noteAnswer(method, res, totalMs, parsed);
+      return parsed as T;
     } catch (e) {
       if (e instanceof SaihmEndpointError) throw e;
-      if (e instanceof Error && e.name === 'AbortError') {
+      // A TIMEOUT whatever the error is called. The limit landing while the body streams destroys the socket, and the
+      // body read then fails as ECONNRESET: an endpoint that answered and then stalled read as one never reached.
+      if ((e instanceof Error && e.name === 'AbortError') || ctrl.signal.aborted) {
         throw new SaihmEndpointError(
           408,
           'timeout',
@@ -4463,6 +5003,8 @@ export class SaihmProClient {
     // having been exhaustive, which is why it stays.
     const rawShardId: unknown = r?.shardId;
     const shardId = typeof rawShardId === 'string' ? rawShardId : '';
+    // Resolved once, like `shardId`, and only a zoned time is kept: anything else is no time this client can compare.
+    const at = isoTime((r as { at?: unknown } | undefined)?.at);
     // After the write, its marks and its cache entry: the grants it left on the previous version. Never throws.
     const shares = await this.reissueStaleShares(cellId, env, r);
     return {
@@ -4470,6 +5012,7 @@ export class SaihmProClient {
       cellId,
       seq: seq.toString(10),
       commitmentHash: toHex(env.publicMeta.commitmentHash),
+      at,
       // The one field with no local authority — it names endpoint-side storage, so only the endpoint
       // can know it. Brought to the declared type rather than cast into a lie (an omitted field would
       // otherwise be `undefined` typed `string`), and fenced again at every render site.
@@ -4582,7 +5125,7 @@ export class SaihmProClient {
         Array.isArray((r as { added?: unknown }).added) &&
         Array.isArray((r as { liveCellIds?: unknown }).liveCellIds);
       if (isDelta(resp)) {
-        const { cells: added, announcements, announcementsTruncated } = this.openRecallRows(resp.added);
+        const { cells: added, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(resp.added);
         // Non-strings are dropped rather than coerced. `new Set([...])` on a mixed array would treat
         // every non-string as an id that is NOT live, and `merge` prunes exactly what is missing from
         // that set — so a response of `[null]` would evict the whole cache while looking well-formed.
@@ -4599,7 +5142,7 @@ export class SaihmProClient {
           } catch (e) {
             throw markPathBearing(e);
           }
-        return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated };
+        return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated, announcementsSkipped };
       }
       if (!Array.isArray(resp)) {
         throw new SaihmEndpointError(
@@ -4608,14 +5151,14 @@ export class SaihmProClient {
           'endpoint returned a malformed recall response',
         );
       }
-      const { cells, announcements, announcementsTruncated } = this.openRecallRows(resp);
+      const { cells, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(resp);
       if (!cacheIsStale)
         try {
           this.recallCache.replaceAll(cells);
         } catch (e) {
           throw markPathBearing(e);
         }
-      return { cells: filter(cells), announcements, announcementsTruncated };
+      return { cells: filter(cells), announcements, announcementsTruncated, announcementsSkipped };
     }
 
     // FULL PATH (default, unchanged): recall-all, open every row, filter client-side.
@@ -4627,8 +5170,8 @@ export class SaihmProClient {
         'endpoint returned a malformed recall-all response',
       );
     }
-    const { cells, announcements, announcementsTruncated } = this.openRecallRows(rows);
-    return { cells: filter(cells), announcements, announcementsTruncated };
+    const { cells, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(rows);
+    return { cells: filter(cells), announcements, announcementsTruncated, announcementsSkipped };
   }
 
   /**
@@ -4656,14 +5199,14 @@ export class SaihmProClient {
    * and are handled under weaker rules — see the comment at the `row.shared` branch. The two streams
    * never share a key: a shared cellId may equal one this agent owns, and both must survive.
    */
-  private openRecallRowsUnbatched(rows: unknown[]): {
-    cells: RecalledCell[];
-    announcements: SharedAnnouncement[];
-    announcementsTruncated: boolean;
-  } {
+  private openRecallRowsUnbatched(rows: unknown[]): RecallWithShared {
     const out: RecalledCell[] = [];
     const announcements: SharedAnnouncement[] = [];
     let announcementsTruncated = false;
+    // A row this client cannot carry is skipped WHEREVER it stands; before the cut, that makes the kept list something
+    // other than one end of the endpoint's order (see RecallWithShared.announcementsSkipped). After the cut it is part
+    // of the end the cut already dropped.
+    let announcementsSkipped = false;
     let announcedChars = 0; // running total across KEPT announcements; see MAX_ANNOUNCEMENT_TOTAL_CHARS
     const seen = new Set<string>();
     const seenShared = new Set<string>();
@@ -4720,8 +5263,10 @@ export class SaihmProClient {
             typeof row.cellId !== 'string' ||
             typeof row.scope !== 'string' ||
             !(typeof row.expiryEpoch === 'string' || row.expiryEpoch == null)
-          )
+          ) {
+            announcementsSkipped ||= !announcementsTruncated;
             continue;
+          }
           // FIELD CAP. A row with an over-long field is dropped outright and does NOT set
           // `truncated`: it is a malformed row like any other, and flagging it would let the endpoint
           // make every listing claim to be incomplete.
@@ -4731,8 +5276,10 @@ export class SaihmProClient {
             row.cellId.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
             row.scope.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
             epochChars > MAX_ANNOUNCEMENT_FIELD_CHARS
-          )
+          ) {
+            announcementsSkipped ||= !announcementsTruncated;
             continue;
+          }
           // DEDUP FIRST, ahead of both caps. Injective in (sharer, cellId): a plain
           // `${sharer}:${cellId}` collapses ("a:b","c") onto ("a","b:c"), which an endpoint choosing
           // both fields could use to suppress an announcement. (sharer, cellId) IS the identity of a
@@ -4758,6 +5305,10 @@ export class SaihmProClient {
           // pinning both halves in tests, is what stops that from being one refactor away.
           const key = JSON.stringify([row.sharer, row.cellId]); // opaque; never parsed back apart
           if (seenShared.has(key)) continue;
+          // ONE END, ONCE CUT. After either cap below has cut the list, no later announcement is kept, so what is kept
+          // is always the FRONT of the endpoint's order: the end a result can name (`sharedKept`). The byte axis used to
+          // go on keeping a later, smaller row after dropping a larger one, which left a gap no end could describe.
+          if (announcementsTruncated) continue;
           const rowChars =
             row.sharer.length + row.cellId.length + row.scope.length + epochChars;
           // BYTE AXIS. This said it is checked before the row cap "because a single row can exceed the
@@ -4796,7 +5347,12 @@ export class SaihmProClient {
         }
       }
 
-      if (!row.found || !row.wire) continue;
+      if (!row.found || !row.wire) {
+        // A row that said it was shared and is neither a pointer this client keeps nor an own cell it opens is a
+        // skipped announcement like any other (see announcementsSkipped).
+        if (row.shared !== undefined) announcementsSkipped ||= !announcementsTruncated;
+        continue;
+      }
       const cell = this.openRow(null, row.wire); // trusts env.cellId/seq, not the server row label
       // Own cells only. An announcement never reaches this set, which is precisely why a shared cellId
       // may collide with one this agent owns without tripping the duplicate check.
@@ -4810,13 +5366,28 @@ export class SaihmProClient {
       seen.add(cell.cellId);
       out.push(cell);
     }
-    return { cells: out, announcements, announcementsTruncated };
+    return { cells: out, announcements, announcementsTruncated, announcementsSkipped };
+  }
+
+  /**
+   * One page of the version listing of this identity's own cells: ids, sequence numbers and commitments from the
+   * endpoint's index, no content. Page with `after` (the previous page's `next`) until `next` is null.
+   */
+  async listVersions(after?: string): Promise<VersionListing> {
+    // Alone, as the endpoint requires: a listing request carries nothing but `listOnly` and `after`.
+    const r = await this.call<unknown>('saihm_recall', after === undefined ? { listOnly: true } : { listOnly: true, after });
+    return versionListingFrom(r);
   }
 
   /** Recall + open a single cell. Returns `null` if it does not exist. */
   async recallOne(cellId: string): Promise<RecalledCell | null> {
     const r = await this.recallRawOne(cellId);
-    if (!r.found || !r.wire) return null;
+    // `found: false` is the endpoint's own "no such cell". Anything else without an envelope is an answer this client
+    // cannot read: calling it "not found" would put a plausible answer where the endpoint gave a malformed one.
+    if (r.found === false) return null;
+    if (r.found !== true || !r.wire) {
+      throw new SaihmEndpointError(502, 'malformed_response', 'endpoint returned a malformed read of one of your cells');
+    }
     return this.openRow(cellId, r.wire);
   }
 
@@ -4849,13 +5420,12 @@ export class SaihmProClient {
     // only constructible where the erasure is performed, and it is performed remotely. Report both
     // halves instead, exactly as the cache purge above does.
     //
-    // `complete` is stated FALSE unconditionally rather than forwarded from `r`. It means this client
-    // cannot PROVE the destruction, not that none happened: the hosted endpoint does destroy the cell's
-    // wrapped key, but nothing on this receipt lets a consumer check that, and an endpoint's own
-    // `complete` is a post-condition that also holds for an id that never existed. A consumer refuses
-    // `complete:true` without a verbatim `destructionAnchor`, and `ForgetResult` has no such field to
-    // copy one from. Forwarding a `true` the endpoint happened to set would
-    // produce a line the consumer discards, which purges nothing and looks like a delivered erasure.
+    // `complete` is TRUE only when the receipt says so AND carries a `destructionAnchor` of the agreed shape,
+    // which is copied verbatim; otherwise FALSE. False means this client cannot point at the destruction, not
+    // that none happened. An endpoint's bare `complete` is a post-condition that also holds for an id that
+    // never existed, and a consumer refuses `complete:true` without an anchor: forwarding a bare `true` would
+    // produce a line the consumer discards, which purges nothing and looks like a delivered erasure. Both
+    // fields are read ONCE, below, from the unvalidated body.
     //
     // GATED ON THE ID'S LENGTH, and the reason is the RENDER rather than the feed. `cellId` is a
     // caller argument and free-form, so it is the only value on this wire a caller chooses. Emitting
@@ -4872,6 +5442,28 @@ export class SaihmProClient {
     // working, not the first. That does not make the silence free, and if a downstream consumer ever
     // needs to hear about this class, the honest fix is a field on the line the receipt ALREADY
     // renders, never a second conditional line.
+    //
+    // THE RECEIPT IS RESOLVED HERE, ONCE, and the raw claims are REPLACED in the result below, so the erasure line, the
+    // change feed's record of this erasure and the tool result (its text and its structured content) state the same
+    // thing. `complete` follows the line: a boolean claim is TRUE only with the anchor (an endpoint whose own-cell events
+    // are off states the post-condition `complete: true` with no anchor, even for an id that never existed); a claim
+    // that is not even a boolean is left for the tool to name as malformed. `reason` says why a `complete: false` is
+    // false, so it travels only beside one, and only as one of the two it may be: `not-found` (no such cell: never
+    // written, or erased already) or `not-attested` (the destruction could not be made durable: forget the id again
+    // later); an older server names none, a hostile one could name anything. The line carries this same `reason`, so a
+    // reader can tell "nothing (more) to erase" from an erasure not yet durable; a forget answered `not-found` is still
+    // recorded, because for an id erased before, the line lets a reader drop what it still derives from it. `at` is the
+    // endpoint's time of the erasure when it states a zoned time, re-serialised, else null — the convention of
+    // `remember`'s `at`.
+    const claim: { complete?: unknown; destructionAnchor?: unknown; reason?: unknown; at?: unknown } =
+      typeof r === 'object' && r !== null ? r : {};
+    const anchor =
+      claim.complete === true && typeof claim.destructionAnchor === 'string' && DESTRUCTION_ANCHOR.test(claim.destructionAnchor)
+        ? claim.destructionAnchor
+        : null;
+    const reason =
+      claim.complete === false && (claim.reason === 'not-found' || claim.reason === 'not-attested') ? claim.reason : undefined;
+    const at = isoTime(claim.at);
     let feedResidual: string | undefined;
     const appendFeed = (): void => {
       if (erasureFeedEnabled() && cellId.length > 0 && cellId.length <= MAX_FEED_CELL_ID_CHARS) {
@@ -4879,9 +5471,13 @@ export class SaihmProClient {
           cellId,
           agentIdHash: this.agentIdHashHex,
           at: new Date().toISOString(),
-          complete: false,
+          complete: anchor !== null,
+          ...(reason !== undefined ? { reason } : {}),
+          ...(anchor !== null ? { destructionAnchor: anchor } : {}),
           source: 'mcp-client',
         });
+        // Recorded here: the event feed's report of this erasure is then not written a second time.
+        if (feedResidual === undefined) this.ownChanges?.noteOwnErasure(cellId, anchor);
       }
     };
     // ORDER AND LOCK: the erasure line first, then the removal, both under the recall cache's cross-process write lock
@@ -4913,17 +5509,27 @@ export class SaihmProClient {
     // `undefined` because `exactOptionalPropertyTypes` makes absent and present-but-undefined
     // different things, and absent is the one that means "this client had nothing to report".
     // `feedResidual` is the same channel and gets the same treatment.
-    const out: ForgetResult = { ...r };
+    // `complete`, `reason` and `destructionAnchor` are the endpoint's fields resolved above, and replaced the same way.
+    const out: ForgetResult = { ...r, at };
+    if (typeof claim.complete === 'boolean') out.complete = anchor !== null;
     delete out.localCacheResidual;
     delete out.feedResidual;
+    delete out.reason;
+    delete out.destructionAnchor;
     if (localCacheResidual !== undefined) out.localCacheResidual = localCacheResidual;
     if (feedResidual !== undefined) out.feedResidual = feedResidual;
+    if (reason !== undefined) out.reason = reason;
+    if (anchor !== null) out.destructionAnchor = anchor;
     return out;
   }
 
   /** Non-custodial status: operator-observable metadata only (no plaintext). */
   async status(): Promise<StatusSnapshot> {
-    return this.call('saihm_status', {});
+    const s = await this.call<StatusSnapshot>('saihm_status', {});
+    // What this identity may use, told to the event feed, which reads the server's offer only at start and daily.
+    const events = (s as { features?: { events?: { kinds?: unknown } } } | null | undefined)?.features?.events;
+    this.shareFeed?.noteStatusOffer(Array.isArray(events?.kinds) ? (events.kinds as unknown[]) : undefined);
+    return s;
   }
 
   /**
@@ -5211,7 +5817,7 @@ export class SaihmProClient {
       contentWire?: WireEnvelope;
       grant?: unknown;
     };
-    const servedBy = typeof res.grant === 'string' && /^[0-9a-f]{64}$/.test(res.grant) ? res.grant : undefined;
+    const servingGrant = typeof res.grant === 'string' && /^[0-9a-f]{64}$/.test(res.grant) ? res.grant : undefined;
     if (!res.found || !res.wire || !res.contentWire) return null; // no live grant / content unavailable
 
     // 3) Authenticate the grant + unwrap the content DEK with this agent's ML-KEM secret.
@@ -5318,11 +5924,262 @@ export class SaihmProClient {
         plaintext,
         seq: env.seq.toString(10),
         commitmentHash: toHex(env.publicMeta.commitmentHash),
-        ...(servedBy !== undefined ? { grant: servedBy } : {}),
+        ...(servingGrant !== undefined ? { grant: servingGrant } : {}),
       };
     } finally {
       dek.fill(0); // scrub the unwrapped DEK regardless of outcome
     }
+  }
+
+  // ── warm start ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * What this identity may use of warm start now: its offer from `saihm_status` (`features.warmStart`) and the
+   * endpoint's route and part size from its info document. Every warm-start call takes one, so none runs without an
+   * offer; with none, `warm_start_unavailable`, and the caller starts cold. Limits are read here, never assumed.
+   */
+  async warmStartOffer(): Promise<WarmStartOffer> {
+    const s = await this.status();
+    const limits = warmStartLimits(featuresOf((s as { features?: unknown } | null | undefined)?.features).features);
+    if (limits === null)
+      throw new SaihmEndpointError(0, 'warm_start_unavailable', 'warm start is not offered to this identity now: start cold');
+    const route = await this.warmStartRouteFromInfo();
+    if (route === null)
+      throw new SaihmEndpointError(0, 'warm_start_unavailable', 'the endpoint does not describe warm start now: start cold');
+    return { maxBytes: limits.maxBytes, url: route.url, partBytes: route.partBytes };
+  }
+
+  /**
+   * Seal `payload` here and store it as a snapshot covering `coversThrough`: begin, every part, then commit. A part or
+   * the commit is sent again after a limit or a busy endpoint, so an upload once begun is not lost to a moment's load.
+   * A commit whose answer never arrives may have been stored: the listing says whether it was.
+   */
+  async warmStartPut(offer: WarmStartOffer, payload: Uint8Array, coversThrough: string): Promise<WarmStartSnapshot> {
+    if (!COVERS_THROUGH_PATTERN.test(coversThrough))
+      throw new SaihmEndpointError(0, 'invalid_input', 'coversThrough is a position of the change feed: 1 to 64 printable characters');
+    const sealed = sealSnapshot(payload, offer.partBytes, {
+      kek: this.identity.kek,
+      agentIdHash: this.identity.agentIdHash,
+      coversThrough,
+    });
+    if (sealed.bytes > offer.maxBytes)
+      throw new SaihmEndpointError(0, 'snapshot_too_large', `the sealed snapshot is ${sealed.bytes} bytes; this identity's snapshots hold at most ${offer.maxBytes}`);
+    const begin = await this.warmStartRequest('begin', 'POST', offer.url, {
+      body: JSON.stringify({
+        v: 1,
+        bytes: sealed.bytes,
+        parts: sealed.parts.length,
+        digest: sealed.digest,
+        keyEnvelope: sealed.keyEnvelope,
+        coversThrough,
+        nonce: sealed.nonce,
+      }),
+      headers: { 'content-type': 'application/json' },
+      cap: WARM_START_ANSWER_BYTES,
+    });
+    if (begin.status !== 201) throw this.warmStartRefusal('begin', begin).error;
+    const upload = begunUpload(parsedAnswer(begin.bytes));
+    if (upload === null || upload.partBytes !== offer.partBytes)
+      throw new SaihmEndpointError(502, 'malformed_response', 'SAIHM warm start began an upload this client cannot fill');
+    const at = `${offer.url}/uploads/${upload.uploadId}`;
+    for (let n = 0; n < sealed.parts.length; n++) {
+      const part = sealed.parts[n] as Uint8Array;
+      await this.warmStartPersisting('part', 'PUT', `${at}/parts/${n}`, 204, {
+        body: part,
+        headers: { 'content-type': 'application/octet-stream', 'content-digest': contentDigestOf(part) },
+        cap: WARM_START_ANSWER_BYTES,
+      });
+    }
+    // Only once every part has answered: a part still in flight would race the commit.
+    let commit: WarmStartAnswer;
+    try {
+      commit = await this.warmStartPersisting('commit', 'POST', `${at}/commit`, 201, { body: '', cap: WARM_START_ANSWER_BYTES });
+    } catch (e) {
+      // A failure that does not say the snapshot was not stored: the listing decides. Ours is the entry with this digest
+      // and nonce (random per snapshot), at this size and position; any other answer keeps the failure.
+      if (!(e instanceof SaihmEndpointError) || e.code === undefined || !COMMIT_FATE_UNKNOWN.has(e.code)) throw e;
+      const stored = await this.warmStartListing(offer).then(
+        (listed) => listed.find((x) => x.digest === sealed.digest && x.nonce === sealed.nonce && x.bytes === sealed.bytes && x.coversThrough === coversThrough),
+        () => undefined,
+      );
+      if (stored === undefined) throw e;
+      return { snapshotId: stored.snapshotId, createdAt: stored.createdAt, bytes: stored.bytes, coversThrough: stored.coversThrough };
+    }
+    const snapshot = committedSnapshot(parsedAnswer(commit.bytes), { bytes: sealed.bytes, parts: sealed.parts.length, coversThrough });
+    if (snapshot === null)
+      throw new SaihmEndpointError(502, 'malformed_response', 'SAIHM warm start committed a snapshot other than the one sent');
+    return snapshot;
+  }
+
+  /**
+   * Restore the newest snapshot: the first of the listing, every part fetched and checked against its own digest, all
+   * of them against the snapshot's, every part opened, and only then the payload returned. Null when there is no
+   * snapshot. Any failure throws and returns nothing of the snapshot: the caller starts cold.
+   */
+  async warmStartLatest(offer: WarmStartOffer): Promise<{ readonly snapshot: WarmStartSnapshot; readonly payload: Uint8Array } | null> {
+    const newest = (await this.warmStartListing(offer))[0];
+    if (newest === undefined) return null;
+    if (newest.bytes > offer.maxBytes)
+      throw new SaihmEndpointError(0, 'snapshot_too_large', `the newest snapshot is ${newest.bytes} bytes; this identity's snapshots hold at most ${offer.maxBytes}`);
+    const binding = { kek: this.identity.kek, agentIdHash: this.identity.agentIdHash, coversThrough: newest.coversThrough };
+    const key = openSnapshotKey(newest.keyEnvelope, newest.nonce, binding);
+    if (key === null) throw new SaihmEndpointError(502, 'undecryptable', "the newest snapshot's key does not open under this identity");
+    try {
+      const parts: Uint8Array[] = [];
+      let total = 0;
+      for (let n = 0; n < newest.parts; n++) {
+        // At most what the snapshot has left, or room for a refusal's body: the total is checked after the last part.
+        const cap = Math.max(newest.bytes - total, WARM_START_REFUSAL_BYTES);
+        const a = await this.warmStartRequest('read', 'GET', `${offer.url}/${newest.snapshotId}/parts/${n}`, { cap });
+        if (a.status !== 200) throw this.warmStartRefusal('read', a).error;
+        const stated = contentDigestSha256(a.digest);
+        if (stated === null || !ctEqual(stated, createHash('sha256').update(a.bytes).digest()))
+          throw new SaihmEndpointError(502, 'digest_mismatch', `part ${n} of the newest snapshot does not match its Content-Digest`);
+        total += a.bytes.length;
+        parts.push(a.bytes);
+      }
+      if (total !== newest.bytes || partsDigest(parts) !== newest.digest)
+        throw new SaihmEndpointError(502, 'digest_mismatch', "the newest snapshot's parts do not match its digest");
+      const payload = openSnapshotParts(key, parts, newest.nonce, binding);
+      if (payload === null) throw new SaihmEndpointError(502, 'undecryptable', 'a part of the newest snapshot does not open under its key');
+      return {
+        snapshot: { snapshotId: newest.snapshotId, createdAt: newest.createdAt, bytes: newest.bytes, coversThrough: newest.coversThrough },
+        payload,
+      };
+    } finally {
+      key.fill(0);
+    }
+  }
+
+  /** This identity's snapshots, newest first, as the endpoint lists them: metadata only. */
+  async warmStartList(offer: WarmStartOffer): Promise<WarmStartSnapshot[]> {
+    return (await this.warmStartListing(offer)).map((e) => ({
+      snapshotId: e.snapshotId,
+      createdAt: e.createdAt,
+      bytes: e.bytes,
+      coversThrough: e.coversThrough,
+    }));
+  }
+
+  /** Destroy one snapshot, its key first. One that no longer exists is `snapshot_not_found`. */
+  async warmStartDelete(offer: WarmStartOffer, snapshotId: string): Promise<void> {
+    if (!SNAPSHOT_ID_PATTERN.test(snapshotId))
+      throw new SaihmEndpointError(0, 'invalid_input', 'a snapshot id is 64 lowercase hex characters');
+    const a = await this.warmStartRequest('delete', 'DELETE', `${offer.url}/${snapshotId}`, { cap: WARM_START_ANSWER_BYTES });
+    if (a.status !== 204) throw this.warmStartRefusal('delete', a).error;
+  }
+
+  /** The listing, every entry checked; one it cannot read refuses the listing whole. */
+  private async warmStartListing(offer: WarmStartOffer): Promise<ListedSnapshot[]> {
+    const a = await this.warmStartRequest('list', 'GET', offer.url, { cap: WARM_START_LIST_BYTES });
+    if (a.status !== 200) throw this.warmStartRefusal('list', a).error;
+    const listed = listedSnapshots(parsedAnswer(a.bytes));
+    if (listed === null) throw new SaihmEndpointError(502, 'malformed_response', 'SAIHM warm start listed snapshots this client cannot read');
+    return listed;
+  }
+
+  /** The info document's `warmStart`, or null when the endpoint describes none now (or answers no info). */
+  private async warmStartRouteFromInfo(): Promise<WarmStartRoute | null> {
+    const base = this.endpoint.endsWith('/') ? this.endpoint : `${this.endpoint}/`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
+    try {
+      const res = await keepAliveFetch(new URL('info', base).toString(), { method: 'GET', signal: ctrl.signal });
+      const bytes = await readBytesCapped(res, WARM_START_ANSWER_BYTES, 'warm_start_info');
+      return res.ok ? warmStartRoute(parsedAnswer(bytes), base) : null;
+    } catch (e) {
+      throw this.warmStartTransportError('info', e, ctrl.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** One request with this identity's credential, renewed once on a 401 when this client mints its own. */
+  private async warmStartRequest(
+    label: string,
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    url: string,
+    opts: WarmStartRequestOpts,
+  ): Promise<WarmStartAnswer> {
+    const send = async (auth: string): Promise<WarmStartAnswer> => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
+      try {
+        const res = await keepAliveFetch(url, {
+          method,
+          headers: { ...opts.headers, authorization: auth },
+          ...(opts.body !== undefined ? { body: opts.body } : {}),
+          signal: ctrl.signal,
+        });
+        const bytes = await readBytesCapped(res, opts.cap, `warm_start_${label}`);
+        const ra = res.headers.get('retry-after');
+        return { status: res.status, bytes, digest: answerDigests.get(res), retryAfterS: ra !== null && /^[0-9]{1,5}$/.test(ra) ? Number(ra) : null };
+      } catch (e) {
+        throw this.warmStartTransportError(label, e, ctrl.signal);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    const first = await send(await this.currentAuthHeader());
+    if (first.status !== 401 || this.staticAuthHeader) return first;
+    this.cachedJwt = undefined;
+    return send(await this.currentAuthHeader());
+  }
+
+  /**
+   * A request an upload cannot afford to lose, sent again, at most WARM_START_ATTEMPTS times in all, after a limit
+   * (429), an endpoint busy or failing to write (503 `busy` or `retry`), or a connection that dropped. It waits as the
+   * answer asks, with jitter. A part may be sent again: it replaces the earlier copy.
+   */
+  private async warmStartPersisting(
+    label: string,
+    method: 'POST' | 'PUT',
+    url: string,
+    want: number,
+    opts: WarmStartRequestOpts,
+  ): Promise<WarmStartAnswer> {
+    for (let attempt = 1; ; attempt++) {
+      let a: WarmStartAnswer;
+      try {
+        a = await this.warmStartRequest(label, method, url, opts);
+      } catch (e) {
+        const dropped = e instanceof SaihmEndpointError && (e.code === 'network' || e.code === 'timeout');
+        if (!dropped || attempt >= WARM_START_ATTEMPTS) throw e;
+        await warmStartPause(1);
+        continue;
+      }
+      if (a.status === want) return a;
+      const refusal = this.warmStartRefusal(label, a);
+      const again =
+        a.status === 429 ||
+        (a.status === 503 && refusal.error.code === 'warm_start_unavailable' && (refusal.reason === 'busy' || refusal.reason === 'retry'));
+      if (!again || attempt >= WARM_START_ATTEMPTS) throw refusal.error;
+      await warmStartPause(a.retryAfterS ?? (a.status === 429 ? 10 : 5));
+    }
+  }
+
+  /** An answer this client did not ask for, as the typed error it is: the endpoint's code and reason, never its prose. */
+  private warmStartRefusal(label: string, a: WarmStartAnswer): { readonly error: SaihmEndpointError; readonly reason: string | undefined } {
+    const j = parsedAnswer(a.bytes) as { error?: unknown; reason?: unknown } | null | undefined;
+    const code = typeof j?.error === 'string' ? j.error.slice(0, MAX_ERROR_CODE_CHARS) : undefined;
+    const reason = typeof j?.reason === 'string' ? j.reason.slice(0, MAX_ERROR_CODE_CHARS) : undefined;
+    if (a.status === 429 && code === undefined)
+      return {
+        error: new SaihmEndpointError(429, 'rate_limited', `SAIHM warm start ${label} failed: 429. Wait ${a.retryAfterS ?? 10} seconds, then try again.`),
+        reason,
+      };
+    return {
+      error: new SaihmEndpointError(a.status, code, `SAIHM warm start ${label} failed: ${a.status}` + (code ? ` (${code}${reason ? `, ${reason}` : ''})` : '')),
+      reason,
+    };
+  }
+
+  /** A request that got no usable answer, as the typed error the rest of this client raises for one. */
+  private warmStartTransportError(label: string, e: unknown, signal: AbortSignal): SaihmEndpointError {
+    if (e instanceof SaihmEndpointError) return e;
+    if ((e instanceof Error && e.name === 'AbortError') || signal.aborted)
+      return new SaihmEndpointError(408, 'timeout', `SAIHM warm start ${label} timed out after ${this.requestTimeoutMs}ms`);
+    return new SaihmEndpointError(0, 'network', `SAIHM warm start ${label} could not reach ${safeEndpoint(this.endpoint)} (${transportReason(e)})`);
   }
 
   /**
@@ -5391,7 +6248,8 @@ export class SaihmProClient {
     let pending: ReturnType<typeof setTimeout> | undefined;
     const write = (): void => {
       pending = undefined;
-      if (path === undefined || !this.shareFeed) return;
+      // While another process writes this tenant directory's event files, the map file is that process's to write.
+      if (path === undefined || !this.shareFeed || !this.shareFeed.mayWriteMap()) return;
       try { writeShareStates(path, this.shareFeed.snapshot()); } catch { /* a lost lock or a full disk: the next change or minute tries again */ }
     };
     const every = setInterval(write, SHARE_STATES_WRITE_MS);
@@ -5407,19 +6265,44 @@ export class SaihmProClient {
     if ((process.env.SAIHM_SHARE_MAP_STORE ?? 'file') !== 'off') {
       try { store = new FileFeedStore(feedStatePath(this.agentIdHashHex)); } catch { store = undefined; }
     }
-    this.shareFeed = new ShareEventsFeed({ transport, ...(store ? { store } : {}), onChange: () => this.shareStatesWriter?.soon() });
-    this.shareFeed.start();
+    // The own-cell event files (changes.ndjson and the feed's erasure lines), written by one process per tenant
+    // directory. Only with the erasure feed on: a change file whose erasures went unrecorded would mislead its reader.
+    // The feed uses the writer only while the endpoint offers both own-cell kinds; otherwise nothing here is touched.
+    let own: ChangeFeedWriter | undefined;
+    if (erasureFeedEnabled()) {
+      try { own = new ChangeFeedWriter({ agentIdHash: this.agentIdHashHex }); } catch { own = undefined; }
+    }
+    this.ownChanges = own;
+    this.shareFeed = new ShareEventsFeed({
+      transport, ...(store ? { store } : {}), ...(own ? { own } : {}), onChange: () => this.shareStatesWriter?.soon(),
+    });
+    // Outside every tool call's answer record: started from inside one (the first call boots the client), the feed's own
+    // recall listings would otherwise land in that call's record as if they were its answer.
+    const feed = this.shareFeed;
+    answerNotes.exit(() => feed.start());
   }
 
   /** Stop the share events feed, including a poll in flight, so nothing keeps the process running. */
   async stopShareEvents(): Promise<void> {
-    await this.shareFeed?.stop();
-    this.shareStatesWriter?.stop();
+    // The last write of the share map happens before the writer's lease is given up.
+    if (this.shareFeed) await this.shareFeed.stop(() => this.shareStatesWriter?.stop());
+    else this.shareStatesWriter?.stop();
   }
 
-  /** The share map from the events feed, or undefined when the feed is not running. */
+  /**
+   * The share map from the events feed, or undefined when the feed is not running. A process waiting for another to
+   * write this tenant directory reports that writer's map, from the file it writes.
+   */
   shareStates(): ShareStates | undefined {
-    return this.shareFeed?.snapshot();
+    const feed = this.shareFeed;
+    if (!feed) return undefined;
+    if (feed.role === 'waiting') {
+      let path: string | undefined;
+      try { path = shareStatesPath(this.agentIdHashHex); } catch { path = undefined; }
+      const fromFile = path === undefined ? undefined : readShareStates(path);
+      if (fromFile) return fromFile;
+    }
+    return feed.snapshot();
   }
 
   /**

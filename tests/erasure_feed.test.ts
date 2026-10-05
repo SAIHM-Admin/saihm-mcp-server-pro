@@ -114,13 +114,13 @@ test('a RELATIVE root is refused, and the refusal names the variable that was wr
     assert.match(h, /SAIHM_HOME/);
     assert.doesNotMatch(h, /SAIHM_ERASURE_FEED_DIR/);
 
-    // An EMPTY explicit value is not an absent one. `??` only falls through on undefined, so an
-    // operator who exports the variable with nothing in it gets a refusal, not a silent fallback to
-    // `SAIHM_HOME` — which would write this identity's feed somewhere they did not name.
-    assert.match(
-      refused(() => resolveFeedRoot({ SAIHM_ERASURE_FEED_DIR: '', SAIHM_HOME: abs }), 'empty explicit'),
-      /SAIHM_ERASURE_FEED_DIR/,
-    );
+    // A BLANK explicit value is an absent one, as a blank SAIHM_HOME is (fixed in 0.13.0): an install form's empty
+    // field arrives as `""`, and it refused here while the same blank SAIHM_HOME fell back. The fallback is the root
+    // every other file of this identity already uses: SAIHM_HOME, else ~/.saihm.
+    for (const blank of ['', '   ', '\t']) {
+      assert.equal(resolveFeedRoot({ SAIHM_ERASURE_FEED_DIR: blank, SAIHM_HOME: abs }), abs, JSON.stringify(blank));
+      assert.equal(resolveFeedRoot({ SAIHM_ERASURE_FEED_DIR: blank }), join(homedir(), '.saihm'), JSON.stringify(blank));
+    }
   } finally {
     rmSync(abs, { recursive: true, force: true });
   }
@@ -193,6 +193,38 @@ test('`complete:true` without a verbatim anchor is REFUSED, not downgraded', () 
     (JSON.parse(buildFeedLine(rec({ destructionAnchor: 'a' }))) as Record<string, unknown>)['destructionAnchor'],
     'a',
   );
+});
+
+test('a `reason` travels beside complete:false only, as one of the two agreed values, and is REFUSED anywhere else', () => {
+  // POSITIVE CONTROL: each agreed value beside complete:false reaches the wire verbatim, right after `complete`, and in
+  // that place on a server-event line too.
+  for (const reason of ['not-found', 'not-attested'] as const) {
+    assert.equal(
+      buildFeedLine(rec({ reason })),
+      `{"v":1,"cellId":"cell-1","agentIdHash":"${ID}","at":"${AT}","complete":false,"reason":"${reason}","source":"mcp-client"}\n`,
+    );
+    assert.deepEqual(
+      Object.keys(JSON.parse(buildFeedLine(rec({ reason, receivedAt: AT, source: 'server-event' }))) as object),
+      ['v', 'cellId', 'agentIdHash', 'at', 'receivedAt', 'complete', 'reason', 'source'],
+    );
+  }
+  // No reason given, none written: the line is exactly what it was before the field existed.
+  assert.ok(!('reason' in (JSON.parse(buildFeedLine(rec())) as object)));
+
+  // REFUSED beside complete:true, not dropped: a reason says why an erasure is NOT attested, so the line would
+  // contradict itself. The anchor is valid, so this is the reason's refusal and not the anchor's.
+  assert.match(
+    refused(() => buildFeedLine(rec({ complete: true, destructionAnchor: 'anchor-1', reason: 'not-found' })), 'reason beside complete:true'),
+    /beside complete:true/,
+  );
+  // REFUSED outside the two agreed values, never mapped onto the nearest one; a cast is how such a value would arrive.
+  for (const bad of ['because', 'Not-Found', 'not-found ', 'not_attested', ''])
+    assert.match(
+      refused(() => buildFeedLine(rec({ reason: bad as 'not-found' })), `reason ${JSON.stringify(bad)}`),
+      /outside those two/,
+    );
+  // The refusal does not echo the value: it would be endpoint-chosen text in a rendered receipt.
+  assert.ok(!refused(() => buildFeedLine(rec({ reason: 'ECHO-CANARY' as 'not-found' })), 'canary').includes('ECHO-CANARY'));
 });
 
 test('the caller-chosen cellId is bounded, and the bound is a REFUSAL', () => {

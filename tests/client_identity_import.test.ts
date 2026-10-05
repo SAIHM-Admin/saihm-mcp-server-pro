@@ -377,9 +377,9 @@ test('a SAIHM_HOME or SAIHM_STATE_DIR with the shape of a secret stops boot: nam
       for (const v of [p, `SAIHM_IDENTITY_PASSPHRASE: ${p}`]) {
         if (name === 'SAIHM_STATE_DIR') process.env.SAIHM_STATE_DIR = v;
         else delete process.env.SAIHM_STATE_DIR;
-        // Beside SAIHM_STATE_DIR, an ordinary relative home: no boot here - nor under a regression of this
-        // refusal - reaches the runner's own ~/.saihm.
-        const home = { SAIHM_HOME: name === 'SAIHM_HOME' ? v : 'saihm-state' };
+        // Beside SAIHM_STATE_DIR, an ordinary home under the scratch folder: no boot here - nor under a regression of this
+        // refusal - reaches the runner's own ~/.saihm. A full path, as boot refuses a relative one (0.13.0).
+        const home = { SAIHM_HOME: name === 'SAIHM_HOME' ? v : join(cwd, 'saihm-state') };
         const { e, m } = message(() =>
           withEnv({ SAIHM_IDENTITY: t.token, SAIHM_IDENTITY_PASSPHRASE: t.passphrase, ...home }, () => SaihmProClient.bootFromEnv()),
         );
@@ -391,9 +391,9 @@ test('a SAIHM_HOME or SAIHM_STATE_DIR with the shape of a secret stops boot: nam
         assert.ok(!m.includes(p) && !m.includes(p.replace(/-/g, '')), m);
         assert.deepEqual(readdirSync(cwd), [], `${name}: nothing is created in the working directory`);
       }
-    // Positive control: an ordinary relative SAIHM_HOME boots.
+    // Positive control: an ordinary SAIHM_HOME boots (a full path: boot refuses a relative one since 0.13.0).
     delete process.env.SAIHM_STATE_DIR;
-    const c = withEnv({ SAIHM_IDENTITY: t.token, SAIHM_IDENTITY_PASSPHRASE: t.passphrase, SAIHM_HOME: 'saihm-state' }, () =>
+    const c = withEnv({ SAIHM_IDENTITY: t.token, SAIHM_IDENTITY_PASSPHRASE: t.passphrase, SAIHM_HOME: join(cwd, 'saihm-state') }, () =>
       SaihmProClient.bootFromEnv(),
     );
     assert.ok(c instanceof SaihmProClient);
@@ -401,8 +401,8 @@ test('a SAIHM_HOME or SAIHM_STATE_DIR with the shape of a secret stops boot: nam
     // timestamp or run id (correctness R7 F1, F3).
     for (const [h, sd] of [['saihm-agent-state-store', undefined], ['saihm-state', '20261002103045123456'], ['run-20261002103045123456', undefined]] as const) {
       if (sd === undefined) delete process.env.SAIHM_STATE_DIR;
-      else process.env.SAIHM_STATE_DIR = sd;
-      const b = withEnv({ SAIHM_IDENTITY: t.token, SAIHM_IDENTITY_PASSPHRASE: t.passphrase, SAIHM_HOME: h }, () => SaihmProClient.bootFromEnv());
+      else process.env.SAIHM_STATE_DIR = join(cwd, sd);
+      const b = withEnv({ SAIHM_IDENTITY: t.token, SAIHM_IDENTITY_PASSPHRASE: t.passphrase, SAIHM_HOME: join(cwd, h) }, () => SaihmProClient.bootFromEnv());
       assert.ok(b instanceof SaihmProClient, `${h} / ${sd ?? '-'}`);
     }
     delete process.env.SAIHM_STATE_DIR;

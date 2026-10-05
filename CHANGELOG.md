@@ -2,6 +2,279 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-10-05
+
+Follow every change to your own cells from beside the client, let a program
+beside it, such as SHM, pick up where it left off in a new session or on
+another device, and see more of what the endpoint tells you about each answer.
+No protocol tool added or removed: `saihm_recall` gains the read of one of
+your own cells by id and the version listing, `saihm_remember`, `saihm_recall`
+and `saihm_forget` gain warm-start modes, and `saihm_remember`, `saihm_recall`,
+`saihm_status` and `saihm_forget` gain structured fields.
+
+### Compatibility
+
+Read this before upgrading if a program of yours reads the erasure feed, if a
+config of yours sets a relative path, or if a program of yours relies on the
+tools' published schemas or structured results.
+
+- **`erasures.ndjson` now rotates.** With `SAIHM_EVENTS=1`, against an endpoint
+  that offers events for your own cells (below), the one process that writes the
+  change files moves `erasures.ndjson` to `erasures.ndjson.1` once it grows past a
+  few megabytes (4 MiB), replacing the previous `.1`. No new setting turns this
+  on: it starts when the endpoint offers those events. With `SAIHM_EVENTS=1`,
+  only `SAIHM_ERASURE_FEED=0` avoids it, and that also stops the erasure feed. The
+  `rotation` gap that records the move is written to `changes.ndjson` before
+  `erasures.ndjson` moves. A reader that resumes by byte offset must follow the
+  same rule for both files:
+  - never resume on inode and offset alone: compare the file's first line with
+    the one you read before, because a new file can take the old one's place;
+  - when the first line differs, or while no fresh file exists yet, the file you
+    were reading has moved to `.1`: drain that from where you were, then read
+    the fresh file from its start.
+  A reader that resumes by offset alone sees a smaller or new file, starts it at
+  zero, and misses the lines appended to the old one since its last read; the
+  record of the move is in `changes.ndjson`, which such a reader may not read, so
+  what it derived from those erased cells would survive.
+- **An erasure line can carry `reason`.** Beside `complete: false`, a line now
+  says why when the endpoint does (see *Changed*). A program that refuses a line
+  holding a field it does not know must accept this one: a refused line purges
+  nothing.
+- **`SAIHM_HOME` and `SAIHM_STATE_DIR` must be full paths.** A relative path, or
+  one that begins with a space, now stops the server at start, and a join or
+  `export-identity` refuses it, naming the variable, before anything is written.
+  A JSON config does not expand `~`, so `~/.saihm` there is a relative path.
+  Earlier versions used such a path under the working directory of the run, so
+  a key made that way is still there: set the full path and move the key into
+  it. The refusal says where to look.
+- **`complete` on an erasure means attested.** `saihm_forget` and the library's
+  `forget()` say `complete: true` only when the endpoint's answer carries its
+  record of the key's destruction, `destructionAnchor`; an answer that states
+  `complete` without that record reads `complete: false`, which means this client
+  cannot point at the destruction, not that none happened. Before, the endpoint's
+  own `complete` was passed on as sent. See *Known limitations* for an endpoint
+  that sends no such record.
+- **Every success field in the published output schemas is optional.** The schemas
+  of `saihm_remember`, `saihm_recall` and `saihm_status`, and the new one of
+  `saihm_forget`, require no field and declare `error` beside the rest, so a
+  failed call, which carries `error` alone, matches its schema: a host whose MCP
+  library checks every structured result against its schema, failed calls
+  included, gets the error and not a schema mismatch. A successful call carries
+  every field it carried before; only the schema no longer promises them, so a
+  program that relied on it for presence should check the fields it needs.
+- **A shared list that is cut keeps one end.** When more memories are shared with
+  you than the client keeps, `shared` now holds a contiguous front of the
+  endpoint's order: once one pointer is left out, no later one is kept. In the
+  edge case where a later, smaller pointer still fitted after the cut, 0.13.0
+  keeps fewer pointers. `sharedTruncated` still says the list was cut.
+- **`content` and `id` are optional in the published schemas.** A warm-start
+  call leaves out `saihm_remember`'s `content` or `saihm_forget`'s `id`. Any other
+  call that leaves them out is refused by the tool, as `content_required` or
+  `id_required`, where the input check refused it before. An empty value is still
+  a value, as it was.
+- **`features.warmStart` can carry `token`.** While this client serves the
+  endpoint's warm-start offer, it adds `"token": "required"` to it, declared in
+  the output schema; a member of that name from the endpoint is never passed on.
+  Every other member of `features` passes as sent.
+
+### Added
+
+- **See every change to your own cells, as files.** With `SAIHM_EVENTS=1` and an endpoint
+  whose `events` capability lists both `cell-written` and `cell-erased`, the client
+  asks for those events too, and a program beside it learns of every write and
+  erasure made by any process or device of your identity without polling:
+  - `changes.ndjson`: a `cell-written` line for each new version of one of your
+    cells, this process's own writes included, with its `seq` and `commitment`; a
+    `position` line after each answer; and a `gap` line (`rotation`,
+    `unwritable-event`, `fresh-start`, `kinds-changed` or `server-gap`) wherever
+    events may have been missed, so the reader reconciles with the version
+    listing. Treat every gap reason the same way.
+  - `erasures.ndjson`: a line with `source: "server-event"` for each erasure made
+    elsewhere, carrying `receivedAt`, when it arrived, beside `at`, the time of the
+    erasure. An event that claims completion without a destruction record is
+    written as `complete: false`.
+  - Order: an answer's lines first, then its `position`, then
+    `share-states.json`, then the saved position, so a restart may repeat a line
+    but never loses one, and every line is safe to apply twice. An event that
+    cannot be written as a line leaves a `gap`; when not even that can be
+    written, nothing moves until it can.
+  - One writer per directory: the process holding `feed.lock`, which it refreshes
+    every 10 seconds. A lock untouched for 30 seconds, or for 20 when its process
+    on this machine has gone, is taken over. Another process of the same identity
+    there does not poll, still records its own erasures, reports the writer's map
+    as its `shareStates`, and takes over from the writer's saved position when the
+    writer stops.
+  - Liveness: `share-states.json` is rewritten after every answer, empty ones
+    included, so its `asOf` shows the files are live and not merely quiet. Only
+    an answer to the writer's own poll moves that `asOf`: a catch-up made while
+    the endpoint holds the writer back can complete its map with `asOf` still
+    null, so read a null `asOf` as not yet live.
+  - `changes.ndjson` rotates like `erasures.ndjson`, with a `rotation` gap that
+    opens the fresh file.
+  Without `SAIHM_EVENTS=1`, with `SAIHM_ERASURE_FEED=0`, or against an endpoint
+  that does not offer both kinds, nothing here happens.
+- **Read one of your own cells by id.** `saihm_recall` with `cellId` alone reads
+  that cell, opened and checked in this process. A cell that does not exist, or
+  was erased, answers `found: false`, not an error. A shared read given in part is
+  still refused.
+- **The version listing.** `saihm_recall` with `listOnly: true` lists your cells'
+  versions (`cellId`, `seq`, `commitment`) without reading any content, one page at
+  a time: pass the answer's `next` as `after` until `next` is null. A page with
+  anything the client cannot read is refused whole, never cut. In the library:
+  `listVersions(after)`.
+- **Warm start** (see the reference's *Warm start*). A program beside the
+  client, such as SHM, keeps an encrypted snapshot of its own state and restores
+  it in a new session or on another device, then catches up from the change feed:
+  - `saihm_remember` with `warmStart: "put"`, `coversThrough` and `token` stores
+    the payload file `put-<token>.bin` as a snapshot; `saihm_recall` with
+    `warmStart: "latest"` and `token` restores the newest into
+    `latest-<token>.bin`, and with `"list"` lists them; `saihm_forget` with
+    `warmStart: "delete"`, `snapshotId` and `token` destroys one. Each runs only
+    while `saihm_status` offers warm start; otherwise it answers
+    `warm_start_unavailable`, unless its input or folder is refused first.
+  - Encrypted and opened here: a fresh key per snapshot, wrapped under your
+    key-encryption key; each part sealed on its own and bound to its place, so a
+    moved, dropped or foreign part fails the restore. A restore checks and opens
+    every part before it writes anything.
+  - Payload files of one call each: each call names its file by a random token,
+    so two processes of one identity never read each other's payload. A payload
+    file is a private regular file; links and shared folders are refused, and
+    every warm-start call removes leftovers older than five minutes.
+  - Results `snapshotId`, `createdAt`, `bytes`, `coversThrough`, `snapshot`,
+    `snapshots` and `deleted`, each declared in its tool's output schema, and the
+    error codes `warm_start_unavailable`, `warm_start_file_missing`,
+    `warm_start_file_unsafe`, `snapshot_too_large`, `invalid_input`,
+    `content_required` and `id_required` beside the endpoint's own
+    (`snapshot_superseded`, `snapshot_not_found` and more).
+  - For programs: `SaihmProClient.warmStartOffer()`, then `warmStartPut`,
+    `warmStartLatest`, `warmStartList` and `warmStartDelete` with the offer, for a
+    payload held in memory.
+  - The erasure feed's folder accepts the `warm-start/` folder beside its files,
+    so a folder SHM creates first never stops an erasure line.
+- **Commitments everywhere.** Every memory `saihm_recall` returns carries its
+  `commitment`, own cells as well as shared ones. `saihm_remember` returns
+  `commitment` and `at`, the endpoint's commit time when it states one;
+  `commitmentHash` stays, with the same value, and is deprecated.
+- **What the endpoint says about an answer, passed on.** Each is a structured
+  field, absent or null when the endpoint does not say it:
+  - `features` on `saihm_status`: what this identity may use, as the endpoint
+    states it, passed on unread. Null when it states none; null, and named in the
+    text, when it sends something this client will not pass on.
+  - `servedBy` and `asOf` on `saihm_recall`: where the answer was served (`origin`
+    or a region id) and the origin time it reflects every change up to. A
+    `servedBy` this client cannot accept reads `(malformed)`, never absent. On a
+    version listing, `asOf` is when the origin began the listing. The full recall
+    without a recall cache carries neither.
+  - `sharedKept` on `saihm_recall` (`newest` or `oldest`): which end of a cut shared
+    list was kept, when the endpoint declared the order it lists grants in. With
+    `newest`, pointers were left out only at the oldest end: the kept ones are
+    exactly the distinct pointers of a contiguous newest-first front of what the
+    endpoint sent, and every pointer left out lies after the cut. With `oldest`,
+    the same holds in grant order, and pointers were left out only at the newest
+    end. Absent when the list was not cut, when no order was declared, and when a
+    pointer the client could not carry was skipped before the cut: a hole that no
+    end describes is never named.
+  - `timing` on `saihm_remember`, `saihm_recall`, `saihm_status` and
+    `saihm_forget`: `serverMs` (the endpoint's own time), `totalMs` (measured by
+    this client, from sending the request to the last byte of the answer) and
+    `admission` (`reserved` or `shared`); present only when the endpoint's answer
+    sent timing, with `serverMs` or `admission` null when it sent only the other.
+    Timing this client cannot read is left out and named in the text.
+- **Structured errors.** Every failed call of the eight protocol tools carries
+  `error: {code, status}` beside its text: the code its `SAIHM error [code]` text
+  names and the status that text states (`0` when no answer arrived), or
+  `{code: "unknown", status: 0}` for a failure that is not the endpoint's (see
+  *Known limitations* for the calls that carry none).
+- **A structured erasure result.** `saihm_forget` returns `complete`, `reason`
+  (beside `complete: false`, when the endpoint names why: `not-found` for an id
+  that never existed or was already erased, which leaves nothing (more) to erase
+  and is not a failed erasure, `not-attested` when the destruction could not be
+  made durable yet), `sharesPurged`, `epoch`, `at` (the endpoint's
+  time of the erasure, null when it states none) and, with `complete: true`,
+  `destructionAnchor`, copied as sent: store it and compare it only for
+  equality. The text names the reason too: `not-attested` asks you to forget the
+  id again later.
+
+### Changed
+
+- **The erasure line says `complete: true` when the receipt proves it.** When the
+  endpoint's answer carries a destruction record, the line `saihm_forget` writes
+  to `erasures.ndjson` carries it as `destructionAnchor` and says
+  `complete: true`; otherwise it says `complete: false`, as every line did before.
+- **The erasure line says why it is not attested.** Beside `complete: false`,
+  the line `saihm_forget` writes now carries the endpoint's `reason`, exactly as
+  the tool returns it: `not-found` means there was nothing (more) to erase (the
+  id was never written, or is already erased), not a failed erasure, and the
+  line is still written, so a program can drop what it still derives from an id
+  erased before; `not-attested` means the erasure is not durable yet: forget the
+  id again later. A `server-event` line carries its event's reason the same way.
+  A reason stated any other way is left out, never guessed, and a line saying
+  `complete: true` carries none.
+- **A recall cache keeps up with rotation.** A session that keeps a recall cache
+  also reads `erasures.ndjson.1`, and tells a recreated feed file from the one it
+  read before by its first line, so a cell erased elsewhere is never written back
+  to its cache.
+- **`share-states.json` while your own cells are followed.** While the endpoint
+  offers events for your own cells, only the one writer above writes the file,
+  because it then vouches for the change files too. With
+  `SAIHM_ERASURE_FEED=0` the own-cell kinds are never asked for, and that process
+  writes no `share-states.json` while the endpoint offers them. The client now
+  reads the file back, only to report the writer's map.
+- **The README is simpler and quicker to follow.** Both videos, the 6-minute
+  overview and the in-depth 30-minute one, sit side by side at the top and open
+  on YouTube. A new section introduces SHM (Super-Human Memory): what it adds and
+  how it works with this client (0.13.0 or later), with the SAIHM manual linked
+  as the guide to both. The detail behind each step, every setting, the security
+  model and the developer interfaces move to `REFERENCE.md`, which ships with the
+  package. A new section links the adapters for LangGraph, CrewAI, LangChain,
+  LlamaIndex and AutoGen. Closing sections invite stars, shares, sponsorship and
+  follows on X and YouTube, and list discount codes for paid plans.
+
+### Fixed
+
+- **A blank `SAIHM_ERASURE_FEED_DIR` counts as unset**, like a blank `SAIHM_HOME`:
+  the feed falls back to `SAIHM_HOME`, then `~/.saihm`. Before, it was an error.
+- **A redirect to a scheme this client does not speak** (such as `ftp:`, `data:`
+  or `file:`) is reported as an answer it cannot use, not as a network failure
+  with advice about the network.
+- **An answer whose body stalls past the time limit reads as a timeout**, on a
+  call and while signing in, not as a failure to reach the endpoint.
+- **`export-identity` no longer asks you to set `SAIHM_MASTER_SECRET_FILE`** when
+  it is set.
+
+### Security
+
+- **An endpoint URL that does not parse is never shown with what it carries.**
+  When `SAIHM_ENDPOINT_URL` was not a valid URL, the error quoted it in full,
+  with any user name and password in it: the rule that they are never printed
+  held only for a URL that parses. Now such a URL is not shown at all when it
+  holds an `@`, and is cut before its query and fragment, which may carry a
+  token, when it does not.
+- **A relative `SAIHM_HOME` no longer puts your key in the working directory.**
+  It put the key, and with it the plaintext recall cache, wherever the server was
+  started; it is now refused (see *Compatibility*).
+
+### Known limitations
+
+- **A memory written again under the id of one you erased** does not appear in a
+  recall on a device that keeps a recall cache, while that device's erasure feed
+  still names the id: there the erasure keeps winning, so nothing erased is ever
+  written back. The same holds for an id you forgot while no memory had it
+  (`not-found`): its erasure line names the id all the same, so a memory written
+  under it later stays out of that device's recalls too. Give a new memory a new
+  id (the tools do, unless you pass one). A later release will order the two by
+  the endpoint's sequence.
+- **Against an endpoint that sends no record of a key's destruction** (one that
+  does not offer events for your own cells), every erasure reads
+  `complete: false`, with a line saying no key destruction is attested. That says
+  only that this client cannot point at the destruction, not that none happened.
+- **A call the MCP library refuses before the tool runs** (an argument of the
+  wrong type, for one) is answered by that library in text only, without
+  `error`. So are the failures of `saihm_join`.
+- **Only `SAIHM_HOME` and `SAIHM_STATE_DIR` are checked for a full path at
+  start.** A relative `SAIHM_RECALL_CACHE_PATH` or `SAIHM_SEQ_STATE_PATH` is still
+  accepted and resolves against the server's working directory: give full paths.
+
 ## [0.12.1] — 2026-10-04
 
 ### Fixed
@@ -1708,6 +1981,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.13.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.13.0
 [0.12.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.1
 [0.12.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.0
 [0.11.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.11.2
@@ -1738,4 +2012,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.13.0...HEAD
