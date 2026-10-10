@@ -443,7 +443,9 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // `export-identity` refusing a relative SAIHM_HOME, fixed text naming the variable.
   // Four more, all `ok`, one per warm-start mode: the put's receipt (`saihm_remember`), the restore and the listing
   // (`saihm_recall`), and the delete (`saihm_forget`). Each renders a snapshot id fenced in label position and numbers.
-  'server.ts': 51,
+  // One more in 0.14.0, `ok` in `saihm_recall`: a page of the share listing (`sharesOnly`), its pointers fenced as the
+  // default recall's are and its cursor fenced in label position on the NEXT line.
+  'server.ts': 52,
 };
 // Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. The bar for an
 // entry is a sentence explaining why a delimiter, a label or a newline cannot reach it - no count is
@@ -478,6 +480,13 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'labelSafe(safeScalar|shortScalar) in label position, and the withheld count is client-computed. The `+` ' +
     'appends the timing marker: fixed text and the MALFORMED constant, chosen by a boolean. Reported only because ' +
     'the predicate does not follow an array built above the join',
+  "server.ts:pageLines.join('\\n') + (timingMalformed ? '\\n timing=' + MAL":
+    'a share listing page (0.14.0). Its banner interpolates only a client-computed count and fixed text; every other ' +
+    'line is prefixed `  ! `: pointer lines fenced as the full recall\'s are (cellId labelSafe(safeField), sharer, ' +
+    'scope and expiry closed-set checkers), the withheld and skipped counts client-computed, and the cursor ' +
+    'labelSafe(safeField) in label position, shown only when the fence left it whole. The `+` appends the timing ' +
+    'marker: fixed text and the MALFORMED constant, chosen by a boolean. Reported only because the predicate does not ' +
+    'follow an array built above the join',
   "server.ts:[...lines, ...sharedLines].join('\\n') + (timingMalformed ? '":
     'the full recall (0.13.0 appended the timing marker): own-memory lines fenced as `c.plaintext` above records, ' +
     'pointer lines prefixed `  ! ` with every endpoint value labelSafe-d or a closed-set checker, and a banner of ' +
@@ -995,9 +1004,10 @@ test('failText BOUNDS both channels — the flood axis the announcement caps did
   const e = new SaihmEndpointError(500, huge, huge);
   const text = failText(e);
   // Two fenced values plus a short fixed skeleton. The old shape emitted the endpoint's string twice
-  // in full: a 16MiB response cap became a ~32MiB text block, ~609x the worst announcement response.
-  // (619x came from a fixture that maximised only one channel; src/client.ts carries the correction
-  // and this comment did not, which is how a retracted figure outlives its retraction.)
+  // in full: a 16MiB response cap became a ~32MiB text block, far past the worst announcement response.
+  // (The ratios once quoted here went stale twice: one came from a fixture that maximised only one
+  // channel, and one outlived a banner that grew. The worst announcement response is measured by the
+  // WORST CASE test in tests/server_shared_announce.test.ts, not written in a comment.)
   const ceiling = MAX_ERROR_CODE_CHARS + MAX_ERROR_MESSAGE_CHARS + 128;
   assert.ok(text.length < ceiling, `error text must stay bounded, got ${text.length}`);
   assert.ok(text.length < huge.length / 1000, 'a megabyte in must not be a megabyte out');
@@ -1291,6 +1301,23 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       WARM_START_LIST_BYTES: 1048576,
       WARM_START_REFUSAL_BYTES: 4096,
       WARM_START_ATTEMPTS: 3,
+      // 0.14.0: and how many times an abort of an upload that failed for good is sent (once more only after a busy answer
+      // or a connection refused or reset before any answer), how long it may take in all, and its pause before a second try.
+      WARM_START_ABORT_ATTEMPTS: 2,
+      WARM_START_ABORT_MS: 5000,
+      WARM_START_ABORT_PAUSE_MS: 1000,
+      // 0.14.0, the paged share listing: the most rows a page may hold (and what a pass asks for), what the recall tool
+      // asks for (128 rows of four 64-character fields fill the announcement budget exactly), the longest cursor a pass
+      // carries and the longest the tool carries, and a pass's page and time bounds. Bounds on what is accepted, not
+      // render budgets, except the tool's cursor bound, which is also the NEXT line's.
+      SHARES_PAGE_MAX: 1000,
+      SHARES_TOOL_PAGE_MAX: 128,
+      MAX_SHARES_CURSOR_CHARS: 65536,
+      MAX_TOOL_SHARES_CURSOR_CHARS: 4096,
+      SHARES_PASS_MAX_PAGES: 64,
+      SHARES_PASS_DEADLINE_MS: 600000,
+      // And how long a status's word that the paged listing is not offered is kept.
+      SHARES_PAGED_ABSENT_MS: 600000,
     },
     // The erasure feed's two declared numbers. `MAX_FEED_LINE_BYTES` bounds what ONE line may
     // carry, and it is enforced by REFUSAL rather than truncation - a truncated NDJSON line is not a
@@ -1327,6 +1354,9 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       LEASE_RETRY_MS: 10000, LEAD_INFO_MAX_AGE_MS: 60000, WRITE_RETRY_MS: 1000, WRITE_RETRY_MAX_MS: 60000,
       // And how long a status's word that the own-cell kinds are offered holds against an offer that disagrees.
       STATUS_OFFER_MS: 600000,
+      // 0.14.0: after a pass of k pages, the next reconciliation waits 2 s a page (at least the spacing above), at most
+      // ten minutes.
+      RECONCILE_SPACING_PER_PAGE_MS: 2000, RECONCILE_SPACING_MAX_MS: 600000,
     },
     // The own-cell event writer's bounds, none a render budget: the size past which a line file rotates, how often the
     // holder touches its lease, and how many of this process's own erasures it remembers, for how long, so the feed's
@@ -1376,6 +1406,8 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       LIST_RENDER_LIMIT: 16,
       // Warm start: the listed snapshots rendered as text; the structured result carries them all.
       SNAPSHOT_RENDER_LIMIT: 16,
+      // 0.14.0: a share listing page's pointer lines rendered as text; the page stays whole in structuredContent.
+      SHARES_RENDER_LIMIT: 16,
     },
   };
   // The module set is DERIVED from `src/`, not listed here, and that is this test's THIRD correction
@@ -2170,7 +2202,11 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
   // that is what lets this sweep see which fence a value class actually gets.
   const SITES: Record<string, Record<string, number>> = {
     'server.ts': {
-      'safeField:MAX_ANNOUNCEMENT_FIELD_CHARS': 1, // an announcement cellId
+      // an announcement cellId, on the default recall and on a page of the share listing (0.14.0)
+      'safeField:MAX_ANNOUNCEMENT_FIELD_CHARS': 2,
+      // 0.14.0: a share listing page's cursor on the NEXT line, compared and then rendered: shown only when the fence
+      // leaves it whole, at the longest cursor the tool carries (a longer one fails the page before it gets here).
+      'safeField:MAX_TOOL_SHARES_CURSOR_CHARS': 2,
       'safeField:MAX_JOIN_FIELD_CHARS': 3, // the device-flow verificationUri, twice
       'safeField:MAX_URL_FIELD_CHARS': 2, // the hosted checkout URL, twice
       // "Also written to", "Back up <keyPath>", and the two join-result keyPaths
@@ -2318,6 +2354,10 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       MAX_ANNOUNCEMENT_FIELD_CHARS: 'prose',
       MAX_JOIN_FIELD_CHARS: 'prose', // the endpoint's verificationUri
       MAX_URL_FIELD_CHARS: 'prose', // the endpoint's checkout URL - attacker-capable
+      // 0.14.0: a share listing page's cursor - ENDPOINT-chosen, so attacker-capable, and on the ASCII fence. It must go
+      // back exactly as `after`, so the line shows it only where the fence left it whole, and points at the structured
+      // `next` otherwise: the round trip is kept by refusing to render, never by a wider fence.
+      MAX_TOOL_SHARES_CURSOR_CHARS: 'prose',
       MAX_URL_MESSAGE_CHARS: 'roundtrip', // the operator's own SAIHM_ENDPOINT_URL, handed back
       MAX_ERROR_CODE_CHARS: 'prose',
       MAX_ERROR_MESSAGE_CHARS: 'prose',
@@ -3519,7 +3559,12 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       sharedTruncated: 'client-computed',
       shareStates: 'BOUNDED IN THE CLIENT: hex ids, digit strings, a scope enum, cell ids within the advertised bound (at most 4,096 bytes), at most 4,096 entries',
       cells: 'BOUNDED IN THE CLIENT: at most 4,096 entries, cell ids of at most 4,096 characters, digit strings or null, 64-hex commitments; a page with anything else is refused whole',
-      next: 'BOUNDED IN THE CLIENT: null, or a cell id of at most 4,096 characters',
+      next:
+        'BOUNDED IN THE CLIENT: null, or a cell id of at most 4,096 characters; on a share listing page, null or a cursor ' +
+        'of at most 4,096 characters of [A-Za-z0-9._-]',
+      // 0.14.0, a share listing page (`sharesOnly`) only.
+      sharedSkipped: 'CLIENT-COMPUTED: the rows of the page this client left out for a field over 64 characters',
+      total: 'BOUNDED IN THE CLIENT: a whole number the endpoint stated, from 0 to 2^53 - 1, or absent',
       asOf: 'BOUNDED IN THE CLIENT: a zoned ISO-8601 time re-serialised by this client, or absent',
       servedBy: 'BOUNDED IN THE CLIENT: 1 to 64 of [A-Za-z0-9._:-], the marker, or absent',
       sharedKept: 'CLIENT-COMPUTED: a closed set, from the cut and a closed-set order the answer declared, or absent',
@@ -5310,7 +5355,10 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // +5 (warm start), one per fenced value the four warm-start renders add: the snapshot id on the put's receipt, the
   // restore's and the delete's, and on each listed snapshot its id and its `created=` time. Each sits in label position
   // or in a bracket slot it cannot close (the fences scrub brackets), none inside another delimiter.
-  const EXAMINED_SPANS_PIN = 120;
+  // +4 (0.14.0), measured by listing the spans in both trees (120 before, 124 after; these four the only difference): a
+  // share listing page's pointer cellId, seen by both arms (its template sits in a `+` chain); the page's joined lines
+  // in the `ok(...)` chain (concatenation arm); and the page's `after=` cursor (template arm). None inside a delimiter.
+  const EXAMINED_SPANS_PIN = 124;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`
@@ -5583,7 +5631,8 @@ test('EVERY fenced value rendered after a LABEL is wrapped in labelSafe', () => 
   // +6 (0.13.0): the own-cell read's `[cellId] seq=` (+2) and the listing's `cell= seq= commit=` and `after=` (+4).
   // +4 (warm start): the snapshot id in the bracket slot of the put's and the restore's receipt lines (each beside
   // `bytes=`), and a listed snapshot's id and `created=` time. The delete's line carries no `label=` pair.
-  const LABELLED_SLOTS = 35;
+  // +2 (0.14.0): a share listing page's pointer `cell=` and its `after=` on the NEXT line.
+  const LABELLED_SLOTS = 37;
   let checkedSlots = 0;
   const scan = (sf: ts.SourceFile, file: string, out: string[], requireApplied = true): void => {
     const staticText = (xs: ts.Expression[]): string =>

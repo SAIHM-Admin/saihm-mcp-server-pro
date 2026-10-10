@@ -184,6 +184,22 @@ Or install the Gemini CLI extension, which carries the same entry:
 Run Gemini CLI in a folder you trust, since it starts local servers only there. Check
 with `gemini mcp list`, or `/mcp` inside Gemini CLI.
 
+### Grok Build (xAI)
+
+Add this to `~/.grok/config.toml`, or to a project's `.grok/config.toml`:
+
+```toml
+[mcp_servers.saihm]
+command = "npx"
+args = ["-y", "@saihm/mcp-server-pro"]
+env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp" }
+startup_timeout_sec = 60
+```
+
+Grok Build also picks up an existing `saihm` entry from `~/.claude.json` or a
+project's `.mcp.json`, so if you already added it for another client you may not need
+this step. Check it with `grok mcp list`, or `grok mcp doctor saihm`.
+
 ### GitHub Copilot in VS Code (Microsoft)
 
 Add this to `.vscode/mcp.json` in a workspace, or to your user `mcp.json` (run **MCP:
@@ -232,6 +248,9 @@ Cursor or Windsurf, add the `"saihm"` entry inside the existing `mcpServers` obj
 
 `timeout` is in seconds in Cline. If your client documents another unit, follow its
 documentation.
+
+If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro` once in a
+terminal so the package is downloaded, then restart Cline.
 
 ## Agent frameworks
 

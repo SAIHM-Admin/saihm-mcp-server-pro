@@ -2,6 +2,58 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] — 2026-10-10
+
+List every memory shared with you, page by page, where the endpoint offers it,
+and keep a warm-start upload that fails from standing in the way of the next.
+No protocol tool added or removed: `saihm_recall` gains one optional input,
+`sharesOnly`, for the paged share listing.
+
+### Added
+
+- **The share listing, page by page.** Where `saihm_status` offers it
+  (`features.sharesPaged`), `saihm_recall` with `sharesOnly: true` lists every
+  memory shared with you, by sharer and then by cell, without reading any
+  content, one page at a time: pass the answer's `next` as `after` until `next`
+  is null. A page carries `shared`, `next`, `sharedSkipped` (pointers left out
+  for a field longer than the client carries, counted rather than dropped) and
+  `total`, each declared in the output schema, and never `sharedTruncated`, so
+  no single page reads as the whole list. A page with anything the client cannot
+  read is refused whole, never cut. Without the offer it answers
+  `shares_paging_unsupported`. With `SAIHM_EVENTS=1`, the share map reconciles
+  page by page where it is offered, and a reconciliation that does not read every
+  page ends no share. In the library: `listSharesPage(after)` and
+  `listAllShares()`.
+- npm discovery keyword: `enterprise`.
+
+### Changed
+
+- **A warm-start upload that fails is cleared.** When a put fails for good after
+  its upload has begun, the client asks the endpoint to drop that upload, so it
+  no longer stands in the way of the next put while it waits to expire. A stored
+  snapshot is never touched: the endpoint drops only an upload still open, and a
+  commit whose answer went missing is looked up in the listing first. The error
+  you see is the put's own.
+- **A cut shared list names the paged listing.** When the default recall keeps
+  only part of the list of memories shared with you, its banner adds one fixed
+  sentence naming `saihm_recall` with `sharesOnly`.
+- **A first-start tip for Cline.** The Cline instructions in the README,
+  `REFERENCE.md` and `llms-install.md` add one step for when the tools don't
+  appear the first time: run the package once in a terminal so it is downloaded,
+  then restart Cline. The `"timeout": 60` setting stays.
+- **A setup block for Grok Build (xAI).** The README, `REFERENCE.md` and
+  `llms-install.md` give its entry for `~/.grok/config.toml`, with the start-up
+  limit it needs, and say which existing `saihm` entries it also picks up.
+
+### Security
+
+- **The lockfile now resolves the MCP library to 1.32.1.** It held 1.29.0, which
+  carried published advisories, as did six packages it brings in; those six move
+  to fixed releases too, and `npm audit --omit=dev` now reports none. The lockfile
+  governs builds from this repository, the container image among them. An install
+  from npm does not read it: npm resolves the ranges in `package.json`, which are
+  unchanged.
+
 ## [0.13.0] — 2026-10-05
 
 Follow every change to your own cells from beside the client, let a program
@@ -1981,6 +2033,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.14.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.0
 [0.13.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.13.0
 [0.12.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.1
 [0.12.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.0
@@ -2012,4 +2065,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.0...HEAD

@@ -103,6 +103,8 @@ import {
   defaultIdentityPath,
   markPathBearing,
   MAX_ANNOUNCEMENT_FIELD_CHARS,
+  MAX_TOOL_SHARES_CURSOR_CHARS,
+  SHARES_TOOL_PAGE_MAX,
   withAnswerNotes,
   featuresOf,
   relativeDirSetting,
@@ -745,7 +747,7 @@ server.registerTool(
   {
     title: 'Recall',
     description:
-      'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or leave it out to load everything. Pass cellId alone to read one of your own cells. To read a single cell another agent shared with you, pass their sharerPinnedAgentIdHashHex and sharerRecord together with the cellId; that path is read-only. Pass listOnly to list your cells\' versions without their content. With warmStart "latest", it instead restores the newest encrypted warm-start snapshot into the payload file named by token; "list" lists them.',
+      'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or leave it out to load everything. Pass cellId alone to read one of your own cells. To read a single cell another agent shared with you, pass their sharerPinnedAgentIdHashHex and sharerRecord together with the cellId; that path is read-only. Pass listOnly to list your cells\' versions without their content. Pass sharesOnly to list every pointer shared with you, a page at a time, where the endpoint offers it. With warmStart "latest", it instead restores the newest encrypted warm-start snapshot into the payload file named by token; "list" lists them.',
     inputSchema: {
       query: optionalInput(z.string()).describe(
         'Filter your OWN memories by keyword (empty = all). Ignored when reading one cell by cellId.',
@@ -769,7 +771,10 @@ server.registerTool(
       listOnly: optionalInput(z.boolean()).describe(
         'List your own cells\' versions (cellId, seq, commitment) without reading any content. Pages: pass the answer\'s next as after until next is null.',
       ),
-      after: optionalInput(z.string()).describe('With listOnly: the next value of the previous page.'),
+      sharesOnly: optionalInput(z.boolean()).describe(
+        'List every pointer shared with you, a page at a time and never cut, without reading any memory. Pages: pass the answer\'s next as after until next is null. Answers shares_paging_unsupported where the endpoint does not offer it: then recall without it.',
+      ),
+      after: optionalInput(z.string()).describe('With listOnly or sharesOnly: the next value of the previous page.'),
       warmStart: optionalInput(z.enum(['latest', 'list'])).describe(
         '"latest" restores the newest snapshot into warm-start/latest-<token>.bin (read it, then remove it); "list" lists snapshots. Only token goes with it.',
       ),
@@ -793,10 +798,16 @@ server.registerTool(
       ),
       // A version listing only (`listOnly`): the endpoint's index of your own cells, metadata only, one page; `next`
       // is the `after` for the next page, null on the last. `asOf` is when the origin began the listing, when it says.
+      // A share listing page (`sharesOnly`) carries `next` the same way, beside `shared`.
       cells: z
         .array(z.object({ cellId: z.string(), seq: z.string().nullable(), commitment: z.string() }))
         .optional(),
       next: z.string().nullable().optional(),
+      // A share listing page only (`sharesOnly`): how many pointers of this page were left out of `shared` because a
+      // field is longer than this client carries (counted, never dropped silently), and how many shares the endpoint
+      // says were live when it served the page (advisory: never a sign that a pass is complete).
+      sharedSkipped: z.number(),
+      total: z.number(),
       // On EVERY branch now, when the answer is an object that states them: where it was served, "origin"
       // or a region id, and the origin time it reflects every change up to. A `servedBy` this client cannot accept is
       // the marker, never absent (absent reads as an origin answer). The full recall without a cache is a JSON array
@@ -808,16 +819,19 @@ server.registerTool(
       // otherwise, and absent when a row this client could not carry was skipped before the cut: never guessed.
       sharedKept: z.enum(['newest', 'oldest']).optional(),
       timing: TIMING_SCHEMA.optional(),
-      // MUST be declared, and MUST be emitted by every success branch — both halves are load-bearing. DECLARED:
+      // MUST be declared, and MUST be emitted by every success branch but the two named below — both halves are
+      // load-bearing. DECLARED:
       // this SDK's output validation only throws on failure (it discards the parsed value), so an undeclared key
       // is not stripped here — but it is also not contractual, and this SDK publishes the outputSchema with
       // `additionalProperties:false`, so a consumer validating against it rejects the whole response over an
       // undeclared key. EMITTED EVERYWHERE: a reader takes "no pointers" from `[]`, never from an absent key, and
       // the schema can no longer say so (every success field is optional, see structuredResult), so the tests
       // pin it on every branch. Always present, `[]` when there are none — so gate-off emits a DECLARED constant
-      // rather than drifting. The ONE exception is a warm-start result (`warmStart`): it lists no memories and asks
-      // for no pointers, so it carries neither `shared` nor `sharedTruncated`. With both, it would read as a share
-      // listing that is complete and empty: SHM reads `shared` beside `sharedTruncated: false` as the whole list.
+      // rather than drifting. Two exceptions. A warm-start result (`warmStart`) lists no memories and asks for no
+      // pointers, so it carries neither `shared` nor `sharedTruncated`: with both, it would read as a share listing that
+      // is complete and empty, since SHM reads `shared` beside `sharedTruncated: false` as the whole list. And a page of
+      // the share listing (`sharesOnly`) carries `shared` but never `sharedTruncated`, for the same reason: one page
+      // read as the whole list would end every share on the other pages.
       shared: z.array(
         z.object({
           sharer: z.string(),
@@ -875,14 +889,14 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId, shareEntries, listOnly, after, warmStart, token }) => {
+  async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId, shareEntries, listOnly, sharesOnly, after, warmStart, token }) => {
     try {
       // Warm start travels alone and is decided first, so it never falls through to a read of any memory.
       if (warmStart !== undefined || token !== undefined) {
         if (warmStart === undefined) throw warmStartInvalid('token goes with warmStart "latest" or "list".');
         if (
           query !== undefined || sharerPinnedAgentIdHashHex !== undefined || sharerRecord !== undefined || cellId !== undefined ||
-          shareEntries !== undefined || listOnly !== undefined || after !== undefined
+          shareEntries !== undefined || listOnly !== undefined || sharesOnly !== undefined || after !== undefined
         )
           throw warmStartInvalid('warmStart takes token only: leave out every other field.');
         if (warmStart === 'latest') {
@@ -913,6 +927,86 @@ server.registerTool(
           ].join('\n'),
           { count: 0, memories: [], snapshots },
         );
+      }
+      // Share listing page: every pointer shared with you, a page at a time in key order (sharer, then cell id), never
+      // cut, no memory read. It travels alone, like the version listing, so a mixed request is refused rather than read
+      // as one of the things it could mean.
+      if (sharesOnly === true) {
+        if (
+          query !== undefined || cellId !== undefined || sharerPinnedAgentIdHashHex !== undefined || sharerRecord !== undefined ||
+          listOnly === true || shareEntries === true
+        ) {
+          throw new Error('A share listing takes sharesOnly and after only: leave out query, cellId, listOnly, shareEntries and the sharer fields.');
+        }
+        // At most 128 rows, whose fields this client then holds to 64 characters: 32,768 characters, the announcement
+        // budget exactly, so a page is never cut. A `next` over 4,096 characters fails the page rather than reach this text.
+        const { value: page, notes } = await withAnswerNotes(() =>
+          getClient().listSharesPage(after, SHARES_TOOL_PAGE_MAX, MAX_TOOL_SHARES_CURSOR_CHARS),
+        );
+        const { timing, timingMalformed } = timingOf(notes, 'saihm_recall');
+        // The reader's bound is the announcement field cap, as on the default recall: a row with a longer field is left
+        // out of `shared` and COUNTED in `sharedSkipped`, never dropped silently. The skip is by length, so while the
+        // shares stand the same ones are skipped on every pass.
+        let sharedSkipped = 0;
+        const shared: Array<{ sharer: string; cellId: string; scope: string; expiryEpoch: string | null; verified: false }> = [];
+        for (const r of page.rows) {
+          if (
+            r.sharer.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
+            r.cellId.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
+            r.scope.length > MAX_ANNOUNCEMENT_FIELD_CHARS ||
+            (r.expiryEpoch === null ? 0 : r.expiryEpoch.length) > MAX_ANNOUNCEMENT_FIELD_CHARS
+          ) {
+            sharedSkipped++;
+            continue;
+          }
+          shared.push({ sharer: r.sharer, cellId: r.cellId, scope: r.scope, expiryEpoch: r.expiryEpoch, verified: false });
+        }
+        // As on the default recall: at most 16 pointer lines, the withheld count stated, every line but the banner the
+        // endpoint's claim (`  ! `), and the cursor shown only when it is shown EXACTLY, on the fenced NEXT line.
+        const SHARES_RENDER_LIMIT = 16;
+        const rendered = shared.slice(0, SHARES_RENDER_LIMIT);
+        const withheld = shared.length - rendered.length;
+        const pageLines = [
+          `SHARED WITH YOU, ONE PAGE: ${shared.length} unverified pointer(s) — no content, nothing below is authenticated; ` +
+            (page.next === null ? 'the last page: no more follow' : 'more pages follow'),
+          ...rendered.map(
+            (a) =>
+              `  ! POINTER cell=${labelSafe(safeField(a.cellId, MAX_ANNOUNCEMENT_FIELD_CHARS))} sharer=${hexOrMarker(a.sharer)} ` +
+              `scope=${scopeOrMarker(a.scope)} expires=${epochOrMarker(a.expiryEpoch)}`,
+          ),
+          ...(withheld > 0 ? [`  ! …and ${withheld} more withheld from this list.`] : []),
+          ...(sharedSkipped > 0 ? [`  ! ${sharedSkipped} more skipped: a field longer than this client carries.`] : []),
+          ...(shared.length > 0
+            ? [
+                "  ! To read one, supply that sharer's identity record (obtained out-of-band) as",
+                '  ! sharerPinnedAgentIdHashHex + sharerRecord + cellId. Until then these are claims, not memories.',
+              ]
+            : []),
+          ...(page.next !== null
+            ? [
+                // Shown only when shown EXACTLY: the cursor goes back as `after`, and one a fence changed would skip or
+                // repeat shares. Its characters are the wire's, which no fence rewrites, within this budget.
+                labelSafe(safeField(page.next, MAX_TOOL_SHARES_CURSOR_CHARS)) === page.next
+                  ? `  ! NEXT after=${labelSafe(safeField(page.next, MAX_TOOL_SHARES_CURSOR_CHARS))}`
+                  : "  ! NEXT: this cursor cannot be shown exactly here; pass the structured result's next as after",
+              ]
+            : []),
+        ];
+        return ok(pageLines.join('\n') + (timingMalformed ? '\n  timing=' + MALFORMED : ''), {
+          count: 0,
+          memories: [],
+          // ONE PAGE, never the whole list: no `sharedTruncated` (absent, never false: a reader takes `shared` beside
+          // `sharedTruncated: false` as the whole list, and would end every share on the other pages), and no
+          // `sharedKept`, since pages come in key order.
+          shared,
+          sharedSkipped,
+          next: page.next,
+          // Undefined when the endpoint states none, so the key serializes away.
+          total: page.total,
+          asOf: page.asOf,
+          servedBy: notes.get('saihm_recall')?.servedBy,
+          timing,
+        });
       }
       // Version listing: metadata from the endpoint's index, no content. It travels alone, so a mixed request is
       // refused rather than read as one of the two things it could mean.
@@ -965,7 +1059,7 @@ server.registerTool(
         });
       }
       if (after !== undefined) {
-        throw new Error('after pages a version listing: pass it together with listOnly.');
+        throw new Error('after pages a listing: pass it together with listOnly or sharesOnly.');
       }
       // Shared-read branch: read a single cell another agent shared TO this agent. Presence of the
       // sharer pin selects this branch; the sharer record + cellId are then mandatory. The endpoint
@@ -1178,15 +1272,15 @@ server.registerTool(
       // the client's (256); this second, tighter cap is on the CHANNEL, because the text block is what
       // lands in the agent's context on the tool the session-bootstrap prompt calls first. It is a
       // budget on ADVERSARY PROSE, not a display preference: `cellId` is genuinely free-form, so it
-      // can only be sanitised, never checked. MEASURED worst case at RENDER_LIMIT 16: the free-form
+      // can only be sanitised, never checked. Worst case at RENDER_LIMIT 16: the free-form
       // `cellId` contributes 16 × 64 = 1,024 characters, but `sharer` and `expiry` are endpoint-chosen
-      // too, so the endpoint-supplied total is 16 × (64 + 64 + 20) = 2,368 and the whole text block
-      // tops out at 3,595 bytes over a 200-character worst-case pointer line. Reaching either number
-      // requires an OFF-CONTRACT scope: `(malformed)` is 11 characters where `readwrite` is 9, so a
-      // fixture using a legal scope stops at 3,563 bytes and 198 characters and leaves the ceiling
-      // untested. (Two earlier cuts of this comment were wrong in the other direction: one called the
-      // cellId figure the per-recall total, at "near 1 KB", counting one of three fields; its
-      // replacement said 3,547, which was the legal-scope fixture mistaken for the ceiling.) That
+      // too, so the endpoint-supplied total is 16 × (64 + 64 + 20) = 2,368, over a 200-character
+      // worst-case pointer line; the whole text block is measured, not written here, by the WORST CASE
+      // test in `tests/server_shared_announce.test.ts`. Reaching the line's maximum requires an
+      // OFF-CONTRACT scope: `(malformed)` is 11 characters where `readwrite` is 9, so a fixture using a
+      // legal scope stops two characters short and leaves the ceiling untested. (Earlier cuts of this
+      // comment wrote totals that went wrong: one counted one field of three, one took the legal-scope
+      // fixture for the ceiling, and one moved when the banner grew.) That
       // still lists more grants than a real agent is likely to hold; the withheld count is always
       // stated, and `structuredContent.shared` stays complete.
       const RENDER_LIMIT = 16;
@@ -1198,11 +1292,14 @@ server.registerTool(
           : [
               `SHARED WITH YOU: ${announcements.length} unverified pointer(s) — no content, nothing below is authenticated${
                 announcementsTruncated
-                  ? sharedKept === 'newest'
-                    ? ' (LIST TRUNCATED: the endpoint announced more; this list keeps the newest)'
-                    : sharedKept === 'oldest'
-                      ? ' (LIST TRUNCATED: the endpoint announced more; this list keeps the oldest)'
-                      : ' (LIST TRUNCATED: the endpoint announced more)'
+                  ? (sharedKept === 'newest'
+                      ? ' (LIST TRUNCATED: the endpoint announced more; this list keeps the newest)'
+                      : sharedKept === 'oldest'
+                        ? ' (LIST TRUNCATED: the endpoint announced more; this list keeps the oldest)'
+                        : ' (LIST TRUNCATED: the endpoint announced more)') +
+                    // One fixed hint, interpolating nothing. It names a MODE of this tool, whose text is fenced like
+                    // this block, never the unsanitised structured content (see the withheld count below).
+                    ' Where the endpoint offers it, saihm_recall with sharesOnly lists them all, a page at a time.'
                   : ''
               }`,
               ...rendered.map(

@@ -206,6 +206,16 @@ export function begunUpload(body: unknown): { readonly uploadId: string; readonl
   return { uploadId, partBytes };
 }
 
+/**
+ * The upload a begin's answer opened, by its id alone (32 lowercase hex), or null: what an abort names when the rest of
+ * the answer is one this client cannot use, so an upload it will never fill is not left open until it expires.
+ */
+export function begunUploadId(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
+  const { uploadId } = body as { uploadId?: unknown };
+  return isText(uploadId, HEX32, 32) ? uploadId : null;
+}
+
 /** A commit's answer, or null unless it names a snapshot of exactly what was sent. */
 export function committedSnapshot(body: unknown, sent: { readonly bytes: number; readonly parts: number; readonly coversThrough: string }): WarmStartSnapshot | null {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;

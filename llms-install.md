@@ -40,6 +40,10 @@ than overwriting it. Per host (from each provider's documentation;
   Gemini reads `timeout` in milliseconds, and its default is 10 minutes. Its
   `gemini mcp list` check waits only a few seconds, so on the first start, while
   `npx` downloads, it can show the server disconnected; check again.
+- **Grok Build:** `~/.grok/config.toml`, a `[mcp_servers.saihm]` table with
+  `command`, `args`, `env` and `startup_timeout_sec = 60` (the default is 30).
+  Also loads an existing `saihm` entry from `~/.claude.json` or a project's
+  `.mcp.json`, merged below `config.toml`.
 - **VS Code (GitHub Copilot):** `.vscode/mcp.json` or the user `mcp.json`; the
   top-level key is `servers`, and the entry adds `"type": "stdio"`, without `timeout`.
 - **Cline:** the entry below, with `"timeout": 60` (seconds). In the editor: Cline
@@ -47,6 +51,8 @@ than overwriting it. Per host (from each provider's documentation;
   `~/.cline/data/settings/cline_mcp_settings.json`; `cline mcp install` writes a
   nested `transport` object with no `timeout` and no `env`, so add `"timeout": 60`
   beside `transport`.
+  If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro`
+  once in a terminal so the package is downloaded, then restart Cline.
 - **Other hosts that take `mcpServers` JSON:** the entry below. Keep `timeout` only
   where the host documents it in seconds.
 

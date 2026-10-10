@@ -55,6 +55,46 @@ export interface ListingSnapshot {
   readonly entries: readonly ListingEntry[];
 }
 
+/** Why a pass over the paged share listing is not complete. */
+export type SharesPassEnd =
+  /** The endpoint does not offer the paged listing, or a page answer was not a page (paging was switched off). */
+  | 'unsupported'
+  /** The status that says whether the endpoint pages the listing could not be read: never taken for an offer. */
+  | 'unread'
+  /** The endpoint refused a cursor again after the pass had started over once. */
+  | 'bad_cursor'
+  /** A page this client cannot read. */
+  | 'malformed'
+  /** Keys did not strictly increase across the pass. */
+  | 'order'
+  /** A `next` named twice. */
+  | 'repeated'
+  /** More keys than the map holds. */
+  | 'entries'
+  /** A key the map cannot hold: a sharer that is not 64 lowercase hex, or a cell id over 4,096 bytes. */
+  | 'unheld'
+  /** More pages than a pass may take. */
+  | 'pages'
+  /** The pass ran past its time. */
+  | 'deadline'
+  /** Any other failure: no answer, or a refusal. */
+  | 'refused'
+  /** The caller stopped it. */
+  | 'stopped';
+
+/**
+ * A pass over the paged share listing: every page from the first until one names no next page, in key order (sharer,
+ * then cell id). Like a one-answer listing, it can end keys only when `complete`; an incomplete pass ends nothing.
+ */
+export interface SharesPass extends ListingSnapshot {
+  /** The pages requested, a pass started over included. */
+  readonly pages: number;
+  /** When the first page of the pass was requested, on the clock the pass was given: the time the pass is dated by. */
+  readonly startedAt: number;
+  /** Why the pass is not complete; absent when it is. */
+  readonly incomplete?: SharesPassEnd;
+}
+
 export interface ShareEventsTransport {
   /**
    * The `events` object from the info route as sent, or null when the route answered without one. The feed validates
@@ -65,6 +105,12 @@ export interface ShareEventsTransport {
   poll(path: string, body: PollBody, timeoutMs: number, signal: AbortSignal): Promise<PollAnswer>;
   /** The share listing response as sent. The feed bounds and parses it. */
   listing(signal: AbortSignal): Promise<unknown>;
+  /**
+   * The whole share listing by pages, when the endpoint offers the paged listing; null when it does not, when a page
+   * answer shows it no longer does, or when whether it does could not be read: the feed then reads `listing`, as before
+   * paging. Optional: without it, the feed always reads `listing`.
+   */
+  pass?(signal: AbortSignal, bounds: { readonly maxEntries: number; readonly now: () => number }): Promise<SharesPass | null>;
 }
 
 export type ShareStatus = 'live' | 'stale' | 'ended' | 'erased';
@@ -196,8 +242,8 @@ export interface ShareEventsFeedOptions {
 
 const DAY_MS = 86_400_000;
 const DEFAULT_RETENTION_S = 604_800;
-/** Entries the map keeps, and the size of a listing it accepts. */
-const MAX_ENTRIES = 4_096;
+/** Entries the map keeps, and the size of a listing (or a pass) it accepts. */
+export const MAX_ENTRIES = 4_096;
 /** The largest cell id this client holds, whatever an operator advertises. */
 const MAX_CELL_ID_BYTES = 4_096;
 /** Event ids remembered for deduplication, oldest dropped first. */
@@ -207,6 +253,13 @@ const RECONCILE_RETRY_MS = 60_000;
 const RECONCILE_RETRY_MAX_MS = 3_600_000;
 /** Reconciliations are coalesced: after a complete one, the next waits at least this long. */
 const RECONCILE_SPACING_MS = 10_000;
+/** After a pass of k pages, the next reconciliation waits at least k times this (and at least the spacing above)... */
+const RECONCILE_SPACING_PER_PAGE_MS = 2_000;
+/** ...and never more than this, whatever the pass's length. */
+const RECONCILE_SPACING_MAX_MS = 600_000;
+/** The least wait after a reconciliation of `pages` pages (1 for a one-answer listing): 10 s, or 2 s a page, at most 10 min. */
+const reconcileSpacing = (pages: number): number =>
+  Math.min(RECONCILE_SPACING_MAX_MS, Math.max(RECONCILE_SPACING_MS, RECONCILE_SPACING_PER_PAGE_MS * pages));
 /** An info request that got no answer is retried after this, doubling up to the maximum, with jitter. */
 /**
  * How long the client waits out a held-back poll while a catch-up is owed, before asking for the listing instead.
@@ -309,19 +362,16 @@ export function listingFrom(resp: unknown, maxEntries: number): ListingSnapshot 
     const r = raw as Record<string, unknown>;
     if (r.shared !== true || r.wire !== undefined) continue;
     // A key this client cannot hold is not refused: the listing just cannot vouch for it.
-    if (typeof r.sharer !== 'string' || !HEX64.test(r.sharer) || typeof r.cellId !== 'string' || Buffer.byteLength(r.cellId, 'utf8') > MAX_CELL_ID_BYTES) {
+    const entry = listingEntryFrom(r);
+    if (entry === null) {
       complete = false;
       continue;
     }
-    const k = keyOf(r.sharer, r.cellId);
+    const k = keyOf(entry.sharer, entry.cellId);
     if (keys.has(k)) continue;
     if (entries.length >= maxEntries) { complete = false; break; }
     keys.add(k);
-    entries.push({
-      sharer: r.sharer, cellId: r.cellId, scope: matching(r.scope, SCOPE), expiryEpoch: matching(r.expiryEpoch, DIGITS),
-      grant: matching(r.grant, HEX64), seq: matching(r.seq, DIGITS), commitment: matching(r.commitment, HEX64),
-      stale: typeof r.stale === 'boolean' ? r.stale : null,
-    });
+    entries.push(entry);
   }
   if (complete && liveKeys) {
     for (const lk of liveKeys) {
@@ -331,6 +381,22 @@ export function listingFrom(resp: unknown, maxEntries: number): ListingSnapshot 
     }
   }
   return { complete, entries };
+}
+
+/**
+ * One share row of a listing or of a page, as the map holds it; null when the map cannot hold its key (a sharer that is
+ * not 64 lowercase hex, or a cell id over 4,096 UTF-8 bytes), which the listing or pass then cannot vouch for. The one
+ * reader of a row for both, so the two cannot come to hold keys differently.
+ */
+export function listingEntryFrom(r: { readonly [K in keyof ListingEntry]?: unknown }): ListingEntry | null {
+  if (typeof r.sharer !== 'string' || !HEX64.test(r.sharer) || typeof r.cellId !== 'string' || Buffer.byteLength(r.cellId, 'utf8') > MAX_CELL_ID_BYTES) {
+    return null;
+  }
+  return {
+    sharer: r.sharer, cellId: r.cellId, scope: matching(r.scope, SCOPE), expiryEpoch: matching(r.expiryEpoch, DIGITS),
+    grant: matching(r.grant, HEX64), seq: matching(r.seq, DIGITS), commitment: matching(r.commitment, HEX64),
+    stale: typeof r.stale === 'boolean' ? r.stale : null,
+  };
 }
 
 /** Priority when the map is capped (lower keeps first): erased or copies to delete, then ended, stale, live. */
@@ -932,11 +998,22 @@ export class ShareEventsFeed {
   // ── reconciliation ──
 
   private async reconcile(signal: AbortSignal): Promise<void> {
-    let listing: ListingSnapshot | null;
-    try { listing = listingFrom(await this.transport.listing(signal), this.maxEntries); } catch { listing = null; }
+    // The whole list by pages where the endpoint offers paging. Where it does not, or a page answer shows it no longer
+    // does, the one-answer listing, exactly as before paging. Either goes through the entry logic below.
+    let pass: SharesPass | null = null;
+    if (this.transport.pass) {
+      try { pass = await this.transport.pass(signal, { maxEntries: this.maxEntries, now: this.now }); } catch { pass = null; }
+    }
+    let listing: ListingSnapshot | null = pass;
+    if (pass === null) {
+      try { listing = listingFrom(await this.transport.listing(signal), this.maxEntries); } catch { listing = null; }
+    }
     const now = this.now();
-    if (!listing) { this.retryReconcileLater(now); return; }   // stays incomplete
-    const nowIso = new Date(now).toISOString();
+    // A pass is dated when its first page was requested, not when it ends; a one-answer listing when it answered.
+    const dated = pass !== null ? pass.startedAt : now;
+    const pages = pass !== null ? pass.pages : 1;
+    if (!listing) { this.retryReconcileLater(now, pages); return; }   // stays incomplete
+    const nowIso = new Date(dated).toISOString();
     const live = new Set<string>();
     for (const l of listing.entries) {
       const k = keyOf(l.sharer, l.cellId);
@@ -978,17 +1055,19 @@ export class ShareEventsFeed {
       // holds the writer back (a 429 or 503 at a restart or takeover) must not make the files read live meanwhile.
       if (!this.leading) this.asOf = nowIso;
       this.reconcileRetryMs = RECONCILE_RETRY_MS;
-      this.nextReconcileAt = now + RECONCILE_SPACING_MS;
+      // Spaced by the pass's length: a sharer cycling revoke and re-share sends end events that each ask for one more.
+      this.nextReconcileAt = now + reconcileSpacing(pages);
     } else {
-      this.retryReconcileLater(now);
+      this.retryReconcileLater(now, pages);
     }
-    this.lastReconcile = now;
+    this.lastReconcile = dated;
     this.enforceCap();
     this.changed();
   }
 
-  private retryReconcileLater(now: number): void {
-    this.nextReconcileAt = now + this.reconcileRetryMs + Math.floor(this.random() * this.reconcileRetryMs);
+  /** An incomplete reconciliation: tried again after the backoff, and never sooner than a pass of its length is spaced. */
+  private retryReconcileLater(now: number, pages: number): void {
+    this.nextReconcileAt = now + Math.max(reconcileSpacing(pages), this.reconcileRetryMs + Math.floor(this.random() * this.reconcileRetryMs));
     this.reconcileRetryMs = Math.min(RECONCILE_RETRY_MAX_MS, this.reconcileRetryMs * 2);
   }
 

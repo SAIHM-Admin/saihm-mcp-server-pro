@@ -428,6 +428,8 @@ test('the schemas a host is shown are the plain ones: every optional field has i
       // 0.13.0: the version listing's two optional fields, the only additions to any input schema.
       'saihm_recall.listOnly': 'boolean',
       'saihm_recall.after': 'string',
+      // 0.14.0: the paged share listing's mode (it pages with `after`, above).
+      'saihm_recall.sharesOnly': 'boolean',
       // Warm start: the mode, its token, the put's position and the delete's snapshot, each with its grammar; content and
       // id, required unless warmStart, are listed here because the schema can no longer mark them required.
       'saihm_remember.content': 'string',

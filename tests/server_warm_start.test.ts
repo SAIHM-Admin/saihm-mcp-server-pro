@@ -92,6 +92,10 @@ interface Mock {
    * or replaced on its way back), or undefined to answer as the wire says.
    */
   afterCommit: (count: number) => Answer | null | undefined;
+  /** The uploads aborted (answered 204), in order. */
+  aborted: string[];
+  /** How many uploads are open: begun, neither committed nor aborted. */
+  open: () => number;
 }
 
 const sha = (b: Uint8Array): Buffer => createHash('sha256').update(b).digest();
@@ -124,6 +128,8 @@ async function startMock(): Promise<Mock> {
     list: (s) => ({ v: 1, snapshots: s.map(listed) }),
     read: (s, n) => ({ bytes: s.parts[n] as Buffer, digest: digestHeader(s.parts[n] as Buffer) }),
     afterCommit: () => undefined,
+    aborted: [],
+    open: () => uploads.size,
   };
   const send = (res: import('node:http').ServerResponse, a: Answer): void => {
     const raw = a.body === undefined ? '' : JSON.stringify(a.body);
@@ -208,6 +214,12 @@ async function startMock(): Promise<Mock> {
       }
       if (after !== undefined) return send(res, after);
       return send(res, { status: 201, body: { v: 1, snapshotId: s.snapshotId, createdAt: s.createdAt, bytes: s.bytes, parts: parts.length, coversThrough: s.coversThrough } });
+    }
+    // The abort (2026-10-09 wire): an open upload of this identity goes at once; anything else is 404, a committed one too.
+    if (req.method === 'DELETE' && (g = /^\/mcp\/warm-start\/uploads\/([0-9a-f]{32})$/.exec(path))) {
+      if (!uploads.delete(g[1] as string)) return send(res, { status: 404, body: { error: 'upload_not_found' } });
+      m.aborted.push(g[1] as string);
+      return send(res, { status: 204 });
     }
     if (req.method === 'GET' && path === '/mcp/warm-start') return send(res, { status: 200, body: m.list(m.snapshots) });
     if (req.method === 'GET' && (g = /^\/mcp\/warm-start\/([0-9a-f]{64})\/parts\/(0|[1-9][0-9]*)$/.exec(path))) {
@@ -700,7 +712,9 @@ test('an upload once begun survives a limit and a busy commit; other refusals ar
     const tries = m.requests.length;
     r = await put();
     assert.deepEqual(r.structured, { error: { code: 'rate_limited', status: 429 } });
-    assert.equal(m.requests.length - tries, 1 + 3, 'begin, then three tries of the first part');
+    assert.deepEqual(m.requests.slice(tries), ['POST /mcp/warm-start', ...Array(3).fill('PUT /mcp/warm-start/uploads/<up>/parts/0'), 'DELETE /mcp/warm-start/uploads/<up>'],
+      'begin, then three tries of the first part, then the abort of the upload that failed for good');
+    assert.equal(m.open(), 0, 'nothing left open');
     const refusals: [Answer, string, number][] = [
       [{ status: 409, body: { error: 'snapshot_superseded' } }, 'snapshot_superseded', 409],
       [{ status: 503, body: { error: 'warm_start_unavailable', reason: 'capacity', retryAfterMs: 60000 }, headers: { 'retry-after': '60' } }, 'warm_start_unavailable', 503],
@@ -712,15 +726,22 @@ test('an upload once begun survives a limit and a busy commit; other refusals ar
       const before = m.requests.length;
       r = await put();
       assert.deepEqual(r.structured, { error: { code, status } }, `${code}: ${r.text}`);
-      assert.ok(m.requests.length - before <= m.snapshots[0]!.parts.length + 2, `${code}: refused once, not retried`);
+      const sent = m.requests.slice(before);
+      const aborts = sent.filter((x) => x === 'DELETE /mcp/warm-start/uploads/<up>').length;
+      assert.ok(sent.length - aborts <= m.snapshots[0]!.parts.length + 2, `${code}: refused once, not retried`);
+      assert.equal(aborts, code === 'tier_required' ? 0 : 1, `${code}: an upload begun and refused for good is aborted once; a refused begin opened none`);
     }
     // An endpoint whose answers do not fit what was sent: a part size other than the info's, a commit of other bytes.
     m.hook = (route) => (route === 'POST /mcp/warm-start' ? { status: 201, body: { v: 1, uploadId: 'ab'.repeat(16), partBytes: 2048, expiresAt: 'x' } } : undefined);
+    const begun = m.requests.length;
     r = await put();
     assert.deepEqual(r.structured, { error: { code: 'malformed_response', status: 502 } }, r.text);
+    assert.deepEqual(m.requests.slice(begun), ['POST /mcp/warm-start', 'DELETE /mcp/warm-start/uploads/<up>'], 'an upload it cannot fill is aborted at once');
+    const unfillable = m.requests.length;
     m.hook = (route) => (route.endsWith('/commit') ? { status: 201, body: { v: 1, snapshotId: 'ab'.repeat(32), createdAt: new Date().toISOString(), bytes: 1, parts: 1, coversThrough: AT } } : undefined);
     r = await put();
     assert.deepEqual(r.structured, { error: { code: 'malformed_response', status: 502 } }, r.text);
+    assert.equal(m.requests.slice(unfillable).filter((x) => x.startsWith('DELETE')).length, 0, 'a commit answered 201 is not aborted: it is no longer open');
     assert.deepEqual(readdirSync(dir), [], 'every put file is gone');
   });
 });
@@ -754,6 +775,7 @@ test('a commit whose answer is lost on its way back is the stored snapshot all t
     let r = await put();
     assert.equal(r.isError, false, r.text);
     assert.equal(m.requests.filter((x) => x.endsWith('/commit')).length, 2, 'sent again after the dropped connection');
+    assert.equal(m.requests.filter((x) => x.startsWith('DELETE')).length, 0, 'shown stored by the listing: never aborted');
     assert.equal(m.snapshots.length, 1, 'stored once');
     assert.deepEqual(r.structured, { snapshotId: m.snapshots[0]!.snapshotId, createdAt: m.snapshots[0]!.createdAt, bytes: m.snapshots[0]!.bytes, coversThrough: AT });
     // The front could not relay the operator's answer (upstream_unavailable), which stored it all the same: not sent again.
@@ -769,10 +791,71 @@ test('a commit whose answer is lost on its way back is the stored snapshot all t
       [{ status: 503, body: { error: 'upstream_unavailable' } }, 'upstream_unavailable', 503],
     ] as const) {
       m.hook = (route) => (route.endsWith('/commit') ? answer : undefined);
+      const before = m.requests.length;
       r = await put();
       assert.deepEqual(r.structured, { error: { code, status } }, r.text);
+      // The listing first, then, the snapshot not in it, the abort: never the other way round.
+      assert.deepEqual(m.requests.slice(before).slice(-2), ['GET /mcp/warm-start', 'DELETE /mcp/warm-start/uploads/<up>'], code);
+      assert.equal(m.open(), 0, `${code}: nothing left open`);
     }
     assert.equal(m.snapshots.length, 2, 'nothing more was stored');
+    assert.deepEqual(readdirSync(dir), [], 'every put file is gone');
+  });
+});
+
+test('an upload that fails for good is aborted once, best-effort: a busy or dropped abort is tried once more, and the failure stays its own', async () => {
+  await withRig(async ({ d, m, dir }) => {
+    const put = async (): Promise<Result> => {
+      const t = token();
+      shmPut(dir, t, PAYLOAD);
+      return d.call('saihm_remember', { warmStart: 'put', coversThrough: AT, token: t });
+    };
+    const ABORT = 'DELETE /mcp/warm-start/uploads/<up>';
+    const refusePart: Answer = { status: 409, body: { error: 'snapshot_superseded' } };
+    // Answered 204: the upload is gone at once, its parts with it.
+    m.hook = (route) => (route.startsWith('PUT') ? refusePart : undefined);
+    let before = m.requests.length;
+    let r = await put();
+    assert.deepEqual(r.structured, { error: { code: 'snapshot_superseded', status: 409 } }, r.text);
+    assert.deepEqual(m.requests.slice(before), ['POST /mcp/warm-start', 'PUT /mcp/warm-start/uploads/<up>/parts/0', ABORT]);
+    assert.deepEqual([m.aborted.length, m.open()], [1, 0], 'aborted, nothing left open');
+    // Final answers: one abort each, and the part's failure is the answer.
+    for (const final of [404, 409, 410, 401, 500]) {
+      m.hook = (route, count) =>
+        route.startsWith('PUT') ? refusePart : route === ABORT && count >= 1 ? { status: final, body: { error: `e${final}` } } : undefined;
+      before = m.requests.length;
+      r = await put();
+      assert.deepEqual(r.structured, { error: { code: 'snapshot_superseded', status: 409 } }, `${final}: ${r.text}`);
+      assert.equal(m.requests.slice(before).filter((x) => x === ABORT).length, 1, `${final}: not sent again`);
+    }
+    // Busy (503) or a dropped connection: once more, then quiet.
+    for (const [label, first, second, sends] of [
+      ['busy, then aborted', { status: 503, body: { error: 'warm_start_unavailable', reason: 'busy' } }, undefined, 2],
+      ['dropped, then aborted', { status: 0 }, undefined, 2],
+      ['busy twice', { status: 503, body: { error: 'warm_start_unavailable', reason: 'busy' } }, { status: 503, body: { error: 'warm_start_unavailable', reason: 'busy' } }, 2],
+      ['dropped twice', { status: 0 }, { status: 0 }, 2],
+    ] as [string, Answer, Answer | undefined, number][]) {
+      let n = 0;
+      m.hook = (route) => (route.startsWith('PUT') ? refusePart : route === ABORT ? (++n === 1 ? first : second) : undefined);
+      before = m.requests.length;
+      const t0 = Date.now();
+      r = await put();
+      assert.deepEqual(r.structured, { error: { code: 'snapshot_superseded', status: 409 } }, `${label}: ${r.text}`);
+      assert.equal(m.requests.slice(before).filter((x) => x === ABORT).length, sends, label);
+      assert.ok(Date.now() - t0 < 20_000, `${label}: bounded`);
+    }
+    // A commit refused for good is aborted too; one the listing shows stored never is (the other test).
+    m.hook = (route) => (route.endsWith('/commit') ? { status: 409, body: { error: 'snapshot_superseded' } } : undefined);
+    before = m.requests.length;
+    // The uploads whose aborts this test answered itself above are still open at the endpoint: count from here.
+    const open = m.open();
+    r = await put();
+    assert.deepEqual(r.structured, { error: { code: 'snapshot_superseded', status: 409 } }, r.text);
+    assert.equal(m.requests.slice(before).at(-1), ABORT);
+    assert.equal(m.open(), open, 'the upload this put began is not left open');
+    m.hook = () => undefined;
+    assert.equal((await put()).isError, false, 'an upload that succeeds is never aborted');
+    assert.equal(m.requests.at(-1), 'POST /mcp/warm-start/uploads/<up>/commit');
     assert.deepEqual(readdirSync(dir), [], 'every put file is gone');
   });
 });

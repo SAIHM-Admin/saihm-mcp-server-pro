@@ -23,5 +23,9 @@ export type {
   VersionListing,
   ListedVersion,
   WarmStartOffer,
+  SharesPage,
+  SharesPageRow,
 } from './client.js';
 export type { WarmStartSnapshot } from './warm-start.js';
+// The paged share listing's whole pass (`listAllShares`): its result, why one is incomplete, and its entries.
+export type { SharesPass, SharesPassEnd, ListingEntry } from './share-events.js';

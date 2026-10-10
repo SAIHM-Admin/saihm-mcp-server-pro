@@ -173,6 +173,33 @@ const ann = (o: Record<string, unknown>): Record<string, unknown> => ({
 /** The shape of an AUTHENTICATED memory line. Nothing an endpoint controls may ever produce one. */
 const MEMORY_LINE = /^ {2}\[[^\]\n]*\] seq=/;
 
+/**
+ * A pointer line's bound, from its parts: the fixed text, a cellId at the field cap, a 64-hex sharer, the longest
+ * scope rendering (the `(malformed)` marker) and a 20-digit expiry.
+ */
+const POINTER_LINE_MAX =
+  '  ! POINTER cell='.length + MAX_ANNOUNCEMENT_FIELD_CHARS + ' sharer='.length + 64 + ' scope='.length +
+  '(malformed)'.length + ' expires='.length + 20;
+/**
+ * The text block's bound: sixteen pointer lines at POINTER_LINE_MAX, a banner, a withheld count and two footers, with
+ * headroom for wording changes. A dropped cap fails it loudly.
+ */
+const TEXT_BLOCK_BOUND = 4000;
+/**
+ * The structured channel's bound, by the same caps, for ASCII rows (they escape nothing in JSON): the kept rows' fields
+ * total at most MAX_ANNOUNCEMENT_TOTAL_CHARS and each kept row adds its JSON framing (an empty row's, and a comma), on
+ * top of what the result carries beside `shared`. With the text block's, it bounds the whole response.
+ */
+function assertChannelsBounded(text: string, structured: Record<string, unknown>, label: string): void {
+  const rowFrame = JSON.stringify({ sharer: '', cellId: '', scope: '', expiryEpoch: null, verified: false }).length + 1;
+  const bound = MAX_ANNOUNCEMENT_TOTAL_CHARS + MAX_SHARED_ANNOUNCEMENTS * rowFrame + JSON.stringify({ ...structured, shared: [] }).length;
+  const textBytes = Buffer.byteLength(text);
+  const structuredBytes = Buffer.byteLength(JSON.stringify(structured));
+  assert.ok(textBytes < TEXT_BLOCK_BOUND, `${label}: text block over its bound: ${textBytes} bytes`);
+  assert.ok(structuredBytes <= bound, `${label}: structured content over its bound: ${structuredBytes} > ${bound} bytes`);
+  assert.ok(textBytes + structuredBytes < TEXT_BLOCK_BOUND + bound, `${label}: the response over its bound`);
+}
+
 test('announcements render as clearly-marked pointers, never as memories', async () => {
   const { text, structured, isError } = await recallWith([ann({})]);
   assert.equal(isError, false);
@@ -598,18 +625,18 @@ test('WORST CASE: a maximal flood of maximal rows cannot flood the agent context
   // Bound, derived not guessed: fixed text `  ! POINTER cell=` + ` sharer=` + ` scope=` + ` expires=`
   // is 41 chars; cellId ≤ 64 (never truncated now that the client cap equals the render budget, so no
   // ellipsis); sharer = 64; scope ≤ 11 (`(malformed)` is longer than `readwrite`); expiry ≤ 20 digits.
-  // So a pointer line is ≤ 200 chars, and 16 of them ≤ 3200, plus a banner, a withheld-count line and
-  // two footers (< 400). 4000 leaves headroom for wording changes while still failing loudly if a cap
-  // is dropped — with RENDER_LIMIT alone removed this text is 44,351 chars, measured on this fixture
-  // against this tree. (An earlier cut said "~51k chars"; 51,003 is the STRUCTUREDCONTENT figure from
-  // client.ts, transplanted onto the text block. No input reaches 51k on this channel: the byte budget
+  // So a pointer line is at most POINTER_LINE_MAX (200) chars, and 16 of them 3200, plus a banner (on a
+  // cut list, with its fixed hint), a withheld-count line and two footers: fixed text and client-computed
+  // counts. TEXT_BLOCK_BOUND leaves headroom for wording changes while still failing loudly if a cap is
+  // dropped: with RENDER_LIMIT alone removed this text runs far past it. (An earlier cut quoted the
+  // STRUCTUREDCONTENT figure for the text block. No input reaches that on this channel: the byte budget
   // admits 219 of these rows, and 219 × 200 is the ceiling.)
   //
   // The scope is OFF-CONTRACT deliberately, and that is what makes this fixture maximal. A legal
   // `readwrite` renders 9 characters; the `(malformed)` marker renders 11. The earlier version of this
-  // test used `readwrite` and so topped out at 198-character lines and a 3,563-byte block, leaving the
-  // `<= 200` assertion two characters of slack it never touched and the real ceiling (200 / 3,595)
-  // unexercised. A worst-case test that is not the worst case is the most expensive kind of green.
+  // test used `readwrite` and so topped out two characters under the line bound, leaving the `<= 200`
+  // assertion slack it never touched and the real ceiling unexercised. A worst-case test that is not the
+  // worst case is the most expensive kind of green.
   //
   // The cellId length is derived from the cap rather than written as 64: hard-coding it meant the
   // cap could be widened without this test noticing, which a mutation pass confirmed by taking it to
@@ -625,18 +652,18 @@ test('WORST CASE: a maximal flood of maximal rows cannot flood the agent context
   const { text, structured } = await recallWith(rows);
   const pointers = text.split('\n').filter((l) => l.startsWith('  ! POINTER'));
   assert.equal(pointers.length, 16, 'the channel cap holds under the worst case');
-  for (const l of pointers) assert.ok(l.length <= 200, `pointer line over budget (${l.length}): ${l}`);
+  for (const l of pointers) assert.ok(l.length <= POINTER_LINE_MAX, `pointer line over budget (${l.length}): ${l}`);
   // The bound is REACHED, not merely respected. Without this, `<= 200` passes on a fixture that tops
-  // out at 198 and the last two characters of the derivation above go untested — which is how the
-  // ceiling came to be recorded as 3,547 bytes when it is 3,595.
+  // out at 198 and the last two characters of the derivation above go untested — which is how a
+  // legal-scope figure came to be recorded as the ceiling.
   assert.equal(
     Math.max(...pointers.map((l) => l.length)),
-    200,
+    POINTER_LINE_MAX,
     'the worst case must actually reach the derived maximum, not sit two characters under it',
   );
   for (const l of pointers)
     assert.ok(!l.includes('…'), `a cellId at the cap must render whole, untruncated: ${l}`);
-  assert.ok(text.length < 4000, `worst-case text block must stay bounded: ${text.length} chars`);
+  assertChannelsBounded(text, structured, 'a 20-digit epoch on every row');
   // Both caps announce themselves — a silently cut listing reads as a complete one.
   assert.ok(
     structured.shared.length < MAX_SHARED_ANNOUNCEMENTS,
@@ -644,6 +671,12 @@ test('WORST CASE: a maximal flood of maximal rows cannot flood the agent context
   );
   assert.equal(structured.sharedTruncated, true);
   assert.match(text, /LIST TRUNCATED: the endpoint announced more/);
+  // The structured channel's own maximum needs `null` epochs: `null` spends none of the field budget, so more rows are
+  // kept. The same caps bound it, and the whole response.
+  const nulls = await recallWith(rows.map((r) => ({ ...r, expiryEpoch: null })));
+  assert.equal(nulls.structured.sharedTruncated, true);
+  assert.ok(nulls.structured.shared.length > structured.shared.length, 'null epochs keep more rows');
+  assertChannelsBounded(nulls.text, nulls.structured, 'null epochs');
 });
 
 test('the truncation flag reaches both channels when the endpoint floods', async () => {

@@ -112,11 +112,22 @@ import {
   ctEqual,
   SeqHighWaterMark,
 } from '@saihm/client-pro';
-import { ShareEventsFeed, type FeedStore, type ShareEventsTransport, type ShareStates } from './share-events.js';
+import {
+  MAX_ENTRIES as SHARE_MAP_MAX_ENTRIES,
+  ShareEventsFeed,
+  listingEntryFrom,
+  type FeedStore,
+  type ListingEntry,
+  type ShareEventsTransport,
+  type ShareStates,
+  type SharesPass,
+  type SharesPassEnd,
+} from './share-events.js';
 import {
   COVERS_THROUGH_PATTERN,
   SNAPSHOT_ID_PATTERN,
   begunUpload,
+  begunUploadId,
   committedSnapshot,
   contentDigestOf,
   contentDigestSha256,
@@ -181,24 +192,24 @@ const MAX_SEQ = (1n << 64n) - 1n; // wire uint64 ceiling (mirrors client-pro wir
  * spends the whole 16MiB budget, and while the SERVER's render cap bounds the text block, nothing
  * bounded `structuredContent`. Measured against this client before the field/total caps below existed:
  * a 16,753,811-byte response produced a 6,827-byte text block and a 16,754,638-byte structuredContent
- * — 2,455x — in a single successful recall. Both axes of THIS channel are now capped: measured after,
- * a 16,777,216-byte body yields at most a 3,595-byte text block and a 51,515-byte structuredContent.
+ * — 2,455x — in a single successful recall. Both axes of THIS channel are now capped, and their worst
+ * case is not written here: the WORST CASE test in `tests/server_shared_announce.test.ts` floods a
+ * recall with maximal rows and holds the text block, the structured content and the two together to
+ * bounds it derives from the caps below.
  *
- * Those two figures are worth stating as MEASURED and re-measured, because the pair that stood here
- * before ("3,547" and "51,003") were both wrong, and wrong in ways that matter more than the digits.
- * 3,547 was a stale ceiling: the worst case needs an OFF-CONTRACT scope, which renders the 11-char
- * `(malformed)` marker rather than the 9-char `readwrite` the previous fixture used. 51,003 was a
- * `String.length`, not a byte count — the exact CHARS-for-BYTES confusion the paragraph below warns
- * about, eleven lines above the warning. Both were written from arithmetic rather than from a run.
+ * Figures written here went wrong, in ways that matter more than the digits: a ceiling taken from a
+ * fixture with a legal scope, where the worst case needs an OFF-CONTRACT one (it renders the 11-char
+ * `(malformed)` marker rather than the 9-char `readwrite`); a `String.length` taken for a byte count,
+ * the exact CHARS-for-BYTES confusion the paragraph below warns about; and a ceiling that moved when
+ * a banner grew. Hence the test.
  *
- * Two limits on the claim, both measured, neither hypothetical:
+ * Two limits on the claim, neither hypothetical:
  *  - It is a claim about the ANNOUNCEMENT channel only. The endpoint's `error` string reaches the same
  *    tool's output through {@link SaihmEndpointError}; until it was truncated at the mint (see
- *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes — ~609x the 55,078-byte worst case
- *    here. That denominator is a JOINT maximum, not a sum of the per-channel ones (3,595 + 51,515 =
- *    55,110): the two channels are maximised by different epoch representations, so both cannot be
- *    at their own maximum in one response. Earlier cuts divided by 54,216 (619x) and by 55,112 (a
- *    fixture that cannot exist). See the matching note in `render_fence.ts`.
+ *    {@link MAX_ERROR_CODE_CHARS}) it carried 33,554,563 bytes, far past this channel's worst case.
+ *    That worst case is a JOINT maximum, not the sum of the per-channel ones: the two channels are
+ *    maximised by different epoch representations, so both cannot be at their own maximum in one
+ *    response. See the matching note in `render_fence.ts`.
  *  - The budgets below count UTF-16 code units (`String.length`), NOT bytes. For the ASCII an endpoint
  *    has any reason to send the two coincide; for what a hostile one can send they do not. Measured
  *    against the 32,768-unit budget: control characters, which JSON-escape to six bytes per unit,
@@ -1757,6 +1768,231 @@ export function versionListingFrom(r: unknown): VersionListing {
   // Optional, and only a helper: a value that is not a time is left out rather than passed on.
   const at = isoTime(asOf);
   return { cells: out, next, ...(at !== null ? { asOf: at } : {}) };
+}
+
+// ── the paged share listing ─────────────────────────────────────────────────────────────────────────────────────────
+
+/** The most rows a share-listing page may hold, and what a pass asks for: the endpoint's own ceiling. */
+export const SHARES_PAGE_MAX = 1_000;
+/**
+ * What the recall tool asks for: this many rows of four fields at the field cap ({@link MAX_ANNOUNCEMENT_FIELD_CHARS})
+ * fit the announcement budget ({@link MAX_ANNOUNCEMENT_TOTAL_CHARS}) whole, so a tool page is never cut. A test pins the
+ * product.
+ */
+export const SHARES_TOOL_PAGE_MAX = 128;
+/** The longest cursor a pass carries: the wire's bound. */
+export const MAX_SHARES_CURSOR_CHARS = 65_536;
+/** The longest cursor the recall tool carries, as for the version listing: a longer one fails the page instead. */
+export const MAX_TOOL_SHARES_CURSOR_CHARS = 4_096;
+/** A pass's bounds: no more pages than this... */
+export const SHARES_PASS_MAX_PAGES = 64;
+/** ...and no page asked for once this has passed, whatever the endpoint sends. (Entries: the share map's own bound.) */
+export const SHARES_PASS_DEADLINE_MS = 600_000;
+/**
+ * How long a status's word that the paged listing is NOT offered is kept: meanwhile no page is asked for and the status
+ * is not read again for one; once it has passed, the next page or pass reads the status again, so a listing switched
+ * on later is found. A status that could not be read says nothing: it is neither an offer nor an absence.
+ */
+export const SHARES_PAGED_ABSENT_MS = 600_000;
+/** A cursor's characters, by the wire: opaque, printable, and nothing a fence must rewrite. */
+const SHARES_CURSOR = /^[A-Za-z0-9._-]+$/;
+/** `value` held to [least, most]; one that is not a number (NaN) is `most`, so no bound is lost to it. */
+const withinBound = (value: number, least: number, most: number): number => {
+  const n = Number(value);
+  return Number.isNaN(n) ? most : Math.max(least, Math.min(n, most));
+};
+
+/** One share row of a page: the grant's key and terms and, where the endpoint follows shares, its grant, version and staleness. */
+export interface SharesPageRow {
+  /** THE ENDPOINT'S claims, unauthenticated, as for {@link SharedAnnouncement}. */
+  readonly sharer: string;
+  readonly cellId: string;
+  readonly scope: string;
+  /**
+   * The expiry as claimed, or null for no expiry: a conforming endpoint sends a decimal epoch, a hostile one need not, so
+   * guard any parse as {@link SharedAnnouncement} says.
+   */
+  readonly expiryEpoch: string | null;
+  readonly grant: string | null;
+  readonly seq: string | null;
+  readonly commitment: string | null;
+  readonly stale: boolean | null;
+}
+
+/** One page of the share listing (`saihm_recall` with `sharesOnly` and `paged`), in key order: sharer, then cell id. */
+export interface SharesPage {
+  readonly rows: readonly SharesPageRow[];
+  /** The `after` for the next page, or null on the last one. Opaque: pass it back exactly. */
+  readonly next: string | null;
+  /** When the origin began the page, when it says (ISO-8601 UTC with milliseconds). */
+  readonly asOf?: string;
+  /** How many shares were live when the page was served, when the endpoint says: advisory, never a sign of completeness. */
+  readonly total?: number;
+}
+
+/** The endpoint does not page the share listing: the reader falls back to the default recall's capped view. */
+const sharesPagingUnsupported = (why: string): SaihmEndpointError =>
+  new SaihmEndpointError(501, 'shares_paging_unsupported', `the endpoint does not offer the paged share listing: ${why}`);
+
+/** Whether key `a` comes strictly before key `b`: sharer first, then cell id, both in UTF-16 code units, as the wire orders them. */
+const shareKeyBefore = (a: { sharer: string; cellId: string }, b: { sharer: string; cellId: string }): boolean =>
+  a.sharer < b.sharer || (a.sharer === b.sharer && a.cellId < b.cellId);
+
+/**
+ * A page of the share listing, checked whole. Only an object of mode "shares" that names `next` (null, or a cursor of the
+ * wire's characters within `maxNextChars`) is a page; anything else (a list, the one-answer share listing, a full
+ * recall) is `shares_paging_unsupported`, and nothing of it is kept. A page holds at most `max` rows, each a share row
+ * by the announcement rules (no envelope; a sharer, cell id and scope that are strings; an expiry that is a string or
+ * none), in strictly increasing key order, and at least one row when it names a next page. Anything else refuses the
+ * PAGE as `malformed_response`: a page read in part would let a pass vouch for keys it never saw.
+ */
+export function sharesPageFrom(r: unknown, max: number, maxNextChars: number = MAX_SHARES_CURSOR_CHARS): SharesPage {
+  if (typeof r !== 'object' || r === null || Array.isArray(r) || (r as { mode?: unknown }).mode !== 'shares' || !Object.hasOwn(r, 'next')) {
+    throw sharesPagingUnsupported('it answered with something other than a page');
+  }
+  const malformed = (what: string): never => {
+    throw new SaihmEndpointError(502, 'malformed_response', `endpoint returned a malformed share listing page (${what})`);
+  };
+  const o = r as { added?: unknown; next?: unknown; asOf?: unknown; total?: unknown };
+  const added = o.added;
+  const next = o.next;
+  if (!(next === null || (typeof next === 'string' && next.length <= maxNextChars && SHARES_CURSOR.test(next)))) return malformed('next');
+  if (!Array.isArray(added)) return malformed('no rows');
+  if (added.length > max) return malformed('page too long');
+  // `next` names the last key returned, so a page that returned none can name no next page.
+  if (added.length === 0 && next !== null) return malformed('a next page after no row');
+  const rows: SharesPageRow[] = [];
+  let prev: SharesPageRow | undefined;
+  for (const raw of added as unknown[]) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return malformed('row');
+    const x = raw as Record<string, unknown>;
+    const sharer = x.sharer;
+    const cellId = x.cellId;
+    const scope = x.scope;
+    const expiryEpoch = x.expiryEpoch ?? null;
+    if (
+      x.shared !== true ||
+      x.wire !== undefined ||
+      typeof sharer !== 'string' ||
+      typeof cellId !== 'string' ||
+      typeof scope !== 'string' ||
+      !(expiryEpoch === null || typeof expiryEpoch === 'string')
+    ) {
+      return malformed('row');
+    }
+    const row: SharesPageRow = {
+      sharer,
+      cellId,
+      scope,
+      expiryEpoch,
+      grant: typeof x.grant === 'string' && LIST_HEX64.test(x.grant) ? x.grant : null,
+      seq: typeof x.seq === 'string' && LIST_DIGITS.test(x.seq) ? x.seq : null,
+      commitment: typeof x.commitment === 'string' && LIST_HEX64.test(x.commitment) ? x.commitment : null,
+      stale: typeof x.stale === 'boolean' ? x.stale : null,
+    };
+    if (prev !== undefined && !shareKeyBefore(prev, row)) return malformed('rows out of key order');
+    rows.push(row);
+    prev = row;
+  }
+  // Optional, and helpers only: a value that is not what it should be is left out rather than passed on.
+  const at = isoTime(o.asOf);
+  const total = typeof o.total === 'number' && Number.isSafeInteger(o.total) && o.total >= 0 ? o.total : undefined;
+  return { rows, next, ...(at !== null ? { asOf: at } : {}), ...(total !== undefined ? { total } : {}) };
+}
+
+/**
+ * The page size the endpoint offers for the paged share listing, from a status answer's features
+ * (`sharesPaged: {v: [1], max}`), or null when it offers none this client can use: then no page is ever requested. A
+ * `max` left out is the wire's default and ceiling; one that is not a whole number of at least 1 makes the offer unusable.
+ */
+export function sharesPagedOffer(features: Readonly<Record<string, unknown>> | null): number | null {
+  const f = features?.sharesPaged;
+  if (typeof f !== 'object' || f === null || Array.isArray(f)) return null;
+  const { v, max } = f as { v?: unknown; max?: unknown };
+  if (!Array.isArray(v) || !v.includes(1)) return null;
+  if (max === undefined) return SHARES_PAGE_MAX;
+  return typeof max === 'number' && Number.isSafeInteger(max) && max >= 1 ? Math.min(max, SHARES_PAGE_MAX) : null;
+}
+
+/** The bounds of one pass, and the clock it is dated and timed by. */
+export interface SharesPassOptions {
+  /** The most keys the pass may hold: at most the share map's own bound. */
+  readonly maxEntries: number;
+  readonly maxPages: number;
+  readonly deadlineMs: number;
+  readonly now: () => number;
+  /** Stops the pass between pages; it then ends incomplete (`stopped`). */
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * A pass over the paged share listing: pages from the first (no `after`) until one names no next page. It is COMPLETE
+ * only when every page was read, keys strictly increased across the whole pass (no key twice), no `next` repeated, the
+ * last page named none, every row was a key the share map can hold, and the pass kept within its entries, pages and
+ * time. A cursor the endpoint refuses (`bad_cursor`) starts the pass over once; a second refusal ends it. Any other
+ * failure ends it incomplete, and an answer that is not a page (paging switched off) ends it `unsupported`. The page,
+ * time and entry bounds hold for the whole call, a pass started over included.
+ *
+ * An incomplete pass vouches for nothing missing from it: it ends no share. Its rows are each a live claim when their
+ * page was served, as a listing's are.
+ */
+export async function sharesPass(page: (after: string | undefined) => Promise<SharesPage>, opts: SharesPassOptions): Promise<SharesPass> {
+  const maxEntries = withinBound(opts.maxEntries, 0, SHARE_MAP_MAX_ENTRIES);
+  const maxPages = withinBound(opts.maxPages, 1, SHARES_PASS_MAX_PAGES);
+  const deadline = opts.now() + withinBound(opts.deadlineMs, 0, SHARES_PASS_DEADLINE_MS);
+  let pages = 0;
+  let restarted = false;
+  pass: for (;;) {
+    const startedAt = opts.now();
+    const entries: ListingEntry[] = [];
+    const nexts = new Set<string>();
+    let last: { sharer: string; cellId: string } | undefined;
+    let unheld = false;
+    let after: string | undefined;
+    const end = (incomplete: SharesPassEnd): SharesPass => ({ complete: false, entries, pages, startedAt, incomplete });
+    for (;;) {
+      if (opts.signal?.aborted) return end('stopped');
+      if (pages >= maxPages) return end('pages');
+      if (opts.now() > deadline) return end('deadline');
+      pages++;
+      let p: SharesPage;
+      try {
+        p = await page(after);
+      } catch (e) {
+        const refusal = e instanceof SaihmEndpointError ? e : undefined;
+        if (refusal?.code === 'bad_cursor' && refusal.status === 400 && !restarted) {
+          restarted = true;
+          continue pass;
+        }
+        return end(
+          refusal?.code === 'shares_paging_unsupported'
+            ? 'unsupported'
+            : refusal?.code === 'bad_cursor'
+              ? 'bad_cursor'
+              : refusal?.code === 'malformed_response'
+                ? 'malformed'
+                : 'refused',
+        );
+      }
+      if (opts.now() > deadline) return end('deadline');
+      for (const row of p.rows) {
+        if (last !== undefined && !shareKeyBefore(last, row)) return end('order');
+        last = row;
+        const entry = listingEntryFrom(row);
+        // A key the map cannot hold is not refused: the pass just cannot vouch for it, and reads on.
+        if (entry === null) {
+          unheld = true;
+          continue;
+        }
+        if (entries.length >= maxEntries) return end('entries');
+        entries.push(entry);
+      }
+      if (p.next === null) return unheld ? end('unheld') : { complete: true, entries, pages, startedAt };
+      if (nexts.has(p.next)) return end('repeated');
+      nexts.add(p.next);
+      after = p.next;
+    }
+  }
 }
 
 export interface StatusSnapshot {
@@ -3668,6 +3904,18 @@ const WARM_START_REFUSAL_BYTES = 4096;
 /** How many times a part or a commit is sent before its refusal is the call's answer. */
 const WARM_START_ATTEMPTS = 3;
 /**
+ * How many times an abort is sent: once, and once more only after a busy answer (503) or a connection refused or reset
+ * before any answer. Never again after no answer in time.
+ */
+const WARM_START_ABORT_ATTEMPTS = 2;
+/**
+ * How long an abort may take in all, its second try included: the put's own failure is thrown no later than this after
+ * it fails, whatever the endpoint does.
+ */
+export const WARM_START_ABORT_MS = 5_000;
+/** The pause before an abort's second try, and never past the bound above. */
+const WARM_START_ABORT_PAUSE_MS = 1_000;
+/**
  * A commit's failures that do not say its snapshot was NOT stored: the upload gone (a commit sent again after an answer
  * that never came back finds it committed), the front unable to reach or relay the operator, or no answer at all.
  */
@@ -3707,6 +3955,13 @@ export class SaihmProClient {
   /** The writer of this identity's own-cell event files, when the feed runs and the erasure feed is on. */
   private ownChanges: ChangeFeedWriter | undefined;
   private lastFeedRenewAt = -Infinity;
+  /**
+   * The page size of the paged share listing, as the status last offered it; undefined until a status offers it, and
+   * again after any answer to a page request that was not a page.
+   */
+  private sharesPagedMax: number | undefined;
+  /** Until when the status's word that the paged listing is not offered is kept ({@link SHARES_PAGED_ABSENT_MS}). */
+  private sharesPagedAbsentUntil = -Infinity;
   private readonly recallCache: RecallCache;
   /** The uncached-recall notice is written at most once per process. */
   private saidRecallIsUncached = false;
@@ -5379,6 +5634,87 @@ export class SaihmProClient {
     return versionListingFrom(r);
   }
 
+  /**
+   * One page of the share listing, in key order (sharer, then cell id): pass `after` (the previous page's `next`) until
+   * `next` is null. Requested only while the identity's status offers the paged listing (`features.sharesPaged`), at
+   * most `max` rows and never more than it offers. `shares_paging_unsupported` when it is not offered, or when the answer
+   * is not a page (the listing was switched off between the status and the request): fall back to the default recall's
+   * listing. A page longer than `max`, a `next` over `maxNextChars` or outside the wire's characters, or a row this
+   * client cannot read is `malformed_response`, the whole page refused. UNAUTHENTICATED POINTERS, as announcements are.
+   */
+  async listSharesPage(after?: string, max: number = SHARES_PAGE_MAX, maxNextChars: number = MAX_SHARES_CURSOR_CHARS): Promise<SharesPage> {
+    const offered = await this.sharesPagedOfferRead();
+    if (offered === null) throw sharesPagingUnsupported('the status offers no paged share listing');
+    const ask = withinBound(Math.floor(max), 1, offered);
+    try {
+      // Alone, as the endpoint requires: a page request carries nothing but `sharesOnly`, `paged`, `after` and `max`.
+      const r = await this.call<unknown>(
+        'saihm_recall',
+        after === undefined ? { sharesOnly: true, paged: true, max: ask } : { sharesOnly: true, paged: true, after, max: ask },
+      );
+      return sharesPageFrom(r, ask, maxNextChars);
+    } catch (e) {
+      // Any answer that is not a page, a refusal included: the offer is read again before the next page is asked for.
+      // An answer that is not a page is dropped unread.
+      this.sharesPagedMax = undefined;
+      throw e;
+    }
+  }
+
+  /**
+   * Every share made to this identity, read page by page (see {@link sharesPass}): the whole list, where a recall shows
+   * a capped view. `complete` only when the pass vouches for every live share; an incomplete pass ends no share, and
+   * `incomplete` says why: `unsupported` when the endpoint does not page the listing, and `unread` when the status that
+   * says whether it does could not be read (read `recallWithShared` instead in both cases).
+   * Bounded by the share map's 4,096 entries and 64 pages, and asks for no page once 10 minutes have passed, or less when
+   * asked. Never throws.
+   */
+  async listAllShares(
+    opts: { maxEntries?: number; maxPages?: number; deadlineMs?: number; now?: () => number; signal?: AbortSignal } = {},
+  ): Promise<SharesPass> {
+    // The offer is read before every page (from what is kept, at no cost while kept), so a status that cannot be read is
+    // told apart from a page that failed: it ends the pass `unread`, and is never taken for an offer.
+    let unread = false;
+    const p = await sharesPass(
+      async (after) => {
+        try {
+          await this.sharesPagedOfferRead();
+        } catch (e) {
+          unread = true;
+          throw e;
+        }
+        return this.listSharesPage(after);
+      },
+      {
+        maxEntries: opts.maxEntries ?? SHARE_MAP_MAX_ENTRIES,
+        maxPages: opts.maxPages ?? SHARES_PASS_MAX_PAGES,
+        deadlineMs: opts.deadlineMs ?? SHARES_PASS_DEADLINE_MS,
+        now: opts.now ?? Date.now,
+        ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      },
+    );
+    return unread && !p.complete ? { ...p, incomplete: 'unread' } : p;
+  }
+
+  /**
+   * The page size the paged share listing is offered at, or null when the status says it is not offered. An offer is
+   * kept until an answer to a page request is not a page, and a status's word that there is none for
+   * {@link SHARES_PAGED_ABSENT_MS}; otherwise the status is read. A status that cannot be read throws its own failure,
+   * which is neither an offer nor an absence and is not kept.
+   */
+  private async sharesPagedOfferRead(): Promise<number | null> {
+    if (this.sharesPagedMax !== undefined) return this.sharesPagedMax;
+    if (Date.now() < this.sharesPagedAbsentUntil) return null;
+    const s = await this.status();
+    const read = sharesPagedOffer(featuresOf((s as { features?: unknown } | null | undefined)?.features).features);
+    if (read === null) {
+      this.sharesPagedAbsentUntil = Date.now() + SHARES_PAGED_ABSENT_MS;
+      return null;
+    }
+    this.sharesPagedAbsentUntil = -Infinity;
+    return (this.sharesPagedMax = read);
+  }
+
   /** Recall + open a single cell. Returns `null` if it does not exist. */
   async recallOne(cellId: string): Promise<RecalledCell | null> {
     const r = await this.recallRawOne(cellId);
@@ -5952,7 +6288,9 @@ export class SaihmProClient {
   /**
    * Seal `payload` here and store it as a snapshot covering `coversThrough`: begin, every part, then commit. A part or
    * the commit is sent again after a limit or a busy endpoint, so an upload once begun is not lost to a moment's load.
-   * A commit whose answer never arrives may have been stored: the listing says whether it was.
+   * A commit whose answer never arrives may have been stored: the listing says whether it was. An upload that fails for
+   * good is aborted, best-effort and within {@link WARM_START_ABORT_MS}, so it does not hold the identity's room until it
+   * expires; the failure thrown is always the upload's own.
    */
   async warmStartPut(offer: WarmStartOffer, payload: Uint8Array, coversThrough: string): Promise<WarmStartSnapshot> {
     if (!COVERS_THROUGH_PATTERN.test(coversThrough))
@@ -5978,32 +6316,46 @@ export class SaihmProClient {
       cap: WARM_START_ANSWER_BYTES,
     });
     if (begin.status !== 201) throw this.warmStartRefusal('begin', begin).error;
-    const upload = begunUpload(parsedAnswer(begin.bytes));
-    if (upload === null || upload.partBytes !== offer.partBytes)
+    const begun = parsedAnswer(begin.bytes);
+    const upload = begunUpload(begun);
+    if (upload === null || upload.partBytes !== offer.partBytes) {
+      // An upload this client cannot fill is abandoned at once, when its answer names one.
+      const abandoned = begunUploadId(begun);
+      if (abandoned !== null) await this.warmStartAbort(offer, abandoned);
       throw new SaihmEndpointError(502, 'malformed_response', 'SAIHM warm start began an upload this client cannot fill');
-    const at = `${offer.url}/uploads/${upload.uploadId}`;
-    for (let n = 0; n < sealed.parts.length; n++) {
-      const part = sealed.parts[n] as Uint8Array;
-      await this.warmStartPersisting('part', 'PUT', `${at}/parts/${n}`, 204, {
-        body: part,
-        headers: { 'content-type': 'application/octet-stream', 'content-digest': contentDigestOf(part) },
-        cap: WARM_START_ANSWER_BYTES,
-      });
     }
-    // Only once every part has answered: a part still in flight would race the commit.
+    const at = `${offer.url}/uploads/${upload.uploadId}`;
     let commit: WarmStartAnswer;
     try {
-      commit = await this.warmStartPersisting('commit', 'POST', `${at}/commit`, 201, { body: '', cap: WARM_START_ANSWER_BYTES });
+      for (let n = 0; n < sealed.parts.length; n++) {
+        const part = sealed.parts[n] as Uint8Array;
+        await this.warmStartPersisting('part', 'PUT', `${at}/parts/${n}`, 204, {
+          body: part,
+          headers: { 'content-type': 'application/octet-stream', 'content-digest': contentDigestOf(part) },
+          cap: WARM_START_ANSWER_BYTES,
+        });
+      }
+      // Only once every part has answered: a part still in flight would race the commit.
+      try {
+        commit = await this.warmStartPersisting('commit', 'POST', `${at}/commit`, 201, { body: '', cap: WARM_START_ANSWER_BYTES });
+      } catch (e) {
+        // A failure that does not say the snapshot was not stored: the listing decides, BEFORE any abort. Ours is the
+        // entry with this digest and nonce (random per snapshot), at this size and position; any other answer keeps the
+        // failure.
+        if (!(e instanceof SaihmEndpointError) || e.code === undefined || !COMMIT_FATE_UNKNOWN.has(e.code)) throw e;
+        const stored = await this.warmStartListing(offer).then(
+          (listed) => listed.find((x) => x.digest === sealed.digest && x.nonce === sealed.nonce && x.bytes === sealed.bytes && x.coversThrough === coversThrough),
+          () => undefined,
+        );
+        if (stored === undefined) throw e;
+        return { snapshotId: stored.snapshotId, createdAt: stored.createdAt, bytes: stored.bytes, coversThrough: stored.coversThrough };
+      }
     } catch (e) {
-      // A failure that does not say the snapshot was not stored: the listing decides. Ours is the entry with this digest
-      // and nonce (random per snapshot), at this size and position; any other answer keeps the failure.
-      if (!(e instanceof SaihmEndpointError) || e.code === undefined || !COMMIT_FATE_UNKNOWN.has(e.code)) throw e;
-      const stored = await this.warmStartListing(offer).then(
-        (listed) => listed.find((x) => x.digest === sealed.digest && x.nonce === sealed.nonce && x.bytes === sealed.bytes && x.coversThrough === coversThrough),
-        () => undefined,
-      );
-      if (stored === undefined) throw e;
-      return { snapshotId: stored.snapshotId, createdAt: stored.createdAt, bytes: stored.bytes, coversThrough: stored.coversThrough };
+      // Failed for good, and not shown stored: free the upload now rather than when it expires. An abort never touches a
+      // stored snapshot (the endpoint answers 404 for an upload already committed), never throws, and never replaces
+      // this failure, which is the call's answer.
+      await this.warmStartAbort(offer, upload.uploadId);
+      throw e;
     }
     const snapshot = committedSnapshot(parsedAnswer(commit.bytes), { bytes: sealed.bytes, parts: sealed.parts.length, coversThrough });
     if (snapshot === null)
@@ -6067,6 +6419,60 @@ export class SaihmProClient {
       throw new SaihmEndpointError(0, 'invalid_input', 'a snapshot id is 64 lowercase hex characters');
     const a = await this.warmStartRequest('delete', 'DELETE', `${offer.url}/${snapshotId}`, { cap: WARM_START_ANSWER_BYTES });
     if (a.status !== 204) throw this.warmStartRefusal('delete', a).error;
+  }
+
+  /**
+   * Abort an upload this client began and will not finish: best-effort, and over within {@link WARM_START_ABORT_MS}
+   * whatever the endpoint does, so it never holds back the upload's own failure, which is the caller's answer. Its parts
+   * go and its room is freed at once, instead of when it expires. 204 (aborted), 404 (unknown, expired, aborted or
+   * committed: never a stored snapshot), 409 (an erasure aborted it already), 410 and every other answer are final; a
+   * busy answer (503) or a connection refused or reset before any answer is tried once more; no answer in time is never
+   * tried again. A 401 is final too: the abort renews no credential. Never throws.
+   */
+  private async warmStartAbort(offer: WarmStartOffer, uploadId: string): Promise<void> {
+    const url = `${offer.url}/uploads/${uploadId}`;
+    const deadline = Date.now() + WARM_START_ABORT_MS;
+    const tries = async (): Promise<void> => {
+      for (let attempt = 1; attempt <= WARM_START_ABORT_ATTEMPTS; attempt++) {
+        const left = deadline - Date.now();
+        if (left <= 0) return;
+        const a = await this.warmStartAbortOnce(url, left);
+        if (a !== 503 && a !== 'refused') return;
+        const pause = Math.min(WARM_START_ABORT_PAUSE_MS, deadline - Date.now());
+        if (attempt >= WARM_START_ABORT_ATTEMPTS || pause <= 0) return;
+        await new Promise<void>((r) => setTimeout(r, pause));
+      }
+    };
+    // The bound holds even where a step has no timeout of its own (a credential being renewed): the caller stops waiting
+    // at it, and whatever is still in flight ends on its own.
+    let bound: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([tries().catch(() => undefined), new Promise<void>((r) => (bound = setTimeout(r, WARM_START_ABORT_MS)))]);
+    clearTimeout(bound);
+  }
+
+  /**
+   * One abort request: the answer's status, `refused` when the connection was refused or reset before any answer, or
+   * `failed` for anything else, no answer within `timeoutMs` included. Never throws.
+   */
+  private async warmStartAbortOnce(url: string, timeoutMs: number): Promise<number | 'refused' | 'failed'> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      let res: Response;
+      try {
+        res = await keepAliveFetch(url, { method: 'DELETE', headers: { authorization: await this.currentAuthHeader() }, signal: ctrl.signal });
+      } catch (e) {
+        const code = (e as { code?: unknown } | null)?.code;
+        return !ctrl.signal.aborted && (code === 'ECONNREFUSED' || code === 'ECONNRESET') ? 'refused' : 'failed';
+      }
+      // Read within the cap, so the connection can be used again; the status alone decides.
+      await readBytesCapped(res, WARM_START_ANSWER_BYTES, 'warm_start_abort').catch(() => undefined);
+      return res.status;
+    } catch {
+      return 'failed';
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** The listing, every entry checked; one it cannot read refuses the listing whole. */
@@ -6240,6 +6646,13 @@ export class SaihmProClient {
       // The share listing alone: an endpoint that offers the feed answers without reading any own cell. One that does
       // not answers with the full listing, which the feed reads for shares only and never opens.
       listing: async () => this.call<unknown>('saihm_recall', { sharesOnly: true }),
+      // The whole list by pages where the endpoint offers paging, timed and dated by the feed's clock. Where it does not,
+      // where a page answer shows it no longer does, or where the status that says so cannot be read, null: the feed then
+      // reads the one-answer listing above, as before paging.
+      pass: async (feed, bounds) => {
+        const p = await this.listAllShares({ maxEntries: bounds.maxEntries, now: bounds.now, signal: feed });
+        return p.incomplete === 'unsupported' || p.incomplete === 'unread' ? null : p;
+      },
     };
     // The map for other processes: written soon after a change, at least once a minute, and once more when the feed
     // stops. A root that cannot be resolved means no file, which asserts nothing.

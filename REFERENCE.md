@@ -115,6 +115,14 @@ CLI in a folder you trust: in an untrusted folder it does not start local server
 `gemini mcp list` can show the server disconnected while `npx` is still downloading,
 because that check waits only a few seconds; run it again.
 
+### Grok Build (xAI)
+
+Grok Build waits 30 seconds for a server to start unless `startup_timeout_sec` says
+otherwise. It reads `~/.grok/config.toml` for user-level servers and a project's
+`.grok/config.toml` for project-scoped ones, and also loads an existing `saihm` entry from
+`~/.claude.json` or a project's `.mcp.json`, merged below `config.toml` in priority. Check
+with `grok mcp list`, or `grok mcp doctor saihm`.
+
 ### Other MCP clients
 
 The README's block is documented for Cline; for other clients it is the generic MCP form. Add the `"saihm"`
@@ -130,6 +138,9 @@ documentation.
   `cline mcp install` writes its entry in another shape (`"transport": { ... }`), with no
   `timeout` and no `env`: add `"timeout": 60` beside `"transport"`, or use the entry
   in the README.
+
+If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro` once in a
+terminal so the package is downloaded, then restart Cline.
 
 ### Which clients are checked
 
@@ -433,6 +444,15 @@ that cannot be written.
 **Shared reads** (`saihm_recall` with the sharer and the cell) return the `commitment` of the version opened and, when
 the endpoint sends it, the `grant` that served it, so a copy matches its entry exactly.
 
+**Every share, page by page.** Where `saihm_status` offers `features.sharesPaged`, `saihm_recall` with
+`sharesOnly: true` (and only `after`) lists every memory shared with you, by sharer and then by cell, without reading
+any of them: pass `next` back as `after` until it is null, and conclude nothing from a missing share before the last
+page. A page carries `shared`, `next`, `sharedSkipped` (pointers left out because a field is longer than the client
+carries, the same ones on every pass) and `total` (the endpoint's count, never a sign that a pass is complete), and
+never `sharedTruncated`. Without the offer it answers `shares_paging_unsupported`: recall without it. Where it is
+offered, the map reconciles page by page too, and `saihm.listAllShares()` reads every page for a program, with
+`complete: true` only when it read them all in order.
+
 ### Changes to your own cells (optional)
 
 When the endpoint also offers events for your own cells (its `events` capability lists both `cell-written` and
@@ -533,6 +553,7 @@ schema. A field is absent, or null where it is always present, when the endpoint
 | `deleted` | `saihm_forget` with `warmStart: "delete"` | `true` once the snapshot is destroyed |
 | `servedBy`, `asOf` | `saihm_recall` | Where the answer was served (`origin` or a region id) and the origin time it reflects |
 | `shared`, `sharedTruncated`, `sharedKept` | a `saihm_recall` that lists memories | Pointers to memories shared with you (the endpoint's unverified claims, without content); whether the list was cut; which end was kept, `newest` or `oldest` |
+| `shared`, `next`, `sharedSkipped`, `total` | `saihm_recall` with `sharesOnly` | One page of those pointers; the `after` for the next page, or null on the last; how many were left out for a field too long to carry; the endpoint's count (see *Following shares*) |
 | `found` | `saihm_recall` with `cellId` alone | `true` when the cell was read; `false` when no cell has that id (never written, or erased), which is not an error; absent on other recalls |
 | `complete`, `destructionAnchor`, `reason`, `sharesPurged`, `epoch`, `at` | `saihm_forget` | See *Forget* below |
 
@@ -551,7 +572,7 @@ Details:
 - **Cut share lists.** A cut keeps one end of the list: once it leaves a pointer out, it keeps none after it. With
   `sharedKept: "newest"`, the kept pointers are the newest and everything left out comes after them. `sharedKept` is
   absent when the list was not cut, when no order was declared, and when a pointer the client could not carry was
-  skipped before the cut.
+  skipped before the cut. The text of a cut list names `sharesOnly`, which lists every pointer where it is offered.
 - **Forget.** `complete` is true only when the answer carries the endpoint's record of the key's destruction,
   `destructionAnchor`: store it as sent, and compare it only for equality. With `complete: false`, `reason` says why
   when the endpoint names it: `not-found` (nothing more to erase, which is not a failed erasure) or `not-attested`
