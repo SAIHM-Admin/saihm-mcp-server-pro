@@ -24,7 +24,8 @@ the bootstrap tool that answers "Join SAIHM": on by default, removed by
 The server is local (stdio), starts with `npx`, and needs Node.js 20 or later.
 Write the entry in the host's own format, and merge it into what is there rather
 than overwriting it. Per host (from each provider's documentation;
-`README.md` has a ready block for each):
+`README.md` has a ready block for each; each vendor's configuration is presented
+as tested, but is subject to change at the vendor's discretion):
 
 - **Claude Code:** `claude mcp add --env SAIHM_ENDPOINT_URL=https://saihm.net/mcp --transport stdio --scope user saihm -- npx -y @saihm/mcp-server-pro`.
   If the first start times out, set `MCP_TIMEOUT=60000` in the environment Claude
@@ -40,6 +41,12 @@ than overwriting it. Per host (from each provider's documentation;
   Gemini reads `timeout` in milliseconds, and its default is 10 minutes. Its
   `gemini mcp list` check waits only a few seconds, so on the first start, while
   `npx` downloads, it can show the server disconnected; check again.
+  Personal Google accounts are no longer served in the Gemini CLI (since
+  2026-06-18); it needs a Gemini API key or a Gemini Code Assist Standard or
+  Enterprise licence.
+- **Antigravity CLI:** `~/.gemini/config/mcp_config.json` (or a project's
+  `.agents/mcp_config.json`), the entry below without `timeout`. Check with
+  `/mcp` inside the CLI.
 - **Grok Build:** `~/.grok/config.toml`, a `[mcp_servers.saihm]` table with
   `command`, `args`, `env` and `startup_timeout_sec = 60` (the default is 30).
   Also loads an existing `saihm` entry from `~/.claude.json` or a project's
@@ -51,8 +58,9 @@ than overwriting it. Per host (from each provider's documentation;
   `~/.cline/data/settings/cline_mcp_settings.json`; `cline mcp install` writes a
   nested `transport` object with no `timeout` and no `env`, so add `"timeout": 60`
   beside `transport`.
-  If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro`
-  once in a terminal so the package is downloaded, then restart Cline.
+  If the tools don't appear the first time, run
+  `npx -y @saihm/mcp-server-pro --version` in a terminal (it downloads the package,
+  prints its version and exits), then restart Cline.
 - **Other hosts that take `mcpServers` JSON:** the entry below. Keep `timeout` only
   where the host documents it in seconds.
 
@@ -73,6 +81,10 @@ than overwriting it. Per host (from each provider's documentation;
 
 Host note: From 0.11.2 the default endpoint is `https://saihm.net/mcp`. Versions 0.11.1 and earlier default to the previous host, `saihm.coti.global`, which is being retired: upgrade, or set `SAIHM_ENDPOINT_URL` explicitly.
 
+To make the first start quick on any host, run
+`npx -y @saihm/mcp-server-pro --version` in a terminal first: it downloads the
+package, prints its version and exits.
+
 **The start-up setting is required, not decorative.** The first start downloads
 the package with `npx`, which takes longer than some hosts wait by default: the Cline
 CLI, without `timeout`, waits only a few seconds. A server that misses the deadline is
@@ -84,7 +96,9 @@ Code, `claude mcp list` shows whether the server connected and says so when a
 config file is not valid JSON (a broken `~/.claude.json` may then be replaced by a fresh one
 without the servers, and the original kept under `~/.claude/backups/`: fix that copy and
 put it back); `python3 -m json.tool <file> > /dev/null && echo valid` checks a file
-without printing it (on Windows, in Command Prompt: `py -m json.tool <file> > NUL && echo valid`, writing
+without printing it; where Python is not installed, Node.js does the same:
+`node -e "try{JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));console.log('valid')}catch{console.log('not valid');process.exit(1)}" <file>`
+(keep the `try`: Node's own parse error quotes part of the file) (on Windows, in Command Prompt: `py -m json.tool <file> > NUL && echo valid`, writing
 `"%USERPROFILE%\.claude.json"` for `~/.claude.json`). Never print a config file: it can hold other
 servers' credentials, and your transcript keeps what you print.
 
@@ -176,6 +190,10 @@ only by them (never by pasting it into the chat) and point at it with
 in the config store itself, which is frequently synced between machines. Have
 the user write the value; do not ask them to read it out to you. Full option
 table: see `REFERENCE.md`.
+
+Prices are on https://saihm.net/pricing. The `upgrade` command prints a card
+checkout link, which goes with `SAIHM_PAYMENT_METHOD=stripe`; stablecoin is paid
+on the website's join page, https://saihm.net/join, and goes with `stablecoin`.
 
 ## Troubleshooting
 

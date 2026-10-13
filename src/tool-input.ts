@@ -56,3 +56,20 @@ export function acceptAbsentToolArguments<T extends Transport>(transport: T): T 
   };
   return transport;
 }
+
+// A host that fills every field (OpenAI strict function calling, and the hosts that convert an MCP schema to it) can only
+// send what the advertised schema allows. An optional choice or grammar that does not allow a blank forces such a host to
+// pick a value, and the value starts a mode the user never asked for. So every optional enum and pattern advertises the
+// blank beside its values. A blank is still read as absent before validation (optionalInput), so it never reaches the
+// enum or the pattern, and every value that was valid before is valid now.
+
+/** An optional choice among `values`, advertised with "" (leave it blank) as one of the choices. */
+export function optionalChoice<const T extends readonly [string, ...string[]]>(values: T) {
+  return optionalInput(z.enum(['', ...values] as unknown as readonly ['', ...T]));
+}
+
+/** An optional string with an anchored grammar, advertised as that grammar or the blank. */
+export function optionalPattern(re: RegExp, message?: string) {
+  if (!re.source.startsWith('^') || !re.source.endsWith('$')) throw new Error(`optionalPattern needs an anchored pattern: ${re.source}`);
+  return optionalInput(z.string().regex(new RegExp(`^$|${re.source}`, re.flags), message));
+}

@@ -2,6 +2,34 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.1] — 2026-10-13
+
+Hosts that fill in every field of a tool, such as Cline with an OpenAI model,
+can now save and recall memories. No tool added or removed.
+
+### Fixed
+
+- **Every optional choice can be left blank.** `warmStart` on `saihm_remember`,
+  `saihm_recall` and `saihm_forget`, the warm-start `token`, `coversThrough` and
+  `snapshotId`, and `scope` and `expiryEpoch` on `saihm_share` now offer `""` in
+  their advertised schemas. A host that must send every field picks the blank,
+  and the call does what it does with the field left out. Before, such a host
+  had to send `warmStart: "put"`, and every remember was refused. Warm-start calls
+  that name a mode work as before, and a strict host can make them too: a
+  switch sent as `false` beside `warmStart` counts as left out.
+
+### Changed
+
+- **Stablecoin is paid on the website.** With `SAIHM_PAYMENT_METHOD=stablecoin`,
+  `upgrade` and `join` say that the link they print is card checkout and that
+  stablecoin is paid on https://saihm.net/join. The card link is still printed.
+- **Setup notes.** `npx -y @saihm/mcp-server-pro --version` downloads the
+  package, prints its version and exits: the README now gives it as the
+  first-start tip, in place of running the server in a terminal. New: a setup
+  block for Antigravity CLI (Google), a note that the Gemini CLI no longer serves
+  personal Google accounts, a link to the pricing page, where stablecoin is paid,
+  and a Node.js check for a JSON settings file in `llms-install.md`.
+
 ## [0.14.0] — 2026-10-10
 
 List every memory shared with you, page by page, where the endpoint offers it,
@@ -2033,6 +2061,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.14.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.1
 [0.14.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.0
 [0.13.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.13.0
 [0.12.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.12.1
@@ -2065,4 +2094,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.1...HEAD

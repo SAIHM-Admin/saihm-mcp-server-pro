@@ -873,6 +873,32 @@ test("server.ts: `upgrade` delivers a fragment-bearing checkout URL whole, print
   }
 });
 
+test("server.ts: with SAIHM_PAYMENT_METHOD=stablecoin, `join` and `upgrade` say the link is card checkout and stablecoin is paid on the join page", async () => {
+  const note = /The link above is card checkout; stablecoin is paid on the\n {2}join page instead: https:\/\/saihm\.net\/join\n/;
+  const mock = startMock({ checkoutUrl: HOSTED_URL });
+  await new Promise<void>((r) => mock.server.listen(0, "127.0.0.1", () => r()));
+  const dirs: string[] = [];
+  try {
+    for (const [args, env] of [
+      [["join"], {}],
+      [["upgrade", "PRO"], { SAIHM_TIER: "FREE" }],
+    ] as const) {
+      for (const method of ["stablecoin", " Stablecoin ", "stripe"]) {
+        const dir = mkdtempSync(pathJoin(tmpdir(), "saihm-paymethod-"));
+        dirs.push(dir);
+        const out = await runCli(mock.base() + "/mcp", [...args], { ...env, SAIHM_STATE_DIR: dir, SAIHM_PAYMENT_METHOD: method });
+        // The card path stays: the link is printed and saved whatever the method.
+        assertCheckoutDelivered(out, dir);
+        if (method.trim().toLowerCase() === "stablecoin") assert.match(out, note, `${args[0]} ${method}`);
+        else assert.doesNotMatch(out, /stablecoin/i, `${args[0]} ${method}`);
+      }
+    }
+  } finally {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    await new Promise<void>((r) => mock.server.close(() => r()));
+  }
+});
+
 test("server.ts: a planted symlink at checkout-url.txt cannot redirect the write", async () => {
   // The footgun this guards is a REVERSION, not a bug: writing the URL directly to a fixed path is
   // the obvious implementation, and `writeFileSync` follows symlinks. MEASURED on this deployment:

@@ -55,7 +55,7 @@ import {
   failCode,
   failText,
 } from './render_fence.js';
-import { acceptAbsentToolArguments, isBlankInput, optionalInput } from './tool-input.js';
+import { acceptAbsentToolArguments, isBlankInput, optionalChoice, optionalInput, optionalPattern } from './tool-input.js';
 import {
   COVERS_THROUGH_PATTERN,
   SNAPSHOT_ID_PATTERN,
@@ -618,14 +618,14 @@ server.registerTool(
       content: z.string().optional().describe('Information to remember. Required unless warmStart is "put".'),
       // Every optional field of every tool reads null and blank values as absent (see tool-input.ts).
       cellId: optionalInput(z.string()).describe('Existing cell id (hex) to update; omit to create a new cell'),
-      warmStart: optionalInput(z.enum(['put'])).describe(
-        '"put" stores the payload file warm-start/put-<token>.bin as an encrypted snapshot, then removes the file. Only coversThrough and token go with it.',
+      warmStart: optionalChoice(['put']).describe(
+        '"put" stores the payload file warm-start/put-<token>.bin as an encrypted snapshot, then removes the file. Only coversThrough and token go with it. Leave it blank to remember content.',
       ),
-      coversThrough: optionalInput(z.string().regex(COVERS_THROUGH_PATTERN)).describe(
-        'With warmStart "put": the change feed position the payload covers, the cursor of a position marker.',
+      coversThrough: optionalPattern(COVERS_THROUGH_PATTERN).describe(
+        'With warmStart "put": the change feed position the payload covers, the cursor of a position marker. Blank otherwise.',
       ),
-      token: optionalInput(z.string().regex(WARM_START_TOKEN_PATTERN)).describe(
-        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. It names the payload file.',
+      token: optionalPattern(WARM_START_TOKEN_PATTERN).describe(
+        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. It names the payload file. Blank otherwise.',
       ),
     },
     outputSchema: structuredResult({
@@ -775,11 +775,11 @@ server.registerTool(
         'List every pointer shared with you, a page at a time and never cut, without reading any memory. Pages: pass the answer\'s next as after until next is null. Answers shares_paging_unsupported where the endpoint does not offer it: then recall without it.',
       ),
       after: optionalInput(z.string()).describe('With listOnly or sharesOnly: the next value of the previous page.'),
-      warmStart: optionalInput(z.enum(['latest', 'list'])).describe(
-        '"latest" restores the newest snapshot into warm-start/latest-<token>.bin (read it, then remove it); "list" lists snapshots. Only token goes with it.',
+      warmStart: optionalChoice(['latest', 'list']).describe(
+        '"latest" restores the newest snapshot into warm-start/latest-<token>.bin (read it, then remove it); "list" lists snapshots. Only token goes with it. Leave it blank to recall memories.',
       ),
-      token: optionalInput(z.string().regex(WARM_START_TOKEN_PATTERN)).describe(
-        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. It names the payload file.',
+      token: optionalPattern(WARM_START_TOKEN_PATTERN).describe(
+        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. It names the payload file. Blank otherwise.',
       ),
     },
     outputSchema: structuredResult({
@@ -896,7 +896,8 @@ server.registerTool(
         if (warmStart === undefined) throw warmStartInvalid('token goes with warmStart "latest" or "list".');
         if (
           query !== undefined || sharerPinnedAgentIdHashHex !== undefined || sharerRecord !== undefined || cellId !== undefined ||
-          shareEntries !== undefined || listOnly !== undefined || sharesOnly !== undefined || after !== undefined
+          // false is the blank a host that fills every field sends for a switch it did not choose.
+          shareEntries === true || listOnly === true || sharesOnly === true || after !== undefined
         )
           throw warmStartInvalid('warmStart takes token only: leave out every other field.');
         if (warmStart === 'latest') {
@@ -1411,12 +1412,12 @@ server.registerTool(
     inputSchema: {
       // Optional only for warm start: any other call without it is refused (id_required).
       id: z.string().optional().describe('Memory cell id (hex) to erase. Required unless warmStart is "delete".'),
-      warmStart: optionalInput(z.enum(['delete'])).describe(
-        '"delete" destroys the snapshot named by snapshotId instead of a memory. Only snapshotId and token go with it.',
+      warmStart: optionalChoice(['delete']).describe(
+        '"delete" destroys the snapshot named by snapshotId instead of a memory. Only snapshotId and token go with it. Leave it blank to erase a memory by id.',
       ),
-      snapshotId: optionalInput(z.string().regex(SNAPSHOT_ID_PATTERN)).describe('With warmStart "delete": the snapshot to destroy.'),
-      token: optionalInput(z.string().regex(WARM_START_TOKEN_PATTERN)).describe(
-        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call.',
+      snapshotId: optionalPattern(SNAPSHOT_ID_PATTERN).describe('With warmStart "delete": the snapshot to destroy. Blank otherwise.'),
+      token: optionalPattern(WARM_START_TOKEN_PATTERN).describe(
+        'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. Blank otherwise.',
       ),
     },
     outputSchema: structuredResult({
@@ -1714,10 +1715,10 @@ server.registerTool(
       recipientPinnedAgentIdHashHex: z
         .string()
         .describe("The grantee's agentIdHash (hex), pinned out-of-band"),
-      scope: optionalInput(z.enum(['read', 'write', 'readwrite'])).describe('Access scope (default read)'),
-      expiryEpoch: optionalInput(
-        z.string().regex(/^[0-9]+$/, 'expiryEpoch must be a decimal UNIX-epoch count'),
-      ).describe('Optional expiry as a UNIX-epoch count (decimal string)'),
+      scope: optionalChoice(['read', 'write', 'readwrite']).describe('Access scope (blank = read)'),
+      expiryEpoch: optionalPattern(/^[0-9]+$/, 'expiryEpoch must be a decimal UNIX-epoch count').describe(
+        'Optional expiry as a UNIX-epoch count (decimal string); blank = no expiry',
+      ),
     },
     annotations: {
       title: 'Share',
@@ -2200,6 +2201,28 @@ function checkoutUrlBlock(fenced: string, savedTo: string): string[] {
   ];
 }
 
+/**
+ * The checkout link this client prints is card checkout. A user whose payment method is stablecoin pays on the website's
+ * join page instead, so they are told so beside the link. Read as join and upgrade read it: SAIHM_PAYMENT_METHOD, else
+ * what an imported identity carries.
+ */
+function stablecoinCheckoutNote(): string[] {
+  let method: string | undefined;
+  try {
+    const id = resolveIdentityFromEnv();
+    id.master.fill(0);
+    method = id.paymentMethod;
+  } catch {
+    method = process.env.SAIHM_PAYMENT_METHOD;
+  }
+  if ((method ?? '').trim().toLowerCase() !== 'stablecoin') return [];
+  return [
+    '  Your payment method is stablecoin. The link above is card checkout; stablecoin is paid on the',
+    '  join page instead: https://saihm.net/join',
+    '',
+  ];
+}
+
 async function runJoin(): Promise<void> {
   const c = SaihmProClient.bootFromEnv();
   const url = await c.requestCheckoutUrl();
@@ -2214,6 +2237,7 @@ async function runJoin(): Promise<void> {
       'SAIHM — subscribe this identity to activate your memory:',
       '',
       ...checkoutUrlBlock(fenced, persistCheckoutUrl(fenced)),
+      ...stablecoinCheckoutNote(),
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
       '  Open the link above in a browser and pay. Copy it whole — everything after the "#" is part',
@@ -2582,6 +2606,7 @@ async function runUpgrade(): Promise<void> {
       `SAIHM — upgrade this identity to ${fencedTier} (monthly). Your memories stay on this same key:`,
       '',
       ...checkoutUrlBlock(fenced, persistCheckoutUrl(fenced)),
+      ...stablecoinCheckoutNote(),
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
       '  Open the link above in a browser and pay. Copy it whole — everything after the "#" is part',

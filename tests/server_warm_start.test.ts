@@ -28,6 +28,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import { strictArguments, strictViolation } from './strict_schema.js';
 import { deriveIdentity, fromHex, sealCell, toHex } from '@saihm/client-pro';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -496,6 +497,32 @@ test('no offer, or an endpoint that does not describe warm start: every mode is 
   }
 });
 
+test('a strict host, which sends every field, puts, lists, restores and deletes with every other field at its blank choice', async () => {
+  await withRig(async ({ d, m, dir }) => {
+    const schema = (name: string) => d.tools.find((t) => t.name === name).inputSchema;
+    const strict = (name: string, given: Record<string, unknown>): Record<string, unknown> => {
+      const args = strictArguments(schema(name), given);
+      assert.equal(strictViolation(schema(name), args), null, `${name} ${JSON.stringify(args)}`);
+      return args;
+    };
+    const t1 = token();
+    shmPut(dir, t1, PAYLOAD);
+    const put = await d.call('saihm_remember', strict('saihm_remember', { warmStart: 'put', coversThrough: AT, token: t1 }));
+    assert.equal(put.isError, false, put.text);
+    assert.equal(put.structured.snapshotId, m.snapshots[0]!.snapshotId);
+    const list = await d.call('saihm_recall', strict('saihm_recall', { warmStart: 'list', token: token() }));
+    assert.equal(list.isError, false, list.text);
+    assert.deepEqual(list.structured, { count: 0, memories: [], snapshots: [put.structured] });
+    const t2 = token();
+    const latest = await d.call('saihm_recall', strict('saihm_recall', { warmStart: 'latest', token: t2 }));
+    assert.equal(latest.isError, false, latest.text);
+    assert.deepEqual(readFileSync(join(dir, `latest-${t2}.bin`)), PAYLOAD);
+    const del = await d.call('saihm_forget', strict('saihm_forget', { warmStart: 'delete', snapshotId: put.structured.snapshotId, token: token() }));
+    assert.equal(del.isError, false, del.text);
+    assert.deepEqual(del.structured, { deleted: true });
+  });
+});
+
 test('input: token required and in its grammar, one mode per call, refused before any file is touched or request sent', async () => {
   await withRig(async ({ d, m, dir }) => {
     const t = token();
@@ -513,7 +540,9 @@ test('input: token required and in its grammar, one mode per call, refused befor
       ['saihm_recall', { warmStart: 'latest', token: t, query: 'x' }],
       ['saihm_recall', { warmStart: 'latest', token: t, cellId: 'c1' }],
       ['saihm_recall', { warmStart: 'list', token: t, listOnly: true }],
-      ['saihm_recall', { warmStart: 'list', token: t, shareEntries: false }],
+      // 0.14.1: false is the blank a host that fills every field sends, so only a switch that is on is a second mode.
+      ['saihm_recall', { warmStart: 'list', token: t, shareEntries: true }],
+      ['saihm_recall', { warmStart: 'list', token: t, sharesOnly: true }],
       ['saihm_forget', { warmStart: 'delete', token: t }],
       ['saihm_forget', { warmStart: 'delete', snapshotId: 'ab'.repeat(32) }],
       ['saihm_forget', { warmStart: 'delete', snapshotId: 'ab'.repeat(32), token: t, id: 'c1' }],

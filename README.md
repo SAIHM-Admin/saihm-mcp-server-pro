@@ -69,19 +69,25 @@ enter the code; the code expires on its own. Keep the key file either way.
 
 ## Add SAIHM to your AI client
 
+Each vendor's configuration below is presented as tested, but is subject to change at
+the vendor's discretion.
+
 SAIHM runs on your machine as a local MCP server that your AI client starts with
 `npx`, so you need Node.js 20 or later. The package is
 [`@saihm/mcp-server-pro`](https://www.npmjs.com/package/@saihm/mcp-server-pro) on npm,
 and the official [MCP Registry](https://registry.modelcontextprotocol.io) lists it as
 `io.github.SAIHM-Admin/saihm-mcp-server-pro`.
 
-Find your client below, add its block, and restart the client. Two tips:
+Find your client below, add its block, and restart the client. Three tips:
 
 - **Keep the file valid.** A trailing comma, or a non-breaking space copied from an
   email or a web page, makes a JSON settings file invalid. Paste through a plain-text
   editor.
 - **Keep the start-up setting.** The first start downloads the package. Where a block
   sets a longer start-up time, keep it, so the tools appear on the first try.
+- **Download it once first.** Run `npx -y @saihm/mcp-server-pro --version` in a
+  terminal. It downloads the package, prints its version and exits, so the client's
+  first start is quick.
 
 Each block follows that client's own documentation. Before every release, the server
 is started from these blocks in Claude Code, Gemini CLI and the OpenAI Agents SDK to
@@ -97,7 +103,8 @@ claude mcp add --env SAIHM_ENDPOINT_URL=https://saihm.net/mcp --transport stdio 
 ```
 
 If the tools don't appear after the first start, give the server more time:
-`MCP_TIMEOUT=60000 claude`. `claude mcp list` shows whether it connected. For Claude
+`MCP_TIMEOUT=60000 claude`, or run `npx -y @saihm/mcp-server-pro --version` once in a terminal and
+start Claude Code again. `claude mcp list` shows whether it connected. For Claude
 Code on the web, see [Hosted agent environments](#hosted-agent-environments).
 
 ### Claude Desktop (Anthropic)
@@ -118,7 +125,8 @@ Open **Settings > Developer > Edit Config**, add the `"saihm"` entry inside
 ```
 
 Claude Desktop starts the server with the Node.js installed on your machine, so
-install Node.js first.
+install Node.js first. If the tools don't appear the first time, run
+`npx -y @saihm/mcp-server-pro --version` in a terminal, then quit and reopen Claude Desktop.
 
 ### Codex CLI (OpenAI)
 
@@ -184,6 +192,31 @@ Or install the Gemini CLI extension, which carries the same entry:
 Run Gemini CLI in a folder you trust, since it starts local servers only there. Check
 with `gemini mcp list`, or `/mcp` inside Gemini CLI.
 
+Since 2026-06-18, Google no longer serves personal Google accounts in the Gemini CLI:
+signing in with one answers "This client is no longer supported for Gemini Code Assist
+for individuals". The Gemini CLI still works with a Gemini API key, or with a Gemini
+Code Assist Standard or Enterprise licence.
+
+### Antigravity CLI (Google)
+
+Add this to `~/.gemini/config/mcp_config.json` (all projects) or `.agents/mcp_config.json`
+in a project:
+
+```json
+{
+  "mcpServers": {
+    "saihm": {
+      "command": "npx",
+      "args": ["-y", "@saihm/mcp-server-pro"],
+      "env": { "SAIHM_ENDPOINT_URL": "https://saihm.net/mcp" }
+    }
+  }
+}
+```
+
+Type `/mcp` inside Antigravity CLI to see whether it connected. If the tools don't appear
+the first time, run `npx -y @saihm/mcp-server-pro --version` in a terminal, then reload the server there.
+
 ### Grok Build (xAI)
 
 Add this to `~/.grok/config.toml`, or to a project's `.grok/config.toml`:
@@ -225,6 +258,8 @@ code --add-mcp "{\"name\":\"saihm\",\"command\":\"npx\",\"args\":[\"-y\",\"@saih
 ```
 
 **MCP: List Servers** shows the server, and its **Show Output** action shows the log.
+If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro --version` in a terminal,
+then restart the server from **MCP: List Servers**.
 For the GitHub Copilot cloud agent, see
 [Hosted agent environments](#hosted-agent-environments).
 
@@ -249,8 +284,8 @@ Cursor or Windsurf, add the `"saihm"` entry inside the existing `mcpServers` obj
 `timeout` is in seconds in Cline. If your client documents another unit, follow its
 documentation.
 
-If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro` once in a
-terminal so the package is downloaded, then restart Cline.
+If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro --version` in a
+terminal. It downloads the package, prints its version and exits. Then restart Cline.
 
 ## Agent frameworks
 
@@ -435,7 +470,8 @@ for trying SAIHM on real infrastructure — it doesn't reset or refill. **No car
 nothing to cancel.** Your assistant shows what's left and warns you as it runs low, so
 nothing fails by surprise.
 
-Paid plans are monthly, and upgrading keeps the same key and every memory you already
+Paid plans are monthly; prices are on the [pricing page](https://saihm.net/pricing).
+Upgrading keeps the same key and every memory you already
 have:
 
 ```sh
@@ -453,8 +489,9 @@ config's `env` block and restart:
 ```
 
 A paid plan needs both lines: without `SAIHM_PAYMENT_METHOD`, which names the payment
-rail to check, the server won't start. `stripe` is one option and `stablecoin` another;
-your assistant can tell you what your operator accepts.
+rail to check, the server won't start. The upgrade command's link is card checkout,
+and goes with `stripe`. To pay in stablecoin, use the website's
+[join page](https://saihm.net/join), then set `stablecoin`.
 
 ## If something isn't working
 

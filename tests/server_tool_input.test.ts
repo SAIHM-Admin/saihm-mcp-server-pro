@@ -18,7 +18,8 @@ import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { fromHex } from '@saihm/client-pro';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { acceptAbsentToolArguments, isBlankInput, optionalInput, withToolArguments } from '../src/tool-input.js';
+import { acceptAbsentToolArguments, isBlankInput, optionalChoice, optionalInput, optionalPattern, withToolArguments } from '../src/tool-input.js';
+import { strictArguments, strictViolation } from './strict_schema.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, '../src/server.ts');
@@ -433,17 +434,18 @@ test('the schemas a host is shown are the plain ones: every optional field has i
       // Warm start: the mode, its token, the put's position and the delete's snapshot, each with its grammar; content and
       // id, required unless warmStart, are listed here because the schema can no longer mark them required.
       'saihm_remember.content': 'string',
-      'saihm_remember.warmStart': 'string:put',
-      'saihm_remember.coversThrough': 'string:^[!-~]{1,64}$',
-      'saihm_remember.token': 'string:^[a-z0-9]{16,32}$',
-      'saihm_recall.warmStart': 'string:latest|list',
-      'saihm_recall.token': 'string:^[a-z0-9]{16,32}$',
+      // 0.14.1: every optional choice and grammar also offers the blank, so a host that fills every field can leave it.
+      'saihm_remember.warmStart': 'string:|put',
+      'saihm_remember.coversThrough': 'string:^$|^[!-~]{1,64}$',
+      'saihm_remember.token': 'string:^$|^[a-z0-9]{16,32}$',
+      'saihm_recall.warmStart': 'string:|latest|list',
+      'saihm_recall.token': 'string:^$|^[a-z0-9]{16,32}$',
       'saihm_forget.id': 'string',
-      'saihm_forget.warmStart': 'string:delete',
-      'saihm_forget.snapshotId': 'string:^[0-9a-f]{64}$',
-      'saihm_forget.token': 'string:^[a-z0-9]{16,32}$',
-      'saihm_share.scope': 'string:read|write|readwrite',
-      'saihm_share.expiryEpoch': 'string:^[0-9]+$',
+      'saihm_forget.warmStart': 'string:|delete',
+      'saihm_forget.snapshotId': 'string:^$|^[0-9a-f]{64}$',
+      'saihm_forget.token': 'string:^$|^[a-z0-9]{16,32}$',
+      'saihm_share.scope': 'string:|read|write|readwrite',
+      'saihm_share.expiryEpoch': 'string:^$|^[0-9]+$',
       'saihm_governance_propose.paramKey': 'string',
       'saihm_governance_propose.proposedValue': 'string',
       'saihm_join.newIdentity': 'boolean',
@@ -470,6 +472,90 @@ test('saihm_join without an identity: a null or blank newIdentity, or no argumen
     assert.ok(!existsSync(join(home, 'free-identity.key')));
   } finally {
     d.proc.kill();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('optionalChoice and optionalPattern offer the blank and read it as absent; every value valid before is valid, and no other', () => {
+  const c = optionalChoice(['put']);
+  for (const v of ['', ' ', null, undefined]) assert.equal(c.parse(v), undefined, JSON.stringify(v));
+  assert.equal(c.parse('put'), 'put');
+  for (const v of ['PUT', 'x', false, {}]) assert.throws(() => c.parse(v), JSON.stringify(v));
+  const p = optionalPattern(/^[a-z0-9]{16,32}$/);
+  for (const v of ['', '  ', null]) assert.equal(p.parse(v), undefined, JSON.stringify(v));
+  assert.equal(p.parse('a'.repeat(16)), 'a'.repeat(16));
+  for (const v of ['a'.repeat(15), 'A'.repeat(16), ' ' + 'a'.repeat(16), 'a'.repeat(33)]) assert.throws(() => p.parse(v), JSON.stringify(v));
+  assert.throws(() => optionalPattern(/[0-9]+/), 'an unanchored pattern would widen under the blank branch');
+});
+
+/**
+ * A host with strict function calling (OpenAI strict mode; Cline with an OpenAI model is one) sends every field, each one
+ * a value the advertised schema allows. For each tool: the call with every optional field at its blank choice must be
+ * valid under the strict form of the advertised schema, and must do exactly what the call with those fields left out does.
+ */
+test('a strict host: the advertised schema of every tool lets it leave each optional field blank, and the blank call takes the normal path', async () => {
+  const m = startMock();
+  await new Promise<void>((r) => m.server.listen(0, '127.0.0.1', () => r()));
+  const home = mkdtempSync(join(tmpdir(), 'saihm-toolinput-'));
+  const d = await startServer({
+    HOME: home,
+    SAIHM_HOME: home,
+    SAIHM_ENDPOINT_URL: m.base() + '/mcp',
+    SAIHM_MASTER_SECRET_HEX: HEX('5d'),
+    SAIHM_TIER: 'PRO',
+    SAIHM_PAYMENT_METHOD: 'stripe',
+    SAIHM_SELF_JOIN: '1',
+  });
+  try {
+    const tools: { name: string; inputSchema: { properties?: Record<string, any>; required?: string[] } }[] = (await d.rpc('tools/list', {})).result.tools;
+    assert.equal(tools.length, 9, 'the eight protocol tools and saihm_join');
+    const violations: string[] = [];
+    for (const t of tools) {
+      const unlessWarmStart = REQUIRED_UNLESS_WARM_START[t.name];
+      const required = [...(t.inputSchema.required ?? []), ...(unlessWarmStart !== undefined ? [unlessWarmStart] : [])];
+      const base = Object.fromEntries(required.map((k) => [k, REQUIRED[k]]));
+      const strict = strictArguments(t.inputSchema as never, base);
+      const why = strictViolation(t.inputSchema as never, strict);
+      if (why !== null) violations.push(`${t.name}: ${why}`);
+      await d.call(t.name, base); // first-call notes land here, not in the comparison
+      const before = m.methods.length;
+      const omitted = await d.call(t.name, base);
+      const omittedMethods = m.methods.slice(before);
+      const at = m.methods.length;
+      const r = await d.call(t.name, strict);
+      assert.equal(r.error, undefined, `${t.name}: ${JSON.stringify(r.error)}`);
+      assert.equal(r.text, omitted.text, `${t.name} ${JSON.stringify(strict)}`);
+      assert.equal(r.isError, omitted.isError, t.name);
+      assert.deepEqual(m.methods.slice(at), omittedMethods, `${t.name}: the bridge saw a different call`);
+    }
+    assert.deepEqual(violations, [], 'a strict host can send the blank choice of every optional field');
+
+    // The arguments a Cline + OpenAI run sent, once the model may leave warmStart blank: a plain remember.
+    const remember = tools.find((t) => t.name === 'saihm_remember')!;
+    const cline = { warmStart: '', content: 'x', cellId: '', coversThrough: '', token: '' };
+    assert.equal(strictViolation(remember.inputSchema as never, cline), null);
+    const before = m.methods.length;
+    const plain = await d.call('saihm_remember', { content: 'x' });
+    const plainMethods = m.methods.slice(before);
+    const at = m.methods.length;
+    const r = await d.call('saihm_remember', cline);
+    assert.equal(r.text, plain.text);
+    assert.equal(r.isError, plain.isError);
+    assert.doesNotMatch(r.text ?? '', /warmStart/, 'not the warm-start refusal');
+    assert.deepEqual(m.methods.slice(at), plainMethods);
+    assert.ok(plainMethods.length > 0, 'the remember reached the bridge');
+    // And recall with a query, every other field blank: an own recall carrying the query.
+    const recall = tools.find((t) => t.name === 'saihm_recall')!;
+    const plainRecall = await d.call('saihm_recall', { query: 'needle' });
+    const n = m.recalls.length;
+    const q = await d.call('saihm_recall', strictArguments(recall.inputSchema as never, { query: 'needle' }));
+    assert.equal(q.isError, false, q.text);
+    assert.equal(q.text, plainRecall.text, 'the same answer as the recall with only the query');
+    assert.equal(m.recalls.length, n + 1);
+    assert.equal(m.recalls[n]!.sharer, undefined, 'an own recall');
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => m.server.close(() => r()));
     rmSync(home, { recursive: true, force: true });
   }
 });
