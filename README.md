@@ -69,8 +69,10 @@ enter the code; the code expires on its own. Keep the key file either way.
 
 ## Add SAIHM to your AI client
 
-Each vendor's configuration below is presented as tested, but is subject to change at
-the vendor's discretion.
+The configurations below for Claude Code, Gemini CLI and the OpenAI Agents SDK are
+presented as tested ([which clients are checked](./REFERENCE.md#which-clients-are-checked));
+the others are documented from each vendor's own documentation. Every configuration is
+subject to change at the vendor's discretion.
 
 SAIHM runs on your machine as a local MCP server that your AI client starts with
 `npx`, so you need Node.js 20 or later. The package is
@@ -194,8 +196,8 @@ with `gemini mcp list`, or `/mcp` inside Gemini CLI.
 
 Since 2026-06-18, Google no longer serves personal Google accounts in the Gemini CLI:
 signing in with one answers "This client is no longer supported for Gemini Code Assist
-for individuals". The Gemini CLI still works with a Gemini API key, or with a Gemini
-Code Assist Standard or Enterprise licence.
+for individuals". As of October 2026 the Gemini CLI still works with a Gemini API key,
+or with a Gemini Code Assist Standard or Enterprise licence.
 
 ### Antigravity CLI (Google)
 
@@ -490,8 +492,10 @@ config's `env` block and restart:
 
 A paid plan needs both lines: without `SAIHM_PAYMENT_METHOD`, which names the payment
 rail to check, the server won't start. The upgrade command's link is card checkout,
-and goes with `stripe`. To pay in stablecoin, use the website's
-[join page](https://saihm.net/join), then set `stablecoin`.
+and goes with `stripe`. It keeps your key and every memory on it. Stablecoin is paid on
+the website's [join page](https://saihm.net/join) and goes with `stablecoin`. Paying there
+starts a new identity with its own key. The memories on a key you already have stay on
+that key and do not move to the new one, so to upgrade the key you have, use the card link.
 
 ## If something isn't working
 
@@ -499,7 +503,7 @@ and goes with `stripe`. To pay in stablecoin, use the website's
 |---|---|
 | No SAIHM tools appear, and no error anywhere | The client stopped waiting before `npx` finished its first download. Keep the start-up setting in [your client's block](#add-saihm-to-your-ai-client), and check that the file is valid JSON |
 | Every other tool vanished too | The settings file is no longer valid JSON: look for a trailing comma, or non-breaking spaces from a copy and paste |
-| The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve; then say *"Join SAIHM"* again |
+| The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve. The join then finishes by itself, and the next memory call works |
 | Tools appear but every call fails | The machine cannot reach the endpoint (`saihm.net`, unless you set another). In a hosted environment, allow it in the network settings |
 | A hosted session keeps asking to join | The environment has no identity of yours: see [Hosted agent environments](#hosted-agent-environments) |
 | A different memory than you expected | This machine has its own key rather than yours |
@@ -579,7 +583,7 @@ await saihm.share({
   cellId,
   recipientRecord, // the grantee's published identity record (hex)
   recipientPinnedAgentIdHashHex, // pinned out-of-band
-  expiryEpoch, // optional; omit or null for no time bound
+  expiryEpoch, // optional whole HOURS since the UNIX epoch (498192n = 2026-11-01 00:00 UTC); omit or null for no time bound
 });
 await saihm.revokeShare(cellId, recipientPinnedAgentIdHashHex);
 

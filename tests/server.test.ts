@@ -873,8 +873,8 @@ test("server.ts: `upgrade` delivers a fragment-bearing checkout URL whole, print
   }
 });
 
-test("server.ts: with SAIHM_PAYMENT_METHOD=stablecoin, `join` and `upgrade` say the link is card checkout and stablecoin is paid on the join page", async () => {
-  const note = /The link above is card checkout; stablecoin is paid on the\n {2}join page instead: https:\/\/saihm\.net\/join\n/;
+test("server.ts: with SAIHM_PAYMENT_METHOD=stablecoin, `join` and `upgrade` say paying on the join page starts a new identity and the card link keeps this key", async () => {
+  const note = /Stablecoin is paid on https:\/\/saihm\.net\/join, and paying there\n {2}starts a new identity with its own key\. The memories on this key do not move to it\. To keep this\n {2}key and its memories, pay with the card link above\.\n/;
   const mock = startMock({ checkoutUrl: HOSTED_URL });
   await new Promise<void>((r) => mock.server.listen(0, "127.0.0.1", () => r()));
   const dirs: string[] = [];

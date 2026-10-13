@@ -470,6 +470,54 @@ test('after a join has finished, a rate limit on the onboard is reported as itse
   );
 });
 
+test('the join finishes by itself: the first memory call after approval works with no second saihm_join', async () => {
+  let grant = false;
+  const seen: string[] = [];
+  const m = await listen((route, body, res) => {
+    seen.push(route);
+    const send = (s: number, b: unknown) => void res.writeHead(s, { 'content-type': 'application/json' }).end(JSON.stringify(b));
+    if (route === 'GET /api/onboard/challenge') return send(200, { nonce: '77'.repeat(32) });
+    if (route === 'POST /api/free-onboard/start')
+      return send(200, { flowId: 'flow-7', userCode: 'SELF-7777', verificationUri: 'https://device.test/activate', expiresIn: 900, interval: 2 });
+    if (route === 'POST /api/free-onboard/claim') {
+      const pubkey = (JSON.parse(body) as { pubkey?: string }).pubkey ?? '';
+      return send(200, grant ? { status: 'granted', agentIdHash: 'cd'.repeat(32), pubkey } : { status: 'pending' });
+    }
+    if (route === 'POST /api/onboard') return send(201, { jwt: jwt() });
+    if (route === 'POST /mcp') return send(200, []);
+    return send(404, { error: 'not_found' });
+  });
+  const home = mkdtempSync(join(tmpdir(), 'saihm-oberr-'));
+  const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
+  try {
+    const started = await d.call('saihm_join', { newIdentity: true });
+    assert.match(started.text, /SELF-7777/, started.text);
+    // The steps no longer ask for a second join.
+    assert.match(started.text, /the join finishes by itself/, started.text);
+    assert.doesNotMatch(started.text, /"Join SAIHM" again/, started.text);
+    // Still waiting: a memory call answers with the steps, after a bounded wait, and reaches nothing.
+    const t0 = Date.now();
+    const waiting = await d.call('saihm_recall', {});
+    assert.match(waiting.text, /^SAIHM memory is not active yet/, waiting.text);
+    assert.ok(Date.now() - t0 < 16_000, `bounded wait: ${Date.now() - t0} ms`);
+    assert.equal(seen.filter((r) => r === 'POST /mcp').length, 0);
+    // Approved: the very next memory call works. No saihm_join between.
+    grant = true;
+    const joinsBefore = seen.filter((r) => r === 'POST /api/free-onboard/start').length;
+    const recall = await d.call('saihm_recall', {});
+    assert.equal(recall.isError, false, recall.text);
+    assert.doesNotMatch(recall.text, /not active yet/, recall.text);
+    assert.ok(seen.includes('POST /mcp'), 'the memory call reached the endpoint');
+    assert.equal(seen.filter((r) => r === 'POST /api/free-onboard/start').length, joinsBefore, 'no second join started');
+    // saihm_join called again afterwards only reports the result.
+    assert.match((await d.call('saihm_join', {})).text, /You're in/);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => m.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('a key from a failed first join that was granted after all: on the retried join, the memory tools work', async () => {
   let starts = 0;
   const m = await listen((route, _body, res) => {

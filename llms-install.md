@@ -24,8 +24,10 @@ the bootstrap tool that answers "Join SAIHM": on by default, removed by
 The server is local (stdio), starts with `npx`, and needs Node.js 20 or later.
 Write the entry in the host's own format, and merge it into what is there rather
 than overwriting it. Per host (from each provider's documentation;
-`README.md` has a ready block for each; each vendor's configuration is presented
-as tested, but is subject to change at the vendor's discretion):
+`README.md` has a ready block for each; the configurations for Claude Code, Gemini
+CLI and the OpenAI Agents SDK are presented as tested, the others are documented from
+each vendor's own documentation, and every one is subject to change at the vendor's
+discretion):
 
 - **Claude Code:** `claude mcp add --env SAIHM_ENDPOINT_URL=https://saihm.net/mcp --transport stdio --scope user saihm -- npx -y @saihm/mcp-server-pro`.
   If the first start times out, set `MCP_TIMEOUT=60000` in the environment Claude
@@ -42,8 +44,8 @@ as tested, but is subject to change at the vendor's discretion):
   `gemini mcp list` check waits only a few seconds, so on the first start, while
   `npx` downloads, it can show the server disconnected; check again.
   Personal Google accounts are no longer served in the Gemini CLI (since
-  2026-06-18); it needs a Gemini API key or a Gemini Code Assist Standard or
-  Enterprise licence.
+  2026-06-18); as of October 2026 it needs a Gemini API key or a Gemini Code
+  Assist Standard or Enterprise licence.
 - **Antigravity CLI:** `~/.gemini/config/mcp_config.json` (or a project's
   `.agents/mcp_config.json`), the entry below without `timeout`. Check with
   `/mcp` inside the CLI.
@@ -97,9 +99,9 @@ config file is not valid JSON (a broken `~/.claude.json` may then be replaced by
 without the servers, and the original kept under `~/.claude/backups/`: fix that copy and
 put it back); `python3 -m json.tool <file> > /dev/null && echo valid` checks a file
 without printing it; where Python is not installed, Node.js does the same:
-`node -e "try{JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));console.log('valid')}catch{console.log('not valid');process.exit(1)}" <file>`
-(keep the `try`: Node's own parse error quotes part of the file) (on Windows, in Command Prompt: `py -m json.tool <file> > NUL && echo valid`, writing
-`"%USERPROFILE%\.claude.json"` for `~/.claude.json`). Never print a config file: it can hold other
+`node -e "let t;try{t=require('fs').readFileSync(process.argv[1],'utf8')}catch{console.log('file not found or not readable');process.exit(1)}try{JSON.parse(t);console.log('valid')}catch{console.log('not valid');process.exit(1)}" <file>`
+(keep the `try`: Node's own parse error quotes part of the file). On Windows, in Command Prompt: `py -m json.tool <file> > NUL && echo valid`, writing
+`"%USERPROFILE%\.claude.json"` for `~/.claude.json`. Never print a config file: it can hold other
 servers' credentials, and your transcript keeps what you print.
 
 Do **not** ask the user for an API key, token, or master secret at this step.
@@ -165,7 +167,8 @@ Three things to tell the user, in your own words:
 
 3. **A second computer, or a hosted agent.** Offer sharing first: a separate
    identity on the second machine plus `saihm_share` (which takes an optional
-   `expiryEpoch`) keeps work and personal apart, and a share can be revoked where
+   `expiryEpoch` in whole hours since the UNIX epoch, e.g. `498192` for
+   2026-11-01 00:00 UTC) keeps work and personal apart, and a share can be revoked where
    a copied key cannot. If they want the SAME memory there, have them run
    `npx -y @saihm/mcp-server-pro export-identity` on the machine that holds the
    key, with the same `SAIHM_*` settings their MCP client uses there (on a paid
@@ -192,8 +195,11 @@ the user write the value; do not ask them to read it out to you. Full option
 table: see `REFERENCE.md`.
 
 Prices are on https://saihm.net/pricing. The `upgrade` command prints a card
-checkout link, which goes with `SAIHM_PAYMENT_METHOD=stripe`; stablecoin is paid
-on the website's join page, https://saihm.net/join, and goes with `stablecoin`.
+checkout link, which goes with `SAIHM_PAYMENT_METHOD=stripe` and keeps the user's
+key and memories. Stablecoin is paid on the website's join page,
+https://saihm.net/join, and goes with `stablecoin`. Paying there starts a new
+identity with its own key; the memories on a key the user already has do not move
+to it. To upgrade an existing key, the user pays with the card link.
 
 ## Troubleshooting
 
@@ -201,5 +207,5 @@ on the website's join page, https://saihm.net/join, and goes with `stablecoin`.
 | --- | --- |
 | No tools appear, no error | Start-up setting missing or too low, or the config file is not valid JSON — see step 1 |
 | Tools appear, calls fail | `SAIHM_ENDPOINT_URL` unreachable |
-| Memory tools say the join is waiting for approval | The user has not approved yet: they open the link, sign in, enter the code and approve; then call `saihm_join` again |
+| Memory tools say the join is waiting for approval | The user has not approved yet. They open the link, sign in, enter the code and approve; the join then finishes by itself and the next memory call works, with no second `saihm_join` |
 | Tool calls report no identity | New user: `saihm_join` not yet run. Second machine or hosted session: `SAIHM_IDENTITY` and its passphrase not set there (point 3) |

@@ -2043,7 +2043,7 @@ export interface ShareGrant {
   recipientPinnedAgentIdHashHex: string;
   /** Sharing scope; defaults to `"read"`. */
   scope?: 'read' | 'write' | 'readwrite';
-  /** Optional expiry as a UNIX-epoch count; omit / null for no time bound. */
+  /** Optional expiry in whole HOURS since the UNIX epoch (not seconds); omit / null for no time bound. */
   expiryEpoch?: bigint | null;
 }
 
@@ -2161,6 +2161,14 @@ export interface FreeEntitlementOpts {
    * redirect URI, no browser automation, works from a CLI / MCP host.
    */
   onPrompt: (prompt: FreeDevicePrompt) => void;
+  /**
+   * Invoked as each claim poll is SENT, and again as its answer leaves the flow still waiting (pending, or a nonce to
+   * re-mint). Lets a caller tell when a poll that began after a given moment has been answered, so a memory call made
+   * just after the human approves can wait for the poll that sees the approval. Optional; nothing else depends on it.
+   */
+  onClaimSent?: () => void;
+  /** See {@link FreeEntitlementOpts.onClaimSent}. */
+  onClaimAnswered?: () => void;
   /** Overall wall-clock budget (ms) to wait for authorization. Defaults to the flow's `expiresIn`. */
   timeoutMs?: number;
   /**
@@ -4543,6 +4551,7 @@ export class SaihmProClient {
       let refresh = false;
       let terminal: SaihmEndpointError | undefined;
       try {
+        opts.onClaimSent?.();
         const claim = await this.onboardFetch<{
           status?: unknown;
           agentIdHash?: unknown;
@@ -4644,6 +4653,7 @@ export class SaihmProClient {
         }
       }
       if (terminal) throw terminal;
+      opts.onClaimAnswered?.();
       if (refresh) {
         nonce = await this.fetchChallengeNonce(base);
         signature = toHex(

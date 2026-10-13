@@ -1408,6 +1408,8 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       SNAPSHOT_RENDER_LIMIT: 16,
       // 0.14.0: a share listing page's pointer lines rendered as text; the page stays whole in structuredContent.
       SHARES_RENDER_LIMIT: 16,
+      // 0.14.1: the longest a memory tool waits on a join that is waiting for approval.
+      JOIN_SETTLE_MAX_MS: 15_000,
     },
   };
   // The module set is DERIVED from `src/`, not listed here, and that is this test's THIRD correction

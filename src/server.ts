@@ -662,6 +662,7 @@ server.registerTool(
   },
   async ({ content, cellId, warmStart, coversThrough, token }) => {
     try {
+      await settleJoin();
       if (warmStart !== undefined || coversThrough !== undefined || token !== undefined) {
         // One mode per call: a warm-start put takes coversThrough and token, and nothing that writes a memory.
         if (warmStart !== 'put') throw warmStartInvalid('coversThrough and token go with warmStart "put".');
@@ -891,6 +892,7 @@ server.registerTool(
   },
   async ({ query, sharerPinnedAgentIdHashHex, sharerRecord, cellId, shareEntries, listOnly, sharesOnly, after, warmStart, token }) => {
     try {
+      await settleJoin();
       // Warm start travels alone and is decided first, so it never falls through to a read of any memory.
       if (warmStart !== undefined || token !== undefined) {
         if (warmStart === undefined) throw warmStartInvalid('token goes with warmStart "latest" or "list".');
@@ -1455,6 +1457,7 @@ server.registerTool(
   },
   async ({ id, warmStart, snapshotId, token }) => {
     try {
+      await settleJoin();
       if (warmStart !== undefined || snapshotId !== undefined || token !== undefined) {
         // One mode per call: a warm-start delete takes snapshotId and token, and never erases a memory.
         if (warmStart !== 'delete') throw warmStartInvalid('snapshotId and token go with warmStart "delete".');
@@ -1614,6 +1617,7 @@ server.registerTool(
   },
   async () => {
     try {
+      await settleJoin();
       const client = getClient();
       const { value: d, notes } = await withAnswerNotes(() => client.status());
       const { timing, timingMalformed } = timingOf(notes, 'saihm_status');
@@ -1716,8 +1720,8 @@ server.registerTool(
         .string()
         .describe("The grantee's agentIdHash (hex), pinned out-of-band"),
       scope: optionalChoice(['read', 'write', 'readwrite']).describe('Access scope (blank = read)'),
-      expiryEpoch: optionalPattern(/^[0-9]+$/, 'expiryEpoch must be a decimal UNIX-epoch count').describe(
-        'Optional expiry as a UNIX-epoch count (decimal string); blank = no expiry',
+      expiryEpoch: optionalPattern(/^[0-9]+$/, 'expiryEpoch must be a decimal count of whole hours since the UNIX epoch').describe(
+        'Optional expiry in whole HOURS since the UNIX epoch (decimal string), not seconds: floor(unix_ms / 3600000). Example: "498192" is 2026-11-01 00:00 UTC. Blank = no expiry',
       ),
     },
     annotations: {
@@ -1736,6 +1740,7 @@ server.registerTool(
     expiryEpoch,
   }) => {
     try {
+      await settleJoin();
       const client = getClient();
       await client.share({
         cellId,
@@ -1782,6 +1787,7 @@ server.registerTool(
   },
   async ({ cellId, recipientHex }) => {
     try {
+      await settleJoin();
       const r = await getClient().revokeShare(cellId, recipientHex);
       return ok(
         // Cell and recipient are the agent's own arguments, for the reason given on `saihm_share`;
@@ -1819,6 +1825,7 @@ server.registerTool(
   },
   async ({ scope, paramKey, proposedValue }) => {
     try {
+      await settleJoin();
       await getClient().governancePropose({
         scope,
         paramKey: paramKey ?? null,
@@ -1851,6 +1858,7 @@ server.registerTool(
   },
   async ({ proposalId, approve }) => {
     try {
+      await settleJoin();
       await getClient().governanceVote({ proposalId, approve });
       return ok('VOTED');
     } catch (e) {
@@ -1902,6 +1910,9 @@ interface JoinState {
   createdKey: boolean;
   /** The endpoint has refused this identity once during this join for having no free memory yet. */
   refused?: boolean;
+  /** Claim polls sent, and answered with the flow still waiting. See {@link settleJoin}. */
+  claimsSent: number;
+  claimsAnswered: number;
 }
 let joinState: JoinState | null = null;
 
@@ -1911,6 +1922,26 @@ async function waitForJoinSignal(ms: number): Promise<void> {
   while (Date.now() < deadline) {
     if (!joinState || joinState.prompt || joinState.result || joinState.error) return;
     await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/** Longest a memory tool waits on a join that is waiting for approval. Covers two polls at the default cadence. */
+const JOIN_SETTLE_MAX_MS = 15_000;
+
+/**
+ * The join finishes by itself: the background flow keeps polling after saihm_join returns, and on approval the memory
+ * tools use the joined client. A memory call that arrives while the join still waits gives that flow one poll begun
+ * AFTER the call to see an approval the human has just given, so the first memory call after approving works, with no
+ * second saihm_join. Waits only where getClient() would otherwise answer "waiting for approval" (the same condition),
+ * and only once the human has the steps. Bounded; on timeout the call answers as before.
+ */
+async function settleJoin(): Promise<void> {
+  const s = joinState;
+  if (!s?.running || !s.prompt || !(s.createdKey || s.refused === true)) return;
+  const target = s.claimsSent + 1;
+  const deadline = Date.now() + JOIN_SETTLE_MAX_MS;
+  while (joinState === s && s.running && s.claimsAnswered < target && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
   }
 }
 
@@ -1955,7 +1986,7 @@ function joinPendingText(s: JoinState): string {
     'To activate your free SAIHM memory, in a browser:',
     `  1. open   ${safeField(p.verificationUri, MAX_JOIN_FIELD_CHARS)}`,
     `  2. enter  ${safeScalar(p.userCode)}`,
-    `The code expires in about ${mins} min. Approve it, then ask me to "Join SAIHM" again and I will finish.`,
+    `The code expires in about ${mins} min. Once you approve it, the join finishes by itself and your memory tools work.`,
     keyNote,
   ].join('\n');
 }
@@ -1994,7 +2025,7 @@ if (selfJoinEnabled()) {
     {
       title: 'Join SAIHM (activate free memory)',
       description:
-        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory: first ask whether they already have a SAIHM identity (from another machine or an earlier session) - if so, do not join; they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Pass newIdentity: true once they confirm they want a new one here. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, call saihm_join again to finish; the memory tools then work. No payment.',
+        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory: first ask whether they already have a SAIHM identity (from another machine or an earlier session) - if so, do not join; they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Pass newIdentity: true once they confirm they want a new one here. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, the join finishes by itself and the memory tools work; there is no need to call saihm_join again. No payment.',
       inputSchema: {
         newIdentity: optionalInput(z.boolean()).describe(
           'true once the user confirms they have no SAIHM identity to bring here and want a new, empty memory',
@@ -2055,12 +2086,18 @@ if (selfJoinEnabled()) {
         // construction only one background runs at a time, but this survives future refactors).
         // Only a key THIS join created is known to hold no memory. One left by an earlier join, here or in another session,
         // may have been granted even when that join's answer was lost, so the memory tools ask the endpoint once.
-        const s: JoinState = { running: true, keyPath, createdKey: created };
+        const s: JoinState = { running: true, keyPath, createdKey: created, claimsSent: 0, claimsAnswered: 0 };
         joinState = s;
         void jc
           .acquireFreeEntitlement({
             onPrompt: (p) => {
               if (joinState === s) s.prompt = p;
+            },
+            onClaimSent: () => {
+              s.claimsSent += 1;
+            },
+            onClaimAnswered: () => {
+              s.claimsAnswered = s.claimsSent;
             },
           })
           .then((res) => {
@@ -2202,8 +2239,10 @@ function checkoutUrlBlock(fenced: string, savedTo: string): string[] {
 }
 
 /**
- * The checkout link this client prints is card checkout. A user whose payment method is stablecoin pays on the website's
- * join page instead, so they are told so beside the link. Read as join and upgrade read it: SAIHM_PAYMENT_METHOD, else
+ * The checkout link this client prints is card checkout. Stablecoin is paid only on the website's join page, and that
+ * page creates a NEW identity in the browser: it never takes this key, so paying there leaves this key and its memories
+ * where they are. A user whose payment method is stablecoin is told exactly that beside the link, and that the card
+ * link is how this key is subscribed or upgraded. Read as join and upgrade read it: SAIHM_PAYMENT_METHOD, else
  * what an imported identity carries.
  */
 function stablecoinCheckoutNote(): string[] {
@@ -2217,8 +2256,9 @@ function stablecoinCheckoutNote(): string[] {
   }
   if ((method ?? '').trim().toLowerCase() !== 'stablecoin') return [];
   return [
-    '  Your payment method is stablecoin. The link above is card checkout; stablecoin is paid on the',
-    '  join page instead: https://saihm.net/join',
+    '  Your payment method is stablecoin. Stablecoin is paid on https://saihm.net/join, and paying there',
+    '  starts a new identity with its own key. The memories on this key do not move to it. To keep this',
+    '  key and its memories, pay with the card link above.',
     '',
   ];
 }

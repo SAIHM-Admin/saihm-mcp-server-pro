@@ -37,8 +37,10 @@ join shows. Keep the key file all the same: a later join on this machine uses it
 
 ## Client setup in detail
 
-Each vendor's configuration is presented as tested, but is subject to change at the
-vendor's discretion.
+The configurations for Claude Code, Gemini CLI and the OpenAI Agents SDK are presented
+as tested (see [which clients are checked](#which-clients-are-checked)); the others are
+documented from each vendor's own documentation. Every configuration is subject to change
+at the vendor's discretion.
 
 Before you paste:
 
@@ -123,8 +125,8 @@ because that check waits only a few seconds; run it again.
 
 Since 2026-06-18, Google no longer serves personal Google accounts in the Gemini CLI:
 signing in with one answers "This client is no longer supported for Gemini Code Assist
-for individuals". It still works with a Gemini API key, or with a Gemini Code Assist
-Standard or Enterprise licence.
+for individuals". As of October 2026 it still works with a Gemini API key, or with a
+Gemini Code Assist Standard or Enterprise licence.
 
 ### Antigravity CLI (Google)
 
@@ -304,7 +306,7 @@ session.
 |---|---|
 | No SAIHM tools appear, and no error anywhere | The client stopped waiting before `npx` finished its first download: keep the start-up setting in [your client's block](./README.md#add-saihm-to-your-ai-client). Then check the file is valid JSON |
 | Every other tool vanished too | The settings file is no longer valid JSON: a trailing comma, or non-breaking spaces (U+00A0) from a copy and paste. Claude Code may replace a broken `~/.claude.json` with a fresh one and keep the original under `~/.claude/backups/`: fix that copy and put it back |
-| The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve; then say *"Join SAIHM"* again |
+| The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve. The join then finishes by itself, and the next memory call works |
 | Tools appear but every call fails | `SAIHM_ENDPOINT_URL` unreachable |
 | Every call fails behind a proxy | In a hosted environment, allow the endpoint's host in its network settings; otherwise check `HTTPS_PROXY` (an `http://` URL) and `NO_PROXY`. A network that inspects TLS needs its CA certificate, from its administrator, in a file named by `NODE_EXTRA_CA_CERTS` |
 | "No SAIHM identity is configured" | Self-join is off (`SAIHM_SELF_JOIN=0`) and no identity is set here: set one, or remove that setting to join |
@@ -394,7 +396,7 @@ the rest have working defaults.
 | `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600), where per-restart bookkeeping is kept, and where the erasure feed is written unless `SAIHM_ERASURE_FEED_DIR` overrides it. Defaults to `~/.saihm`. Give a full path: a JSON config does not expand `~`, so `~/.saihm` there is a relative path, and a relative path (or one that begins with a space) is refused at start. Versions before 0.13.0 used it, under the server's working directory: a key made there is still there, so move it into the full path you set. |
 | `SAIHM_AUTH_HEADER` | no | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended) — the client mints and refreshes its own token, so there is nothing to paste or re-paste. |
 | `SAIHM_TIER` | paid self-onboard; any self-onboard with `SAIHM_SELF_JOIN=0` | Plan label recorded in encrypted metadata (`FREE`, `PRO`, …). Defaults to `FREE` while self-join is on (the default); set it for a paid plan, and with self-join off for every plan, `FREE` included. An `export-identity` token carries its own, which a non-empty value here overrides. With self-join off and a static `SAIHM_AUTH_HEADER`, resolved via `status()`. |
-| `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan: `stripe` for the card checkout that `upgrade` prints, `stablecoin` for a plan paid on [the join page](https://saihm.net/join). **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. An identity token carries it; a non-empty value here overrides the token's. |
+| `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan: `stripe` for the card checkout that `upgrade` prints, which keeps the key you have and its memories; `stablecoin` for a plan paid on [the join page](https://saihm.net/join). Paying there starts a new identity with its own key, and the memories on a key you already have do not move to it, so upgrade an existing key with the card link. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. An identity token carries it; a non-empty value here overrides the token's. |
 | `SAIHM_SEQ_STATE_PATH` | no | Overrides where the anti-rollback bookkeeping is written. Running as an MCP server this is **on by default** at `$SAIHM_HOME/seq.<id>.json`; set it only to relocate it. The default location is ours to manage: if it can't be written, the tally stays in memory for the session and `status` says so. A location **you** set is yours: if it can't be written, calls fail and name the path, so a safeguard you asked for never goes quiet without telling you. `status` reports this as `seq-state=…` followed by `rollback-guard=persisting` (writes still work, so the next one rewrites the file) or `memory-only-this-run` (it retries at the next restart). Either way, if the file couldn't be READ at startup the safeguard starts from scratch and rebuilds as each memory is next read — so an older copy of a memory would not be caught during that window. At the default location that window is about accidental corruption rather than an attacker: writing to that file takes the same access that reads the identity key sitting beside it. Somewhere you relocate it to, that no longer follows — give it the protection you give `$SAIHM_HOME`. Give a full path: a relative one resolves against the server's working directory. |
 | `SAIHM_RECALL_CACHE` | no | Controls the recall cache: the memories this device has already opened, kept so that recall asks the service only for new ones. **On by default** when your key is the self-join identity file in `SAIHM_HOME`; set to `0` to keep no local copy. The copy is **unencrypted** in a file readable only by your user (mode 600), beside the key; `forget` removes a memory from it, and a memory erased from another device leaves it at the next recall. |
 | `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. **With a cache, a recall fetches only what has changed since the last one; without a cache it fetches every memory, every time** — measured against about 208 memories on the hosted endpoint: a warm recall took 24 ms with a cache and 818 ms without, and because the cache is a file it survives a restart — the FIRST recall of a new process took 114-115 ms with a populated cache against 1,022-1,094 ms without. Only the very first run, which builds the cache, pays the full fetch. The cache defaults ON only for an identity that boots from the key file in `$SAIHM_HOME` (that installation already keeps its key and sequence marks there). For any other key source — including `SAIHM_MASTER_SECRET_FILE` pointing elsewhere, or an inline secret — it is OFF unless you set this, and the client says so once on its first recall. **The file holds your memories as plaintext at rest**, which is why it is not simply on for everyone: it is your decision. `SAIHM_RECALL_CACHE=0` turns it off in every case, an explicit path included, and silences the notice. Give a full path: a relative one resolves against the server's working directory. |

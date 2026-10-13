@@ -17,18 +17,28 @@ can now save and recall memories. No tool added or removed.
   had to send `warmStart: "put"`, and every remember was refused. Warm-start calls
   that name a mode work as before, and a strict host can make them too: a
   switch sent as `false` beside `warmStart` counts as left out.
+- **`expiryEpoch` on `saihm_share` names its unit.** The expiry is a count of
+  whole hours since the UNIX epoch, and the tool description now says so, with
+  an example. A count in seconds would set an expiry far in the future.
 
 ### Changed
 
 - **Stablecoin is paid on the website.** With `SAIHM_PAYMENT_METHOD=stablecoin`,
-  `upgrade` and `join` say that the link they print is card checkout and that
-  stablecoin is paid on https://saihm.net/join. The card link is still printed.
+  `upgrade` and `join` say that stablecoin is paid on https://saihm.net/join, that
+  paying there starts a new identity with its own key whose memories start empty,
+  and that the card link they print is the way to keep this key and its memories.
+- **The join finishes by itself.** After you approve the sign-in, the next memory
+  call works; nobody has to say *"Join SAIHM"* a second time. A memory call made
+  just after approving waits a few seconds for the join to see it.
 - **Setup notes.** `npx -y @saihm/mcp-server-pro --version` downloads the
   package, prints its version and exits: the README now gives it as the
   first-start tip, in place of running the server in a terminal. New: a setup
   block for Antigravity CLI (Google), a note that the Gemini CLI no longer serves
-  personal Google accounts, a link to the pricing page, where stablecoin is paid,
-  and a Node.js check for a JSON settings file in `llms-install.md`.
+  personal Google accounts, a link to the pricing page and one to the page where
+  stablecoin is paid, and a Node.js check for a JSON settings file in
+  `llms-install.md`, which says when the file is missing rather than calling it
+  not valid. The note on vendor configurations says which ones are tested
+  before each release and which are documented from the vendor's own docs.
 
 ## [0.14.0] — 2026-10-10
 
