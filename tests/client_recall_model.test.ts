@@ -157,7 +157,8 @@ class World {
   goneSince = new Set<string>(); // gone at some point since A's process last saw it live (or since it started)
   recordable = new Set<string>(); // since then, A's process was shown or told it was erased
   feedNamed = new Set<string>(); // erased by this device: kept out of the copy for the rest of the run
-  synced = false;
+  /** a memory saved as new gets its id from the client: the sequence's name for it, to that id */
+  alias = new Map<string, string>();
   bad: string[] = [];
   a1 = 0;
   local = 0;
@@ -179,7 +180,6 @@ class World {
     this.A = new SaihmProClient(this.url, 'Bearer test', MASTER, this.opts());
     this.obs.clear();
     this.recordable.clear();
-    this.synced = false;
     this.goneSince = new Set([...this.store.history.keys()].filter((id) => !this.store.s1.has(id)));
   }
   see(id: string, v: Obs | undefined): void {
@@ -207,9 +207,10 @@ async function bWrite(w: World, id: string, text: string): Promise<string> {
 
 type Op =
   | { k: 'recall' | 'restart' | 'aDrop' }
-  | { k: 'edit' | 'create' | 'one' | 'share' | 'bEdit' | 'bErase' | 'bRecreate' | 'aForget' | 'a2Forget' | 'fault'; id: string };
+  | { k: 'edit' | 'create' | 'createNew' | 'one' | 'share' | 'bEdit' | 'bErase' | 'bRecreate' | 'aForget' | 'a2Forget' | 'fault'; id: string };
 
-async function apply(w: World, op: Op, n: number): Promise<string> {
+async function apply(w: World, op0: Op, n: number): Promise<string> {
+  const op = 'id' in op0 && w.alias.has(op0.id) ? ({ ...op0, id: w.alias.get(op0.id)! } as Op) : op0;
   process.env.SAIHM_ERASURE_FEED_DIR = w.feedDir;
   const st = w.store;
   const before = st.log.length;
@@ -307,6 +308,18 @@ async function apply(w: World, op: Op, n: number): Promise<string> {
       }
       break;
     }
+    case 'createNew': {
+      // saved as a new memory (no cellId): the client draws the id, and the memory is seen with no read
+      try {
+        const r = await w.A.remember(`#${n} new`);
+        w.alias.set(op.id, r.cellId);
+        w.see(r.cellId, verOf(st.s1.get(r.cellId)));
+        out = 'stored';
+      } catch (e) {
+        out = outcome(e);
+      }
+      break;
+    }
     case 'restart':
       w.restart();
       out = 'restarted';
@@ -352,7 +365,7 @@ async function apply(w: World, op: Op, n: number): Promise<string> {
       try {
         await new SaihmProClient(w.url, 'Bearer test', MASTER, w.opts()).forget(op.id);
         w.feedNamed.add(op.id);
-        if (w.synced) w.recordable.add(op.id);
+        w.recordable.add(op.id); // the feed's baseline is taken when the process starts
         out = 'A2 forgot';
       } catch (e) {
         out = outcome(e);
@@ -364,7 +377,6 @@ async function apply(w: World, op: Op, n: number): Promise<string> {
       out = 'fault';
       break;
   }
-  if (['recall', 'edit', 'create', 'one', 'share', 'aForget'].includes(op.k) && st.log.length > before) w.synced = true;
   for (const id of st.history.keys()) if (!st.s1.has(id)) w.goneSince.add(id);
   return out!;
 }
@@ -400,7 +412,12 @@ function genOps(seed: number, len: number, mix: string): Op[] {
       else if (m < 0.5) ops.push({ k: 'bErase', id }, { k: 'recall' }, { k: 'edit', id }, { k: 'bRecreate', id }, { k: 'recall' }, { k: 'edit', id });
       else if (m < 0.65) ops.push({ k: 'bErase', id }, { k: r() < 0.5 ? 'one' : 'share', id }, { k: 'edit', id }, { k: 'bRecreate', id }, { k: 'edit', id });
       else if (m < 0.8) ops.push({ k: 'restart' }, { k: 'bErase', id }, { k: 'edit', id }, { k: 'edit', id }, { k: 'recall' });
-      else ops.push({ k: 'aForget', id }, { k: 'bRecreate', id }, { k: 'one', id }, { k: 'edit', id }, { k: 'restart' }, { k: 'edit', id });
+      else if (m < 0.92) ops.push({ k: 'aForget', id }, { k: 'bRecreate', id }, { k: 'one', id }, { k: 'edit', id }, { k: 'restart' }, { k: 'edit', id });
+      else {
+        // R17-M1: a session's first call saves a new memory, another session here forgets it, this one edits it
+        const f = fresh();
+        ops.push({ k: 'restart' }, { k: 'createNew', id: f }, { k: 'a2Forget', id: f }, { k: 'edit', id: f }, { k: 'recall' });
+      }
       continue;
     }
     const x = r();

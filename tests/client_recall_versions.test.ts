@@ -79,6 +79,8 @@ interface Hosted {
   rowsFault?: (kind: 'delta' | 'all', rows: unknown[]) => unknown[];
   /** Replaces the answer to a remember, before anything is stored. */
   rememberFault?: () => Answer | undefined;
+  /** Replaces the answer to a forget, before anything is erased. */
+  forgetFault?: () => Answer | undefined;
   /** Awaited once a remember is stored and before its answer is sent. */
   holdRemember?: () => Promise<void>;
   /** Awaited once a recall-all answer is computed and before it is sent. */
@@ -138,6 +140,8 @@ async function hosted(): Promise<Hosted> {
     }
     if (method === 'saihm_share') return { status: 200, body: { cellId: params.cellId, shared: true } };
     if (method === 'saihm_forget') {
+      const faulted = h.forgetFault?.();
+      if (faulted) return faulted;
       const id = params.id as string;
       store.delete(id);
       return { status: 200, body: { cellId: id, shardId: 's', complete: true, destructionAnchor: 'anchor-1', sharesPurged: 0, steps: [], epoch: '1' } };
@@ -2369,6 +2373,61 @@ describe('PC-RECALL-VERSIONS R16: an edit of a memory this device knows erased i
       const r = await measured(h, () => attempt(A2, 'roster v1 + added', id));
       assert.equal(failText(r.value), refusedHere(ERASED), 'an answer to a request sent before the record ends nothing');
       assert.equal(await truth(h, id), undefined, 'the erasure stands');
+    } finally {
+      await h.close();
+    }
+  });
+
+  for (const copy of ['on', 'off'] as const) {
+    it(`copy ${copy}: a session whose first call saves a new memory, erased by another session here, refuses an edit of it`, async () => {
+      const h = await hosted();
+      try {
+        const path = copy === 'on' ? copyPath('A') : undefined;
+        const A = computer(h, path);
+        const { cellId: id } = await A.remember('a note saved as new, the first call of this session');
+        await computer(h, path).forget(id); // another session of this identity on this device: its forget is on the feed
+        const r = await measured(h, () => attempt(A, 'a note saved as new + added', id));
+        assert.equal(failText(r.value), refusedHere(ERASED), 'the feed was read when the session started');
+        assert.deepEqual([r.calls, r.charged], [0, 0]);
+        assert.equal(await truth(h, id), undefined, 'the erasure stands');
+      } finally {
+        await h.close();
+      }
+    });
+  }
+
+  it("a share whose read was on its way when this process erased the memory leaves it known erased", async () => {
+    const h = await hosted();
+    try {
+      const A = computer(h, undefined);
+      const id = newId();
+      await A.remember('roles v1', { cellId: id });
+      const hold = holdNextRead(h);
+      const shared = A.share({ cellId: id, ...recipientOf(97) });
+      await hold.arrived; // the share's read is computed: the memory as it was
+      await withEnv('SAIHM_ERASURE_FEED', '0', () => A.forget(id));
+      hold.release();
+      await shared;
+      const r = await measured(h, () => attempt(A, 'roles v1 + added', id));
+      assert.equal(failText(r.value), refusedHere(ERASED), "the share's answer is older than the erasure");
+      assert.equal(await truth(h, id), undefined, 'the erasure stands');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('a forget that fails leaves the memory as it was: an edit of it is stored', async () => {
+    const h = await hosted();
+    try {
+      const A = computer(h, undefined);
+      const id = newId();
+      await A.remember('plan v1', { cellId: id });
+      h.forgetFault = () => {
+        h.forgetFault = undefined;
+        return { status: 503, body: { error: 'busy' } };
+      };
+      await assert.rejects(withEnv('SAIHM_ERASURE_FEED', '0', () => A.forget(id)), (e: unknown) => e instanceof SaihmEndpointError && e.code === 'busy');
+      assert.equal(await attempt(A, 'plan v1 + added', id), 'stored', 'nothing was erased, so nothing is known erased');
     } finally {
       await h.close();
     }

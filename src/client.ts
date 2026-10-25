@@ -3779,8 +3779,8 @@ class SeqState {
  * The memories this process knows to be erased, so that an edit of one is refused here, before anything is asked of the
  * endpoint. The endpoint keeps an erased memory's sequence number but stores a write past it, so an edit from a device
  * that had read the last version would save the memory again, without anyone being asked. A memory is known erased
- * when this process erased it, when this device's erasure feed names it in a line written since this process first
- * read it (a forget in another session here, or one made elsewhere and reported to it), or when an answer showed it
+ * when this process erased it, when this device's erasure feed names it in a line written since this process started
+ * (a forget in another session here, or one made elsewhere and reported to it), or when an answer showed it
  * gone: a read by id, a share's read, an edit's own read or the read after a refused edit answering "no such cell", or
  * a recall's complete version listing leaving it out. A recall without the listing says nothing: it leaves out a
  * memory whose stored copy could not be read, as if it were gone.
@@ -3800,7 +3800,14 @@ class GoneRecords {
   private feedRead: ReadonlyMap<string, string> | undefined;
   private readonly feedLines = new Map<string, string>();
 
-  constructor(private readonly erasureFeed?: () => ReadonlyMap<string, string>) {}
+  /**
+   * The feed's baseline is taken here, when the process starts, not at its first request: a memory this process saves
+   * as new is seen with no request that would read the feed, and an erasure of it in another session before the
+   * process's first such request would otherwise be taken for one from before the process (R17).
+   */
+  constructor(private readonly erasureFeed?: () => ReadonlyMap<string, string>) {
+    this.noteFeed();
+  }
 
   /** Taken just before a request whose answer may show a memory live. An erasure on the feed by then is noted first. */
   sent(): number {
@@ -3827,7 +3834,7 @@ class GoneRecords {
 
   /**
    * Each id the feed names in a line not noted before is known gone from now on. The lines already there when this
-   * process first reads the feed are only noted: they record erasures from before it, and since then this device may
+   * process starts are only noted: they record erasures from before it, and since then this device may
    * have read the memory saved again elsewhere, and edited it, in a session that has ended. An edit's own read, made
    * before every edit of a memory this process has not seen, tells those apart.
    */
