@@ -50,8 +50,9 @@
  *                           library caller constructing the client directly still gets nothing on
  *                           disk unless it sets this or passes `persistSeqState`.
  *   SAIHM_RECALL_CACHE_PATH path (mode 600) of the recall cache; with a cache, `recall` runs in DELTA
- *                           mode — it fetches only cells not already cached, cutting a recall from
- *                           O(all cells) to O(new). Holds plaintext at rest. The MCP server's boot
+ *                           mode — it reads the version listing, then fetches only cells not cached
+ *                           at their listed version, cutting a recall from O(all cells) to O(new or
+ *                           changed). Holds plaintext at rest. The MCP server's boot
  *                           path turns the cache ON by default at `dirname(defaultIdentityPath())/
  *                           recall.<id>.json` when this identity boots from that default key file;
  *                           set this to relocate it or to enable it for any other identity source.
@@ -1719,6 +1720,143 @@ export interface VersionListing {
 
 /** The most entries one page may hold; endpoints send far fewer, and a page above this is refused, never cut. */
 export const MAX_LISTING_PAGE = 4_096;
+/**
+ * The most listing pages a recall with the copy on reads; a listing that runs past it fails the recall. About a million
+ * cells at the hosted page size of 1,000, far past what one copy holds.
+ */
+export const MAX_COPY_LISTING_PAGES = 1_024;
+/**
+ * How many times a recall with the copy on is run when a write made on this computer, while it was in flight, moved
+ * the copy under it. Its answer then predates that write, so it is neither applied nor answered; the recall runs again.
+ */
+export const COPY_RECALL_ATTEMPTS = 3;
+/**
+ * The error a recall with the copy on fails with when every one of its {@link COPY_RECALL_ATTEMPTS} was overtaken. No
+ * count: each try was overtaken by at least one write, so a number would be a floor read as a total. Trying again
+ * helps once the writes stop, which is all the last sentence says.
+ */
+const RECALL_INTERRUPTED =
+  'Recall stopped: your memories on this device kept changing while it was reading them. Nothing was lost. Try ' +
+  'again once they stop changing.';
+/**
+ * How the error opens when the copy could not be checked against the service; the cause's own message follows as the
+ * next sentence. It promises no retry: at a hard cap, or with a certificate this machine does not trust, trying again
+ * cannot help, and the cause says what does. "Nothing was lost" and not "nothing was changed", which right after
+ * "changes made elsewhere" read as "no changes were found".
+ */
+const COPY_CHECK_FAILED =
+  "Recall stopped: this device's copy of your memories could not be checked for changes made elsewhere, so it was " +
+  'not used. Nothing was lost.';
+
+/**
+ * Marker for an endpoint error whose message is this package's own opening, a space, and then a cause's message. It
+ * holds the opening, so the renderer fences the two apart: fenced as one message under one budget, the opening spent
+ * the room the cause needed, and a certificate this machine does not trust rendered without the warning never to turn
+ * certificate checks off (R14). A module-local symbol, like {@link PATH_BEARING}: only errors this package made carry
+ * it, and text an endpoint chose cannot.
+ */
+const OWN_OPENING = Symbol('saihm.ownOpening');
+
+/**
+ * The opening this package put before the cause in `e`'s message, while the message still begins with it; otherwise
+ * undefined. Never throws: it runs on the failure path, inside the renderer whose contract is that it never crashes.
+ */
+export function ownOpeningOf(e: SaihmEndpointError): string | undefined {
+  try {
+    const opening: unknown = (e as unknown as Record<symbol, unknown>)[OWN_OPENING];
+    return typeof opening === 'string' && typeof e.message === 'string' && e.message.startsWith(`${opening} `)
+      ? opening
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The message of the cause an error carries after this package's opening (see {@link ownOpeningOf}), or the error's
+ * own message when it carries none. For a reader that tells causes apart by how their message begins.
+ */
+export function causeMessageOf(e: SaihmEndpointError): string {
+  const opening = ownOpeningOf(e);
+  return opening === undefined ? e.message : e.message.slice(opening.length + 1);
+}
+
+/**
+ * An endpoint error with the cause's status and code whose message is `opening`, this package's own text, followed by
+ * the cause's message as its own sentence (a lower-case first letter made a capital). Marked (see
+ * {@link OWN_OPENING}), so the renderer gives the cause the budget it has alone. The cause must be one that renders at
+ * the message budget alone - an endpoint error, or a throw that is not path-bearing or a configuration error - and both
+ * callers below hand it only those.
+ */
+function withOpening(opening: string, cause: unknown, otherwise: string): SaihmEndpointError {
+  const e = cause instanceof SaihmEndpointError ? cause : undefined;
+  const why = cause instanceof Error ? String(cause.message) : otherwise;
+  const sentence = /^[a-z]/.test(why) ? why.charAt(0).toUpperCase() + why.slice(1) : why;
+  const err = new SaihmEndpointError(e?.status ?? 0, e?.code, `${opening} ${sentence}`);
+  Object.defineProperty(err, OWN_OPENING, { value: opening, enumerable: false });
+  return err;
+}
+
+/**
+ * The error a recall with the copy on fails with when the copy could not be checked. Nothing more is asked of the
+ * endpoint after it, so nothing more is charged. A cause here is the failure of a listing request (which reads and
+ * writes no file) or of a listing page. Exported for the render tests.
+ */
+export function copyCheckFailed(cause: unknown): SaihmEndpointError {
+  return withOpening(COPY_CHECK_FAILED, cause, 'the check failed');
+}
+
+/**
+ * What a write refused as stale says (`BLIND_STALE_SEQ`: the endpoint holds a version numbered at or past this one, so
+ * one was written there that this write did not start from). Bare, the refusal read "409 Conflict (BLIND_STALE_SEQ)"
+ * with no way forward. Which text is true depends on what is there now, and each is chosen only where it is:
+ * - `changed`: a version newer than the one this device last read or saved is there (written by another device or
+ *   session, or by this one when an answer was lost). Recalling it shows that version, after which the edit goes through.
+ * - `erased`: the memory this device had read or saved is gone: it was erased. The endpoint keeps its sequence number
+ *   and refuses a write at or below it, but stores one past it, from a device whose mark is the last version's, as the
+ *   memory again; so an edit of a memory this process knows to be erased is refused here before its write, in this
+ *   text (see `refuseIfKnownErased`). Only a new memory could keep the text.
+ * - `used`: the cellId names no memory this device ever read, and the endpoint has used it: for a memory erased since,
+ *   or one saved elsewhere just before this write. Either way only a new memory could keep the text.
+ * An erasure is deliberate, and may have been made elsewhere by the user: neither text invites saving the text again
+ * without the user's say.
+ */
+type StaleWrite = 'changed' | 'erased' | 'used';
+const STALE_EDIT =
+  'This memory has changed since this device last read or saved it, so your edit was not saved. Recall it to see ' +
+  'the newer version, then make your edit again.';
+const ERASED_EDIT =
+  'This memory was erased, so your edit was not saved. Ask the user before saving this text again as a new memory ' +
+  'without a cellId.';
+const ID_USED =
+  'This cellId was already used by a memory saved earlier, which may since have been erased, so this one was not ' +
+  'saved under it. Ask the user before saving this text as a new memory without a cellId.';
+
+/** Whether a write's failure is the endpoint's refusal of it as stale. */
+function refusedAsStale(cause: unknown): cause is SaihmEndpointError {
+  return cause instanceof SaihmEndpointError && cause.code === 'BLIND_STALE_SEQ';
+}
+
+/**
+ * A write's failure, with the remedy put first when the endpoint refused it as stale; any other failure unchanged.
+ * Exported for the render tests.
+ */
+export function staleWriteRefusal(cause: unknown, why: StaleWrite): unknown {
+  return refusedAsStale(cause)
+    ? withOpening(why === 'erased' ? ERASED_EDIT : why === 'used' ? ID_USED : STALE_EDIT, cause, '')
+    : cause;
+}
+
+/**
+ * A seq mark a recall read and has not applied. It is applied only together with the content it describes: once
+ * that content is in the copy, or is the answer. A mark ahead of what this computer holds and answers lets an edit
+ * built on the older text be stored over the newer version, where the endpoint would otherwise refuse it as stale.
+ */
+interface PendingMark {
+  readonly cellId: string;
+  readonly seq: bigint;
+  readonly commitment: string;
+}
 /** The longest cell id (and `next`) a listing may carry. */
 const MAX_LISTED_CELL_ID_CHARS = 4_096;
 const LIST_DIGITS = /^[0-9]{1,20}$/;
@@ -1727,13 +1865,16 @@ const LIST_HEX64 = /^[0-9a-f]{64}$/;
 /**
  * A version listing page, checked whole. A page that drops or alters an entry would read, once complete, as an erasure
  * of the cell left out, so any entry this client cannot read refuses the PAGE: nothing is skipped and nothing is cut.
- * An answer that is not a listing (an endpoint without the listing answers with a recall) is refused by name.
+ * The recall-all array an endpoint without the listing answers with is refused by name (`listing_unsupported`); any
+ * other answer that is not a listing is malformed.
  */
 export function versionListingFrom(r: unknown): VersionListing {
   const malformed = (what: string): never => {
     throw new SaihmEndpointError(502, 'malformed_response', `endpoint returned a malformed version listing (${what})`);
   };
-  if (Array.isArray(r) || (typeof r === 'object' && r !== null && (r as { mode?: unknown }).mode !== 'list')) {
+  // Only the recall-all array is what an endpoint without the listing answers with (it ignores `listOnly`). Any other
+  // answer that is not a listing is one this client cannot read, and a recall with the copy on fails on it.
+  if (Array.isArray(r)) {
     throw new SaihmEndpointError(
       501,
       'listing_unsupported',
@@ -1741,6 +1882,7 @@ export function versionListingFrom(r: unknown): VersionListing {
     );
   }
   if (typeof r !== 'object' || r === null) return malformed('not an object');
+  if ((r as { mode?: unknown }).mode !== 'list') return malformed('not a listing');
   const o = r as { cells?: unknown; next?: unknown; asOf?: unknown };
   const cells = o.cells;
   const next = o.next;
@@ -2027,9 +2169,11 @@ export interface RememberOpts {
    * Target an EXISTING cell to update it (a new monotonic seq is issued). Omit to create a fresh
    * cell under a random id. When you pass a `cellId` the client has no local high-water mark for
    * (e.g. after a restart with no `SAIHM_SEQ_STATE_PATH`), it first reads the current LIVE envelope
-   * to learn the server seq. Note: a cell that was previously `forget`-ten is permanently retired —
-   * the endpoint retains its sequence high-water mark for anti-resurrection, so reusing that id
-   * surfaces a typed `BLIND_STALE_SEQ` error; choose a fresh id rather than reusing a forgotten one.
+   * to learn the server seq. Note: reusing the id of a cell that was `forget`-ten is refused with a
+   * typed `BLIND_STALE_SEQ` error by this client when it knows the cell erased (this device's erasure
+   * feed names it, or a read here found it gone) and had read or saved it, and by the endpoint for a
+   * device that never saw it (the endpoint keeps the cell's sequence high-water mark). Choose a fresh
+   * id rather than reusing a forgotten one.
    */
   cellId?: string;
 }
@@ -2091,11 +2235,12 @@ export interface SaihmProClientOpts {
   ensureErasureFeedDir?: boolean;
   /**
    * Path to persist this agent's opened cells (mode 600), keyed by cellId. When set, `recall`
-   * switches to DELTA mode: it sends the cached cellIds to the endpoint and fetches only cells it
-   * does not already hold, cutting a session-start recall from O(all cells) to O(new cells). Holds
+   * switches to DELTA mode: it reads the endpoint's version listing of this identity's cells, sends
+   * as known the cached cells at their listed version, and fetches only the others (new, or changed
+   * elsewhere), cutting a session-start recall from O(all cells) to O(new or changed cells). Holds
    * plaintext at rest, so it is opt-in (unset = full recall-all every call, the prior behavior).
-   * Requires an endpoint that supports delta recall; degrades gracefully to a
-   * full recall if the endpoint does not support it.
+   * Requires an endpoint that supports the listing and delta recall; degrades to a full recall if
+   * the endpoint does not support them.
    */
   recallCachePath?: string;
   /**
@@ -2439,13 +2584,15 @@ function firstLineOf(path: string): string {
 }
 
 /**
- * The cellIds this identity's erasure feed records, re-read only when a feed file (the current one or its rotated
- * predecessor) changed. Never throws: no feed yet, an unreadable one or a misconfigured root all mean "nothing known to
- * be erased", which leaves the cache exactly as it was before this reader existed.
+ * The cellIds this identity's erasure feed records, each with a digest of the newest line naming it (so a second
+ * erasure of one id is told from the first), re-read only when a feed file (the current one or its rotated
+ * predecessor) changed: the same map is returned until then. Never throws: no feed yet, an unreadable one or a
+ * misconfigured root all mean "nothing known to be erased", which leaves the cache exactly as it was before this reader
+ * existed.
  */
-function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlySet<string> {
+function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlyMap<string, string> {
   let seen = '';
-  let ids: ReadonlySet<string> = new Set<string>();
+  let ids: ReadonlyMap<string, string> = new Map<string, string>();
   return () => {
     try {
       const file = feedPathFor(resolveFeedRoot(), agentIdHashHex);
@@ -2465,7 +2612,7 @@ function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlySet<string> 
       if (stats[1] === '-' && stats[0] === '-') throw new Error('no feed');
       const key = stats.join('|');
       if (key !== seen) {
-        const next = new Set<string>();
+        const next = new Map<string, string>();
         for (const f of files) {
           let text: string;
           try {
@@ -2476,7 +2623,8 @@ function erasedCellIdsReader(agentIdHashHex: string): () => ReadonlySet<string> 
           for (const line of text.split('\n')) {
             try {
               const r = JSON.parse(line) as { cellId?: unknown };
-              if (typeof r.cellId === 'string') next.add(r.cellId);
+              // The predecessor is read first, so the newest line naming an id is the one kept.
+              if (typeof r.cellId === 'string') next.set(r.cellId, createHash('sha256').update(line).digest('base64'));
             } catch {
               /* a torn or empty line names no cell */
             }
@@ -3048,6 +3196,18 @@ export interface QuotaNag {
   upgradeHint: string;
 }
 
+/**
+ * A sequence number written as a decimal string, or `null` if `t` is not one: digits without a leading zero, at most
+ * the wire ceiling. The rule of a persisted mark (see `SeqState.parseMark`), shared with the recall copy's entries and
+ * the version listing so all three are read alike.
+ */
+function seqFromDecimal(t: unknown): bigint | null {
+  if (typeof t !== 'string' || t.length > MAX_COUNTER_CHARS) return null;
+  if (!/^(?:0|[1-9][0-9]*)$/.test(t)) return null;
+  const n = BigInt(t);
+  return n > MAX_SEQ ? null : n;
+}
+
 // ── per-cell seq high-water store (in-memory rule from @saihm/client-pro, optional file mirror) ──
 class SeqState {
   private readonly hwm = new SeqHighWaterMark();
@@ -3079,6 +3239,14 @@ class SeqState {
    * mark survives the restart, the gate sees it, and the re-seed never happens -- so the client
    * writes at a seq the endpoint has already committed. That is the equivocating pair `stale_cell`
    * exists to detect, manufactured locally.
+   *
+   * A cell shown gone - by a recall, a read or an erasure - STAYS in this set. Leaving it would send
+   * the next edit to read the live version and write over whatever is there: a memory written again
+   * under that id after its erasure, or one a full recall left out only because its stored copy
+   * could not be read (measured: both stored over a version this process never saw, copy on or
+   * off). Kept, the edit goes at the next number after the version seen here, so the endpoint
+   * refuses it if anything was written since; `whyRefusedAsStale` then says which text is true. One
+   * this process knows to be erased is refused before its write instead (see `GoneRecords`).
    */
   private readonly observedLive = new Set<string>();
 
@@ -3190,11 +3358,7 @@ class SeqState {
    * from the live envelope, which is the state a cold client already occupies.
    */
   private static parseMark(v: unknown): bigint | null {
-    const t = typeof v === 'string' ? v : (v as { seq?: unknown })?.seq;
-    if (typeof t !== 'string' || t.length > MAX_COUNTER_CHARS) return null;
-    if (!/^(?:0|[1-9][0-9]*)$/.test(t)) return null;
-    const n = BigInt(t);
-    return n > MAX_SEQ ? null : n;
+    return seqFromDecimal(typeof v === 'string' ? v : (v as { seq?: unknown })?.seq);
   }
 
   private load(): void {
@@ -3588,7 +3752,9 @@ class SeqState {
     // `seq >= held`. `openRow` throws `stale_cell` on `env.seq < knownSeq` BEFORE it reaches here,
     // and `remember` observes only after the endpoint accepted a write at `next()`, which is
     // `current + 1`. Weaken the read-path rollback guard and this line stops being safe -- the test
-    // named for a replayed envelope below the mark is the one that says so.
+    // named for a replayed envelope below the mark is the one that says so. A third source, a cell a
+    // recall answers from the copy, is marked only at the number the copy's own authenticated version
+    // carries and the listing states, and never when a mark above it is held (`knownAtListedVersion`).
     this.observedLive.add(cellId);
     if (this.hwm.admit(this.agentIdHashHex, cellId, seq)) {
       this.cellIds.add(cellId);
@@ -3602,20 +3768,100 @@ class SeqState {
   next(cellId: string): bigint {
     return (this.current(cellId) ?? 0n) + 1n;
   }
+
+  /** The cells a mark is held for here: every one this device has read or saved, from this process or its marks file. */
+  marked(): ReadonlySet<string> {
+    return this.cellIds;
+  }
+}
+
+/**
+ * The memories this process knows to be erased, so that an edit of one is refused here, before anything is asked of the
+ * endpoint. The endpoint keeps an erased memory's sequence number but stores a write past it, so an edit from a device
+ * that had read the last version would save the memory again, without anyone being asked. A memory is known erased
+ * when this process erased it, when this device's erasure feed names it in a line written since this process first
+ * read it (a forget in another session here, or one made elsewhere and reported to it), or when an answer showed it
+ * gone: a read by id, a share's read, an edit's own read or the read after a refused edit answering "no such cell", or
+ * a recall's complete version listing leaving it out. A recall without the listing says nothing: it leaves out a
+ * memory whose stored copy could not be read, as if it were gone.
+ *
+ * A record ends only when an answer shows the memory live and opens it, to a request sent after the record was made: a
+ * read by id, a share's read, an edit's own read, an accepted write or a recall. Then the edit is checked against the
+ * version seen, as any other. An answer to a request sent before the record was made shows a state that may predate
+ * the erasure, so it ends nothing: what is in doubt is treated as erased, and the next read settles it. Records live in
+ * this process only; a later session learns again from the feed, or from its edit's own read.
+ */
+class GoneRecords {
+  /** Ordinal of the last request sent or record made in this process. */
+  private turn = 0;
+  /** cellId -> the turn at which it was last known gone. */
+  private readonly at = new Map<string, number>();
+  /** The feed's map as last read, and the newest line noted for each id it names. */
+  private feedRead: ReadonlyMap<string, string> | undefined;
+  private readonly feedLines = new Map<string, string>();
+
+  constructor(private readonly erasureFeed?: () => ReadonlyMap<string, string>) {}
+
+  /** Taken just before a request whose answer may show a memory live. An erasure on the feed by then is noted first. */
+  sent(): number {
+    this.noteFeed();
+    return ++this.turn;
+  }
+
+  /** A memory known gone from now on. */
+  found(cellId: string): void {
+    this.at.set(cellId, ++this.turn);
+  }
+
+  /** An answer to the request sent at `turn` opened a live version: a record made before that request ends. */
+  live(cellId: string, turn: number): void {
+    const t = this.at.get(cellId);
+    if (t !== undefined && t < turn) this.at.delete(cellId);
+  }
+
+  /** Whether the memory is known gone here now. */
+  has(cellId: string): boolean {
+    this.noteFeed();
+    return this.at.has(cellId);
+  }
+
+  /**
+   * Each id the feed names in a line not noted before is known gone from now on. The lines already there when this
+   * process first reads the feed are only noted: they record erasures from before it, and since then this device may
+   * have read the memory saved again elsewhere, and edited it, in a session that has ended. An edit's own read, made
+   * before every edit of a memory this process has not seen, tells those apart.
+   */
+  private noteFeed(): void {
+    const named = this.erasureFeed?.();
+    if (named === undefined || named === this.feedRead) return;
+    const first = this.feedRead === undefined;
+    for (const [id, line] of named) {
+      if (this.feedLines.get(id) !== line) {
+        this.feedLines.set(id, line);
+        if (!first) this.found(id);
+      }
+    }
+    this.feedRead = named;
+  }
 }
 
 // ── recall delta cache (dark; active only when a recallCachePath is configured) ──────────────────
 // Persists this agent's OPENED cells keyed by cellId so a session start can ask the endpoint for
-// only NEW cells (delta) instead of a full recall-all fan-out. Holds plaintext ⇒ written mode 600
+// only new or changed cells (delta) instead of a full recall-all fan-out. Holds plaintext ⇒ written mode 600
 // (same posture as the seq store) and opt-in by config, never on by default. A corrupt/absent file
 // is treated as a cold start — the next recall repopulates it from a full or delta response.
 //
-// SELF-WRITE COHERENCE: a delta recall SKIPS cellIds the client already holds, so a client's own
-// in-place UPDATE (remember with an existing cellId) or fresh create would be invisible to its next
-// recall. remember() and forget() therefore update this cache directly (upsert / remove), keeping a
-// client coherent with its OWN writes. A different client/session sharing the same cache path would
-// not observe that update until it re-reads the cell — the same single-writer contract the seq store
-// already carries; document + serialize same-cell writes across clients if you need both to land.
+// SELF-WRITE COHERENCE: a delta recall SKIPS cellIds it sends as known, so a client's own in-place
+// UPDATE (remember with an existing cellId) or fresh create would be invisible to its next recall.
+// remember() and forget() therefore update this cache directly (upsert / remove), keeping a client
+// coherent with its OWN writes.
+//
+// OTHER WRITERS' VERSIONS: an update made by another computer, or another session whose copy this
+// one never re-reads, keeps the cell's id. So a recall sends as known only the cells the copy holds
+// at the version the endpoint's complete version listing states, commitment and sequence number
+// (`knownAtListedVersion`), and the delta sends the current version of every other cell. A version written after the listing was
+// read is fetched by the next recall. Without a listing the recall is a full one; a listing that
+// cannot be used fails the recall.
 const RECALL_CACHE_LOCK_WAIT_MS = 5_000;
 /** The share map file is rewritten at least this often while the feed runs, so its `asOf` stays near the truth. */
 const SHARE_STATES_WRITE_MS = 60_000;
@@ -3644,7 +3890,7 @@ class RecallCache {
   private mutations = 0;
   constructor(
     private readonly path?: string,
-    private readonly erasedElsewhere?: () => ReadonlySet<string>,
+    private readonly erasedElsewhere?: () => ReadonlyMap<string, string>,
   ) {
     if (this.path) this.load();
   }
@@ -3664,7 +3910,7 @@ class RecallCache {
     const erased = this.erasedElsewhere?.();
     if (!erased) return false;
     let dropped = false;
-    for (const id of erased) if (this.cells.delete(id)) dropped = true;
+    for (const [id] of erased) if (this.cells.delete(id)) dropped = true;
     return dropped;
   }
 
@@ -3828,8 +4074,14 @@ class RecallCache {
     }
   }
 
-  knownCellIds(): string[] {
-    return [...this.cells.keys()];
+  /** How many cells the cache holds. */
+  get size(): number {
+    return this.cells.size;
+  }
+
+  /** The commitment of the version the cache holds for `cellId`, or undefined when it holds none. */
+  commitmentOf(cellId: string): string | undefined {
+    return this.cells.get(cellId)?.commitmentHash;
   }
 
   all(): RecalledCell[] {
@@ -3838,13 +4090,19 @@ class RecallCache {
 
   /** Merge a delta `added` set and prune to the endpoint's authoritative live cellId set. Persists
    *  only when something actually changed, so a no-op delta recall (nothing added, nothing forgotten)
-   *  does not rewrite the whole cache file each session start. */
-  merge(added: RecalledCell[], liveCellIds: string[]): void {
+   *  does not rewrite the whole cache file each session start. With `known`, the ids the request
+   *  sent as known, a cached cell that was not among them was asked for: it is replaced by what came
+   *  back, and when nothing came back for it (unreadable now, or no key held) it leaves the cache, as
+   *  it would be absent from a full recall, rather than being served at a version the endpoint no
+   *  longer holds. Without `known` every cached cell counts as known, as before. A file that cannot be
+   *  written puts the cache back as it was (see `replaceAll`). */
+  merge(added: RecalledCell[], liveCellIds: string[], known?: ReadonlySet<string>): void {
     const live = new Set(liveCellIds);
+    const before = new Map(this.cells);
     let changed = false;
     for (const id of [...this.cells.keys()])
-      if (!live.has(id)) {
-        this.cells.delete(id); // prune forgotten
+      if (!live.has(id) || (known !== undefined && !known.has(id))) {
+        this.cells.delete(id); // prune forgotten, and every cell asked for again
         changed = true;
       }
     for (const c of added) {
@@ -3853,15 +4111,30 @@ class RecallCache {
     }
     if (changed) {
       this.mutations++;
-      this.persist();
+      try {
+        this.persist();
+      } catch (e) {
+        this.cells = before; // see `replaceAll`
+        throw e;
+      }
     }
   }
 
-  /** Replace the whole cache from a full recall result, then persist. */
+  /**
+   * Replace the whole cache from a full recall result, then persist. When the file cannot be written the cache is put
+   * back as it was and the failure thrown: the recall fails and answers nothing, so nothing it read may stay here
+   * ahead of the seq marks, which it does not move either (see PendingMark). The next recall reads it again.
+   */
   replaceAll(cells: RecalledCell[]): void {
+    const before = this.cells;
     this.cells = new Map(cells.map((c) => [c.cellId, c]));
     this.mutations++;
-    this.persist();
+    try {
+      this.persist();
+    } catch (e) {
+      this.cells = before;
+      throw e;
+    }
   }
 
   /** Insert/replace one cell the client itself just wrote (create or update), then persist. No-op
@@ -3971,6 +4244,8 @@ export class SaihmProClient {
   /** Until when the status's word that the paged listing is not offered is kept ({@link SHARES_PAGED_ABSENT_MS}). */
   private sharesPagedAbsentUntil = -Infinity;
   private readonly recallCache: RecallCache;
+  /** The memories this process knows to be erased (see {@link GoneRecords}). */
+  private readonly gone: GoneRecords;
   /** The uncached-recall notice is written at most once per process. */
   private saidRecallIsUncached = false;
   private readonly requestTimeoutMs: number;
@@ -4006,10 +4281,10 @@ export class SaihmProClient {
     const recallCachePath =
       opts.recallCachePath ??
       (opts.persistRecallCache === true ? defaultRecallCachePath(this.agentIdHashHex) : undefined);
-    this.recallCache = new RecallCache(
-      recallCachePath,
-      recallCachePath !== undefined && erasureFeedEnabled() ? erasedCellIdsReader(this.agentIdHashHex) : undefined,
-    );
+    // One reader of this identity's erasure feed, for the copy (which drops what it names) and for the edits it refuses.
+    const erasures = erasureFeedEnabled() ? erasedCellIdsReader(this.agentIdHashHex) : undefined;
+    this.recallCache = new RecallCache(recallCachePath, recallCachePath !== undefined ? erasures : undefined);
+    this.gone = new GoneRecords(erasures);
     // Create this identity's erasure-feed directory NOW, while the identity is being loaded, rather
     // than lazily at the first `forget`. A downstream consumer can arm a directory watch on a
     // directory that exists; a missing one leaves it polling until something appears, so an erasure
@@ -5053,6 +5328,7 @@ export class SaihmProClient {
   private openRow(
     expectedCellId: string | null,
     wire: WireEnvelope,
+    marks?: PendingMark[],
   ): RecalledCell {
     let env;
     try {
@@ -5130,17 +5406,117 @@ export class SaihmProClient {
     }
     // Both authenticated: seq is bound into the AEAD AAD, and the commitment was recomputed above
     // from the ciphertext this identity's KEK has now opened. Neither is the endpoint's echo.
-    try {
-      this.seq.observe(env.cellId, env.seq, envCommitment);
-    } catch (e) {
-      throw markPathBearing(e);
-    }
+    // With `marks`, the mark is handed to the caller instead (see PendingMark): a recall applies it only with the answer.
+    if (marks !== undefined) marks.push({ cellId: env.cellId, seq: env.seq, commitment: envCommitment });
+    else this.observeMark(env.cellId, env.seq, envCommitment);
     return {
       cellId: env.cellId,
       plaintext,
       seq: env.seq.toString(10),
       commitmentHash: envCommitment,
     };
+  }
+
+  /** Advance one seq mark, the path of an operator-named marks file kept whole in its error. */
+  private observeMark(cellId: string, seq: bigint, commitment: string): void {
+    try {
+      this.seq.observe(cellId, seq, commitment);
+    } catch (e) {
+      throw markPathBearing(e);
+    }
+  }
+
+  /**
+   * Apply the marks a recall read, under one marks write, the recall's first request sent at `turn`. With `held`, only
+   * a mark whose version the copy now holds: one the copy dropped (erased in another session) or never took stays where
+   * it was. A memory whose mark is applied is one the answer shows live (see {@link GoneRecords}).
+   */
+  private applyMarks(marks: readonly PendingMark[], held: ((cellId: string) => string | undefined) | undefined, turn: number): void {
+    this.seq.withBatch(() => {
+      for (const m of marks) {
+        if (held !== undefined && held(m.cellId) !== m.commitment) continue;
+        this.observeMark(m.cellId, m.seq, m.commitment);
+        this.gone.live(m.cellId, turn);
+      }
+    });
+  }
+
+  /**
+   * Put a version of an own cell whose mark a single read just advanced into the copy, so the mark and what this
+   * computer holds move together (see PendingMark). A version the copy already holds is not written again. The copy
+   * is a convenience: if it cannot be written the entry is dropped instead, and the read or write it serves never
+   * fails because of it.
+   */
+  private keepInCopy(cell: RecalledCell): void {
+    if (!this.recallCache.configured || this.recallCache.commitmentOf(cell.cellId) === cell.commitmentHash) return;
+    try {
+      this.recallCache.upsert(cell);
+    } catch {
+      try {
+        this.recallCache.remove(cell.cellId);
+      } catch {
+        /* cache unwritable; the entry is dropped in memory and the next recall rebuilds it */
+      }
+    }
+  }
+
+  /**
+   * Take a memory a read just found gone out of the copy, so its text does not stay on this device after its erasure
+   * until the next recall. Only while the copy holds the version it held before that read was sent: one a write of this
+   * process put there meanwhile stays. If the copy cannot be written, the entry is dropped in memory and the next save
+   * that succeeds drops it from the file. Its read mark and sequence mark stay (see `whyRefusedAsStale`).
+   */
+  private dropGoneFromCopy(cellId: string, heldBefore: string | undefined): void {
+    if (heldBefore === undefined || this.recallCache.commitmentOf(cellId) !== heldBefore) return;
+    try {
+      this.recallCache.remove(cellId);
+    } catch {
+      /* unwritable: gone from memory now, and from the file at the next save that succeeds */
+    }
+  }
+
+  /**
+   * Refuse an edit of a memory this process knows to be erased (see {@link GoneRecords}) and this device had read or
+   * saved (a mark held here), before anything is asked of the endpoint, with the code it gives a stale write: it stores
+   * a write past an erased memory's number, so the edit would save the memory again without the user. Nothing is sent
+   * and nothing is charged. A cellId this device never read or saved goes to the endpoint as before.
+   */
+  private refuseIfKnownErased(cellId: string): void {
+    if (this.seq.current(cellId) !== undefined && this.gone.has(cellId)) {
+      throw new SaihmEndpointError(409, 'BLIND_STALE_SEQ', ERASED_EDIT);
+    }
+  }
+
+  /**
+   * Which text is true for a write refused as stale (see {@link StaleWrite}). After a read of the live version it is
+   * known without another request: what that read found, and for a memory gone, whether this device had read or saved
+   * it (a mark held here; a memory gone with one is refused before its write, see `refuseIfKnownErased`). Without one -
+   * this process had read or saved the memory, and a version past that was written since - the memory is read once
+   * more, to tell whether it is still there. Not charged when it is gone (the endpoint answers "no such cell" before it
+   * counts a read); if the read fails, the text says what the refusal itself shows. That read moves no mark and puts
+   * nothing in the copy, and a memory found gone keeps its marks here and is known erased from then on (see
+   * {@link GoneRecords}), so the next edit is refused here with nothing asked, and one after a memory written again
+   * under this id, or one a recall left out because it could not be read, is still checked against the version this
+   * process saw: refused, never replaced unseen. (Dropping the read mark instead made that next edit read the live
+   * version and store over it, copy on or off: measured.) The sequence mark stays as the endpoint's does, so an older
+   * version served again is still refused.
+   */
+  private async whyRefusedAsStale(cellId: string, preRead: 'found' | 'gone' | 'unread' | undefined): Promise<StaleWrite> {
+    if (preRead === 'found') return 'changed';
+    if (preRead === 'gone') return this.seq.current(cellId) !== undefined ? 'erased' : 'used';
+    if (preRead === 'unread') return 'used';
+    const heldBefore = this.recallCache.commitmentOf(cellId);
+    try {
+      const now = await this.recallRawOne(cellId);
+      if (now.found === false) {
+        this.dropGoneFromCopy(cellId, heldBefore);
+        this.gone.found(cellId);
+        return 'erased';
+      }
+    } catch {
+      /* the read failed: the refusal itself shows only that a newer version was written */
+    }
+    return 'changed';
   }
 
   /** Authoritative tier from the JWT (via status), cached. Used to label sealed cell metadata. */
@@ -5172,15 +5548,31 @@ export class SaihmProClient {
     // from disk. So `next()` is `MAX_SEQ + 1` whatever the live read returns, and the outcome is
     // `seq_exhausted` either way. The round trip would change no result and would be paid on every
     // attempt against a cell that is permanently unwritable.
+    // What that read of the live version found: `found`, `gone` (the endpoint's own "no such cell") or `unread` (an
+    // answer this client cannot read). Undefined when no read ran: this process had read or saved the cell. A refusal
+    // as stale is told by it (see `whyRefusedAsStale`).
+    let preRead: 'found' | 'gone' | 'unread' | undefined;
+    if (opts.cellId !== undefined) this.refuseIfKnownErased(cellId);
     if (
       opts.cellId !== undefined &&
       !this.seq.observedLiveThisRun(cellId) &&
       this.seq.current(cellId) !== MAX_SEQ
     ) {
+      const heldBefore = this.recallCache.commitmentOf(cellId);
+      const turn = this.gone.sent();
       const existing = await this.recallRawOne(cellId);
       if (existing.found && existing.wire) {
-        this.openRow(cellId, existing.wire); // decode + attribute + openCell(authenticates seq) + observe
-      }
+        // decode + attribute + openCell(authenticates seq) + observe, and the copy holds what the mark now names
+        this.keepInCopy(this.openRow(cellId, existing.wire));
+        this.gone.live(cellId, turn);
+        preRead = 'found';
+      } else if (existing.found === false) {
+        preRead = 'gone';
+        this.dropGoneFromCopy(cellId, heldBefore);
+        this.gone.found(cellId);
+        // A mark held here (an earlier session read or saved it): an edit of an erased memory, refused before its write.
+        this.refuseIfKnownErased(cellId);
+      } else preRead = 'unread';
     }
     const seq = this.seq.next(cellId);
     if (seq > MAX_SEQ) {
@@ -5191,6 +5583,8 @@ export class SaihmProClient {
       );
     }
     const tier = await this.resolveTier();
+    // Known erased while this edit waited (a forget, or a read that found it gone, in this process): refused as above.
+    if (opts.cellId !== undefined) this.refuseIfKnownErased(cellId);
     const env = sealCell({
       plaintext: utf8(content),
       kek: this.identity.kek,
@@ -5202,7 +5596,18 @@ export class SaihmProClient {
       tier,
     });
     const wire = encodeEnvelope(env);
-    const r = await this.call<RememberResult>('saihm_remember', { wire });
+    let r: RememberResult;
+    // A new memory's id is drawn here, so nothing is known of it: only an edit's write can end a record.
+    const writeTurn = opts.cellId !== undefined ? this.gone.sent() : 0;
+    try {
+      r = await this.call<RememberResult>('saihm_remember', { wire });
+    } catch (e) {
+      // A new memory's id was drawn here at random, so a refusal of it as stale is the endpoint's word alone: passed on.
+      if (!refusedAsStale(e) || opts.cellId === undefined) throw e;
+      throw staleWriteRefusal(e, await this.whyRefusedAsStale(cellId, preRead));
+    }
+    // Stored: the memory is live at this version, whatever the marks file below says.
+    if (opts.cellId !== undefined) this.gone.live(cellId, writeTurn);
     // Advance only after the endpoint accepted the write, and pin the commitment of the envelope
     // THIS process just sealed -- so a later read of a DIFFERENT envelope at this same seq, which a
     // lost response makes possible, is detectable rather than silently accepted.
@@ -5302,6 +5707,128 @@ export class SaihmProClient {
     };
   }
 
+  /**
+   * The request a recall makes while the copy is on, the copy's mutation count it was made against (taken before
+   * that request), and the ids it sent as known. The ids are only the cached cells whose version the endpoint's
+   * complete listing states (see {@link ownVersionsForCopy}): a cell updated in place elsewhere keeps its id, so
+   * sending every cached id would leave its new version out of the delta for good. A copy with nothing in it has
+   * nothing to check, so it asks for everything without a listing. A listing that could not be read throws (see
+   * {@link copyCheckFailed}); it never ends in a delta over ids whose versions were not checked.
+   */
+  private async copyRecallRequest(): Promise<{
+    resp: unknown;
+    snapshot: number;
+    known?: ReadonlySet<string>;
+    knownMarks?: readonly PendingMark[];
+    /** The complete listing the request was built from, and the copy's mutation count from before it was read. */
+    listed?: ReadonlyMap<string, ListedVersion>;
+    listedFrom?: number;
+  }> {
+    if (this.recallCache.size === 0) {
+      const snapshot = this.recallCache.version;
+      return { resp: await this.call<unknown>('saihm_recall', { knownCellIds: [] }), snapshot, known: new Set() };
+    }
+    const listedFrom = this.recallCache.version;
+    const listed = await this.ownVersionsForCopy();
+    if (listed.kind === 'recall-all') return { resp: listed.rows, snapshot: listed.snapshot };
+    const snapshot = this.recallCache.version;
+    const knownMarks = this.knownAtListedVersion(listed.versions);
+    const known = new Set(knownMarks.map((m) => m.cellId));
+    return {
+      resp: await this.call<unknown>('saihm_recall', { knownCellIds: [...known] }),
+      snapshot,
+      known,
+      knownMarks,
+      listed: listed.versions,
+      listedFrom,
+    };
+  }
+
+  /**
+   * The cached cells a recall may answer from the copy, each with the mark of the version it holds. A cell is known only
+   * when the listing states the very version the copy holds - its commitment AND a sequence number equal to the copy's -
+   * and nothing this process saw contradicts that: no mark above it, and no other version pinned at it. That mark is
+   * what an edit built on the answer is checked against, as a full recall's mark is: without it the edit re-read the
+   * live version and was stored over another device's newer one, where with the copy off it is refused (measured).
+   * It cannot refuse a valid edit: the listing's number is the one the endpoint's stale check compares (measured in
+   * its source), so an edit at the next number is refused only if a write landed after the listing. A cell listed
+   * with no number, or a number other than the copy's (a version whose number was not yet recorded), or one whose mark
+   * here is higher (an endpoint rolled back below what this identity has seen), is asked for again: read and marked
+   * from its own version, where the read path's rollback check sees it. No pin check is needed: every path that pins
+   * a version here also puts that version in the copy (see `keepInCopy`), and the read path refuses a second envelope
+   * at a pinned number, so the copy never holds another version at a number pinned here.
+   */
+  private knownAtListedVersion(listed: ReadonlyMap<string, ListedVersion>): PendingMark[] {
+    const out: PendingMark[] = [];
+    for (const cell of this.recallCache.all()) {
+      const v = listed.get(cell.cellId);
+      if (v === undefined || v.commitment !== cell.commitmentHash) continue;
+      const seq = seqFromDecimal(v.seq);
+      if (seq === null || seq !== seqFromDecimal(cell.seq)) continue;
+      const mark = this.seq.current(cell.cellId);
+      if (mark !== undefined && mark > seq) continue;
+      out.push({ cellId: cell.cellId, seq, commitment: v.commitment });
+    }
+    return out;
+  }
+
+  /**
+   * The complete version listing of this identity's own cells for a recall with the copy on, as cellId to its version:
+   * every page read until `next` is null. `recall-all` when a page is answered with a recall-all array: an endpoint
+   * without the listing, or with it switched off, ignores `listOnly` and answers with every cell, and that answer is
+   * the full recall, returned with the copy's mutation count from before it was asked for, so it is used once and never
+   * asked twice. Anything else that is not a complete listing THROWS, with nothing more asked or charged: a refusal or
+   * failure of any page, a page this client cannot read, a cell listed twice, a `next` that does not move forward, more
+   * than {@link MAX_COPY_LISTING_PAGES} pages, or a pass that runs past the share pass's bound in time
+   * ({@link SHARES_PASS_DEADLINE_MS}, checked when each page arrives: the time between pages is this client's own).
+   * A full recall in its place would charge every memory, and past the answer size limit fail after that.
+   */
+  private async ownVersionsForCopy(): Promise<
+    | { kind: 'complete'; versions: Map<string, ListedVersion> }
+    | { kind: 'recall-all'; rows: unknown[]; snapshot: number }
+  > {
+    const versions = new Map<string, ListedVersion>();
+    const deadline = Date.now() + SHARES_PASS_DEADLINE_MS;
+    const overdue = (): SaihmEndpointError =>
+      copyCheckFailed(
+        new SaihmEndpointError(408, 'timeout', `the service's list of your memories took more than ${SHARES_PASS_DEADLINE_MS / 60_000} minutes`),
+      );
+    let after: string | undefined;
+    for (let pages = 0; pages < MAX_COPY_LISTING_PAGES; pages++) {
+      const snapshot = this.recallCache.version;
+      let r: unknown;
+      try {
+        r = await this.call<unknown>('saihm_recall', after === undefined ? { listOnly: true } : { listOnly: true, after });
+      } catch (e) {
+        throw copyCheckFailed(e);
+      }
+      if (Array.isArray(r)) return { kind: 'recall-all', rows: r, snapshot };
+      if (Date.now() > deadline) throw overdue();
+      let page: VersionListing;
+      try {
+        page = versionListingFrom(r);
+      } catch (e) {
+        throw copyCheckFailed(e);
+      }
+      for (const c of page.cells) {
+        if (versions.has(c.cellId)) {
+          throw copyCheckFailed(new SaihmEndpointError(502, 'malformed_response', "the service's list of your memories named one twice"));
+        }
+        versions.set(c.cellId, c);
+      }
+      if (page.next === null) return { kind: 'complete', versions };
+      if (after !== undefined && page.next <= after) {
+        throw copyCheckFailed(
+          new SaihmEndpointError(502, 'malformed_response', "the service's list of your memories did not move forward from one page to the next"),
+        );
+      }
+      after = page.next;
+    }
+    throw copyCheckFailed(
+      new SaihmEndpointError(502, 'malformed_response', `the service's list of your memories ran past ${MAX_COPY_LISTING_PAGES} pages`),
+    );
+  }
+
   private async recallRawOne(
     cellId: string,
   ): Promise<{ found: boolean; wire?: WireEnvelope }> {
@@ -5349,11 +5876,12 @@ export class SaihmProClient {
       needle === undefined ? cells : cells.filter((c) => c.plaintext.toLowerCase().includes(needle));
 
     // DELTA PATH (dark; active only when a recall cache is configured). Send the endpoint the
-    // cellIds we already hold; it fans out reads over only the NEW ones (server work O(new) not
-    // O(all)) and returns `liveCellIds` so we can prune anything since forgotten. We answer the
-    // caller from the merged cache. If the endpoint's delta gate is off (or it is an older build),
-    // it returns the legacy array instead — we treat that as a full recall and rebuild the cache,
-    // so a delta-configured client is always correct against any endpoint.
+    // cellIds we already hold AT THE VERSION THE ENDPOINT HOLDS (see `copyRecallRequest`); it fans
+    // out reads over only the others (server work O(changed) not O(all)) and returns `liveCellIds` so
+    // we can prune anything since forgotten. We answer the caller from the merged cache. If the
+    // endpoint's delta gate is off (or it is an older build), it returns the legacy array instead —
+    // we treat that as a full recall and rebuild the cache, so a delta-configured client is always
+    // correct against any endpoint.
     if (this.recallCache.configured) {
       // `knownSharedKeys` is deliberately NOT sent, and the response's `liveSharedKeys` is deliberately
       // ignored. That pair is the delta protocol for ANNOUNCEMENTS, and it presupposes a client-side
@@ -5369,64 +5897,84 @@ export class SaihmProClient {
       // undoes them — measured, both directions: a `forget` during an in-flight recall had the erased
       // cell's PLAINTEXT written back to disk after the tool reported `complete: true`, and a
       // `remember` during one had the new cell dropped from the cache entirely.
-      const cacheVersion = this.recallCache.version;
-      const resp = await this.call<unknown>('saihm_recall', {
-        knownCellIds: this.recallCache.knownCellIds(),
-      });
-      // A local write landed while this was in flight, so the response predates it and is not safe to
-      // apply. Skipping the cache write is always sound: this is a cache, the next recall rebuilds it,
-      // and the caller below is still answered from live state. Overwriting is the only unsound option.
-      const cacheIsStale = this.recallCache.version !== cacheVersion;
-      // `liveCellIds` is narrowed to `unknown[]`, NOT `string[]`, because `Array.isArray` is all this
-      // predicate checks and claiming otherwise would be a type-level lie in exactly the place a
-      // reader looks for reassurance. `added` was already honestly typed `unknown[]`, which made the
-      // asymmetry read as deliberate rather than as an oversight. The elements are filtered below
-      // before they reach the cache; the claim and the check now agree.
-      const isDelta = (r: unknown): r is { mode: 'delta'; added: unknown[]; liveCellIds: unknown[] } =>
-        typeof r === 'object' &&
-        r !== null &&
-        !Array.isArray(r) &&
-        (r as { mode?: unknown }).mode === 'delta' &&
-        Array.isArray((r as { added?: unknown }).added) &&
-        Array.isArray((r as { liveCellIds?: unknown }).liveCellIds);
-      if (isDelta(resp)) {
-        const { cells: added, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(resp.added);
-        // Non-strings are dropped rather than coerced. `new Set([...])` on a mixed array would treat
-        // every non-string as an id that is NOT live, and `merge` prunes exactly what is missing from
-        // that set — so a response of `[null]` would evict the whole cache while looking well-formed.
-        // The endpoint can already prune by sending `[]`, so this bounds a type confusion, not a
-        // capability; it is here because the cast is what made the confusion invisible.
-        // `merge` prunes every cellId missing from the endpoint's live set, so a stale `liveCellIds`
-        // deletes a cell this client wrote after the snapshot. The delta branch cannot RESURRECT a
-        // forgotten cell — the endpoint omits it from `added` because the client already listed it as
-        // known — but it drops a concurrent write exactly as the full branch does, which is why the
-        // guard covers both and not just the one that reaches plaintext.
-        if (!cacheIsStale)
+      for (let attempt = 1; ; attempt++) {
+        // `snapshot` is that count, taken before the request whose answer is applied below.
+        const turn = this.gone.sent();
+        const { resp, snapshot, known, knownMarks, listed, listedFrom } = await this.copyRecallRequest();
+        // A local write landed while this was in flight, so the answer predates it. Applied, it would undo that write
+        // (measured, above). Answered without being applied, it would show the copy as it was before this recall: the
+        // OLD version of a cell the listing showed changed, while opening the answer had already moved that cell's mark
+        // to the new one, so an edit built on the old text was stored over the other computer's (measured). So it
+        // is neither applied nor answered, nothing it carries moves a mark, and the recall runs again.
+        if (this.recallCache.version !== snapshot) {
+          if (attempt < COPY_RECALL_ATTEMPTS) continue;
+          throw new SaihmEndpointError(409, 'recall_interrupted', RECALL_INTERRUPTED);
+        }
+        // NOTHING BELOW AWAITS. The answer is opened, applied to the copy and its marks advanced in one synchronous run,
+        // so no write of this process lands between the check above and the return.
+        const marks: PendingMark[] = [];
+        const held = (cellId: string): string | undefined => this.recallCache.commitmentOf(cellId);
+        // `liveCellIds` is narrowed to `unknown[]`, NOT `string[]`, because `Array.isArray` is all this
+        // predicate checks and claiming otherwise would be a type-level lie in exactly the place a
+        // reader looks for reassurance. `added` was already honestly typed `unknown[]`, which made the
+        // asymmetry read as deliberate rather than as an oversight. The elements are filtered below
+        // before they reach the cache; the claim and the check now agree.
+        const isDelta = (r: unknown): r is { mode: 'delta'; added: unknown[]; liveCellIds: unknown[] } =>
+          typeof r === 'object' &&
+          r !== null &&
+          !Array.isArray(r) &&
+          (r as { mode?: unknown }).mode === 'delta' &&
+          Array.isArray((r as { added?: unknown }).added) &&
+          Array.isArray((r as { liveCellIds?: unknown }).liveCellIds);
+        if (isDelta(resp)) {
+          const { cells: added, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(resp.added, marks);
+          // Non-strings are dropped rather than coerced. `new Set([...])` on a mixed array would treat
+          // every non-string as an id that is NOT live, and `merge` prunes exactly what is missing from
+          // that set — so a response of `[null]` would evict the whole cache while looking well-formed.
+          // The endpoint can already prune by sending `[]`, so this bounds a type confusion, not a
+          // capability; it is here because the cast is what made the confusion invisible.
           try {
-            this.recallCache.merge(added, resp.liveCellIds.filter((id): id is string => typeof id === 'string'));
+            this.recallCache.merge(added, resp.liveCellIds.filter((id): id is string => typeof id === 'string'), known);
           } catch (e) {
+            // The copy was put back as it was, and no mark moves: this recall answers nothing.
             throw markPathBearing(e);
           }
-        return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated, announcementsSkipped };
-      }
-      if (!Array.isArray(resp)) {
-        throw new SaihmEndpointError(
-          502,
-          'malformed_response',
-          'endpoint returned a malformed recall response',
-        );
-      }
-      const { cells, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(resp);
-      if (!cacheIsStale)
+          // The cells answered from the copy are marked at the version the listing stated and the copy holds, with the
+          // rest; one the merge dropped (erased meanwhile) or replaced is skipped by `held`.
+          if (knownMarks !== undefined) marks.push(...knownMarks);
+          this.applyMarks(marks, held, turn);
+          // The complete listing names every memory that exists (it is read from the key records, which a storage fault
+          // leaves alone), so one marked here that it leaves out, and the delta did not bring back, is gone. Only when
+          // nothing of this process changed the copy during the whole recall: a memory this process saved while the
+          // listing was read, then left out of the delta because its stored copy could not be read, is not gone.
+          if (listed !== undefined && listedFrom === snapshot) {
+            for (const id of this.seq.marked()) if (!listed.has(id) && held(id) === undefined) this.gone.found(id);
+          }
+          return { cells: filter(this.recallCache.all()), announcements, announcementsTruncated, announcementsSkipped };
+        }
+        if (!Array.isArray(resp)) {
+          throw new SaihmEndpointError(
+            502,
+            'malformed_response',
+            'endpoint returned a malformed recall response',
+          );
+        }
+        const { cells, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(resp, marks);
         try {
           this.recallCache.replaceAll(cells);
         } catch (e) {
+          // As above: the copy was put back as it was, and no mark moves.
           throw markPathBearing(e);
         }
-      return { cells: filter(cells), announcements, announcementsTruncated, announcementsSkipped };
+        this.applyMarks(marks, held, turn);
+        return { cells: filter(cells), announcements, announcementsTruncated, announcementsSkipped };
+      }
     }
 
-    // FULL PATH (default, unchanged): recall-all, open every row, filter client-side.
+    // FULL PATH (default): recall-all, open every row, filter client-side. The marks move once every row is open, so
+    // they name exactly what the answer carries; a response refused part way moves none. A memory it leaves out is not
+    // taken for gone (see GoneRecords): the endpoint leaves out one whose stored copy could not be read.
+    const turn = this.gone.sent();
     const rows = await this.call<unknown>('saihm_recall', {});
     if (!Array.isArray(rows)) {
       throw new SaihmEndpointError(
@@ -5435,7 +5983,9 @@ export class SaihmProClient {
         'endpoint returned a malformed recall-all response',
       );
     }
-    const { cells, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(rows);
+    const marks: PendingMark[] = [];
+    const { cells, announcements, announcementsTruncated, announcementsSkipped } = this.openRecallRows(rows, marks);
+    this.applyMarks(marks, undefined, turn);
     return { cells: filter(cells), announcements, announcementsTruncated, announcementsSkipped };
   }
 
@@ -5445,8 +5995,8 @@ export class SaihmProClient {
    * cannot be bypassed by accident, and the docblock below stays with the logic it describes rather
    * than with this delegation.
    */
-  private openRecallRows(rows: unknown[]) {
-    return this.seq.withBatch(() => this.openRecallRowsUnbatched(rows));
+  private openRecallRows(rows: unknown[], marks: PendingMark[]) {
+    return this.seq.withBatch(() => this.openRecallRowsUnbatched(rows, marks));
   }
 
   /**
@@ -5464,7 +6014,7 @@ export class SaihmProClient {
    * and are handled under weaker rules — see the comment at the `row.shared` branch. The two streams
    * never share a key: a shared cellId may equal one this agent owns, and both must survive.
    */
-  private openRecallRowsUnbatched(rows: unknown[]): RecallWithShared {
+  private openRecallRowsUnbatched(rows: unknown[], marks: PendingMark[]): RecallWithShared {
     const out: RecalledCell[] = [];
     const announcements: SharedAnnouncement[] = [];
     let announcementsTruncated = false;
@@ -5618,7 +6168,7 @@ export class SaihmProClient {
         if (row.shared !== undefined) announcementsSkipped ||= !announcementsTruncated;
         continue;
       }
-      const cell = this.openRow(null, row.wire); // trusts env.cellId/seq, not the server row label
+      const cell = this.openRow(null, row.wire, marks); // trusts env.cellId/seq, not the server row label
       // Own cells only. An announcement never reaches this set, which is precisely why a shared cellId
       // may collide with one this agent owns without tripping the duplicate check.
       if (seen.has(cell.cellId)) {
@@ -5727,19 +6277,30 @@ export class SaihmProClient {
 
   /** Recall + open a single cell. Returns `null` if it does not exist. */
   async recallOne(cellId: string): Promise<RecalledCell | null> {
+    const heldBefore = this.recallCache.commitmentOf(cellId);
+    const turn = this.gone.sent();
     const r = await this.recallRawOne(cellId);
     // `found: false` is the endpoint's own "no such cell". Anything else without an envelope is an answer this client
     // cannot read: calling it "not found" would put a plausible answer where the endpoint gave a malformed one.
-    if (r.found === false) return null;
+    if (r.found === false) {
+      this.dropGoneFromCopy(cellId, heldBefore);
+      this.gone.found(cellId);
+      return null;
+    }
     if (r.found !== true || !r.wire) {
       throw new SaihmEndpointError(502, 'malformed_response', 'endpoint returned a malformed read of one of your cells');
     }
-    return this.openRow(cellId, r.wire);
+    const cell = this.openRow(cellId, r.wire);
+    this.keepInCopy(cell); // the answer, its mark and the copy at one version
+    this.gone.live(cellId, turn);
+    return cell;
   }
 
   /** Crypto-shred a cell (GDPR Art.17): the endpoint destroys the wrapped DEK + tombstones. */
   async forget(cellId: string): Promise<ForgetResult> {
     const r = await this.call<ForgetResult>('saihm_forget', { id: cellId });
+    // Known erased in this process from here on, feed or no feed: an edit of it is refused before its write.
+    this.gone.found(cellId);
     // PAST THIS LINE THE ERASURE HAS HAPPENED AND IS IRREVERSIBLE. The cache purge below is local
     // bookkeeping, and it used to run unguarded: any I/O failure threw, the server rendered
     // `fail(e)`, and the operator was told the forget FAILED on a cell whose DEK was already
@@ -5885,8 +6446,14 @@ export class SaihmProClient {
    * any secret is bound). The grantee reads it with {@link SaihmProClient.recallShared}.
    */
   async share(grant: ShareGrant): Promise<ShareResult> {
+    const heldBefore = this.recallCache.commitmentOf(grant.cellId);
+    const turn = this.gone.sent();
     const own = await this.recallRawOne(grant.cellId);
     if (!own.found || !own.wire) {
+      if (own.found === false) {
+        this.dropGoneFromCopy(grant.cellId, heldBefore);
+        this.gone.found(grant.cellId);
+      }
       throw new SaihmEndpointError(
         404,
         'cell_not_found',
@@ -5914,7 +6481,9 @@ export class SaihmProClient {
     // exactly as a read would, so sharing a cell this session has not read establishes the same pin
     // a read would have. It also tightens two error paths - an undecryptable envelope now surfaces
     // as a typed `undecryptable` here rather than as whatever `shareCell` threw on the unwrap.
-    this.openRow(grant.cellId, own.wire);
+    // And the copy is kept at the version whose mark this read advanced (see PendingMark).
+    this.keepInCopy(this.openRow(grant.cellId, own.wire));
+    this.gone.live(grant.cellId, turn);
     // The SAME bytes `openRow` just authenticated. `decodeEnvelope` is a pure function of `own.wire`,
     // so this is that envelope and not a second opinion; it is re-derived only because `openRow`
     // returns the plaintext and `shareCell` needs the envelope.

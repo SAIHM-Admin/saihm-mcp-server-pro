@@ -2,6 +2,56 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.2] — 2026-10-26
+
+Enterprise owners get a section on allowing SAIHM in GitHub Copilot, the local recall
+copy now picks up memories changed on your other devices, and the docs describe what
+SAIHM stores, the local copy and the free tier more precisely. No tool added or removed.
+
+### Added
+
+- **GitHub Copilot for enterprises.** A new README section gives SAIHM's allowlist
+  entries for lists with and without command entries, SAIHM's registry ID and a pointer
+  to the local-copy setting each user controls, and links to GitHub's guide for the rest.
+
+### Fixed
+
+- **The local recall copy across devices.** A memory changed on another device now
+  reaches this one at its next recall. Before each recall the client checks its copy
+  against the versions SAIHM holds and fetches what changed. Reading, sharing or
+  updating one memory also brings the copy up to date for that memory. If the service
+  offers no such check, the client fetches every memory, and if the check fails, the
+  recall reports the error; it never answers from the copy unchecked. Once a session has
+  recalled, read or saved a memory, an edit to it is now refused if the memory has
+  changed since, as it already was without the copy. Previously, the copy kept the old
+  version, and a later edit on this device could replace the newer one.
+
+### Changed
+
+- **What SAIHM stores.** The README, REFERENCE and SECURITY.md now say that SAIHM keeps
+  the ciphertext, the routing details each memory needs and each memory's key locked
+  under yours. Several places said it held only ciphertext, and two said plaintext never
+  left the client's process; they now say it is never sent to the endpoint.
+- **The local recall copy.** It holds every memory saved or read on the device and,
+  after the first recall, all of your memories. The README said "the memories you have
+  already opened" and the REFERENCE "the memories this device has already opened". The
+  docs now also say how to turn the copy off in every AI client and app on a device and
+  delete a copy already written.
+- **Clearer messages when an edit is refused.** If the memory has changed since this
+  device last read or saved it, the message now says to recall it and make the edit
+  again, with or without the copy. If it was erased, or its cellId was already used by
+  an earlier memory, the message says so and asks your assistant to check with you
+  before saving the text again as a new memory. Once a session has recalled or read, an
+  edit of a memory this device knows was erased is refused there. Otherwise a refused
+  edit reads the memory once to choose its message.
+- **The free tier.** The README no longer says your assistant shows what's left and warns
+  you as it runs low, which the server never did, and the README's starter prompts no
+  longer ask for the remaining allowance.
+- **Node.js 20.19 or later.** `engines` and the docs now ask for it, as the dependencies
+  declare.
+- **Security contact.** SECURITY.md now gives security@saihm.net for private reports and
+  the trust page's aim of acknowledging them within 72 hours.
+
 ## [0.14.1] — 2026-10-13
 
 Hosts that fill in every field of a tool, such as Cline with an OpenAI model,
@@ -2071,6 +2121,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.14.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.2
 [0.14.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.1
 [0.14.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.0
 [0.13.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.13.0
@@ -2104,4 +2155,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.2...HEAD

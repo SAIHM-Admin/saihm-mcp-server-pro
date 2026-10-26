@@ -24,6 +24,7 @@ import {
   SaihmConfigError,
   SaihmEndpointError,
   isPathBearing,
+  ownOpeningOf,
   MAX_ERROR_CODE_CHARS,
 } from './client.js';
 
@@ -1099,10 +1100,26 @@ export function failCode(e: unknown): { code: string; status: number } {
   return { code: 'unknown', status: 0 };
 }
 
+/**
+ * An endpoint error's message, fenced. One that opens with this package's own sentence before a cause (see
+ * `ownOpeningOf`, in `client.ts`) is fenced in two: the opening, and after it the cause at the budget an endpoint
+ * message has alone. Under ONE budget the opening spent the room the cause needed, so a cause and its remedy that
+ * render whole with the recall copy off were cut with it on (R14: "...SELF_SIGNED_CERT). Never…"). The cause gets no
+ * more than it gets alone, so the endpoint's share of the line stays one budget; the opening is ours and shorter than
+ * a budget, so its own fence never cuts it. The marker is what makes the opening ours: text that merely begins with
+ * the same words is an endpoint message like any other.
+ */
+function endpointMessageText(e: SaihmEndpointError): string {
+  const opening = ownOpeningOf(e);
+  return opening === undefined
+    ? safeField(e.message, MAX_ERROR_MESSAGE_CHARS)
+    : `${safeField(opening, MAX_ERROR_MESSAGE_CHARS)} ${safeField(e.message.slice(opening.length + 1), MAX_ERROR_MESSAGE_CHARS)}`;
+}
+
 function failTextOf(e: unknown): string {
   return e instanceof SaihmEndpointError
     ? `SAIHM error [${endpointCode(e)}] ` +
-      `(status ${e.status}): ${safeField(e.message, MAX_ERROR_MESSAGE_CHARS)}`
+      `(status ${e.status}): ${endpointMessageText(e)}`
     // BEFORE the plain-`Error` arm, which this extends — reversing the two makes the wider branch
     // unreachable and the defect silently returns.
     : e instanceof SaihmConfigError

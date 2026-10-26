@@ -29,6 +29,7 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import type { WireEnvelope } from '@saihm/client-pro';
 import { SaihmProClient } from '../src/client.js';
 
@@ -47,8 +48,10 @@ interface Stack {
   onDisk: () => string;
   /** Let the held `saihm_recall` response through. */
   release: () => void;
-  /** Arm the hold for the NEXT `saihm_recall`. */
-  hold: () => void;
+  /** The params of the request the hold caught, once caught. */
+  heldParams: () => Record<string, unknown> | undefined;
+  /** Arm the hold for the NEXT `saihm_recall`; resolves once that request's reply is computed and held. */
+  hold: () => Promise<void>;
   done: () => Promise<void>;
 }
 
@@ -63,6 +66,8 @@ async function stack(shape: Shape): Promise<Stack> {
   const store = new Map<string, WireEnvelope>();
   let holding = false;
   let open: (() => void) | null = null;
+  let arrived: (() => void) | null = null;
+  let heldParams: Record<string, unknown> | undefined;
   let gate: Promise<void> = Promise.resolve();
 
   const server: Server = createServer((req, res) => {
@@ -86,6 +91,20 @@ async function stack(shape: Shape): Promise<Stack> {
         // Single-cell form, used by `remember` to read back what it wrote. Never held.
         const wire = store.get(params.cellId);
         out = wire ? { found: true, wire } : { found: false };
+      } else if (method === 'saihm_recall' && shape === 'delta' && params.listOnly === true) {
+        // The version listing a delta endpoint serves beside the delta (0.14.2: read before every recall with the
+        // cache). Never held: the hold is on the request whose answer rewrites the cache. The full shape has no
+        // listing, so there the listing request is answered as a recall-all, and that request is the one held. Each
+        // cell is listed at its stored version's number, as the endpoint states it: a cell is known only at its number.
+        out = {
+          mode: 'list',
+          cells: [...store.keys()].sort().map((cellId) => ({
+            cellId,
+            seq: String(store.get(cellId)!.seq),
+            commitment: store.get(cellId)!.publicMeta.commitmentHash.toLowerCase(),
+          })),
+          next: null,
+        };
       } else if (method === 'saihm_recall') {
         const rows = [...store.entries()].map(([cellId, wire]) => ({ cellId, found: true, wire }));
         const known = new Set((params.knownCellIds as string[] | undefined) ?? []);
@@ -99,6 +118,8 @@ async function stack(shape: Shape): Promise<Stack> {
             : rows;
         if (holding) {
           holding = false;
+          heldParams = params;
+          arrived?.();
           await gate;
         }
       } else {
@@ -129,8 +150,10 @@ async function stack(shape: Shape): Promise<Stack> {
     hold: () => {
       holding = true;
       gate = new Promise<void>((r) => (open = r));
+      return new Promise<void>((r) => (arrived = r));
     },
     release: () => open?.(),
+    heldParams: () => heldParams,
     done: async () => {
       await new Promise<void>((r) => server.close(() => r()));
       rmSync(dir, { recursive: true, force: true });
@@ -138,8 +161,21 @@ async function stack(shape: Shape): Promise<Stack> {
   };
 }
 
-/** Give the held recall time to reach the endpoint and block before the concurrent write starts. */
-const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 60));
+// The concurrent write starts only once the held reply is COMPUTED and blocked (`hold` resolves then). A fixed sleep
+// used to stand in for that, and under load the write could land first: the reply then saw it, and the case passed
+// while testing nothing. Measured in 0.14.2, where a recall's first request is the version listing.
+
+// Fresh cell ids for every case. The cases share one identity and one erasure feed, so an id one case erased is
+// dropped from a later case's cache at every save (the erasure keeps winning, by design), and that case then ran on an
+// EMPTY cache, which since 0.14.2 skips the version listing: a different request was the one held. Measured.
+const uid = (name: string): string => `${name}-${randomBytes(6).toString('hex')}`;
+
+/** The request the hold caught is the one whose answer rewrites the cache: for the full shape the version listing,
+ *  which an endpoint without one answers with every cell; for the delta shape the delta, sent with known ids. */
+function assertHeldTheDataRequest(shape: Shape, p: Record<string, unknown> | undefined): void {
+  if (shape === 'full') assert.equal(p?.listOnly, true, 'setup: the listing request, answered as a recall-all, is held');
+  else assert.ok(Array.isArray(p?.knownCellIds) && p.knownCellIds.length > 0, 'setup: the delta, sent with known ids, is held');
+}
 
 describe('PC-RECALL-CACHE: an in-flight recall never undoes a concurrent local write', () => {
   for (const shape of ['full', 'delta'] as const) {
@@ -147,14 +183,16 @@ describe('PC-RECALL-CACHE: an in-flight recall never undoes a concurrent local w
       const s = await stack(shape);
       try {
         const secret = 'PLAINTEXT-THAT-MUST-NOT-SURVIVE-ERASURE';
-        await s.client.remember(secret, { cellId: 'X' });
-        await s.client.remember('an unrelated memory', { cellId: 'Y' });
+        const X = uid('X');
+        await s.client.remember(secret, { cellId: X });
+        await s.client.remember('an unrelated memory', { cellId: uid('Y') });
 
-        s.hold();
+        const held = s.hold();
         const inFlight = s.client.recall();
-        await settle();
+        await held;
 
-        const r = await s.client.forget('X');
+        assertHeldTheDataRequest(shape, s.heldParams());
+        const r = await s.client.forget(X);
         assert.equal(r.complete, true, 'setup: the endpoint must report the erasure complete');
         assert.equal(
           r.localCacheResidual,
@@ -180,14 +218,15 @@ describe('PC-RECALL-CACHE: an in-flight recall never undoes a concurrent local w
     it(`${shape}: a remember during an in-flight recall is not dropped from the cache`, async () => {
       const s = await stack(shape);
       try {
-        await s.client.remember('an existing memory', { cellId: 'X' });
+        await s.client.remember('an existing memory', { cellId: uid('X') });
 
-        s.hold();
+        const held = s.hold();
         const inFlight = s.client.recall();
-        await settle();
+        await held;
 
         const written = 'WRITTEN-DURING-AN-IN-FLIGHT-RECALL';
-        await s.client.remember(written, { cellId: 'Z' });
+        assertHeldTheDataRequest(shape, s.heldParams());
+        await s.client.remember(written, { cellId: uid('Z') });
         assert.ok(
           s.onDisk().includes(written),
           'positive control: the write must reach the cache before the response lands',

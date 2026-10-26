@@ -322,17 +322,20 @@ session.
 
 ## How it works
 
-**In plain terms.** Everything is encrypted on your machine before it is sent, and
-decrypted on your machine after it comes back. What's stored is unreadable
-ciphertext and no key that opens it. To erase something, its key is destroyed —
-which is why erasure is immediate and final rather than a promise that a copy was
-deleted somewhere.
+**In plain terms.** Your memories are encrypted on your machine before they are sent,
+and decrypted on your machine after they come back. SAIHM stores them encrypted, with
+the few routing details they need and each memory's key locked under yours (the
+security model below lists what it holds). To erase something, that key is destroyed —
+which is why erasing the stored memory is immediate and final rather than a promise that
+a copy was deleted somewhere.
 
 **For the technically inclined.**
 
 - **Encrypt before send** — `remember` encrypts client-side; `recall` decrypts
-  client-side. Your plaintext, master secret, and key-encryption key never leave
-  this process.
+  client-side. The plaintext of your memories, your master secret and your
+  key-encryption key are never sent to the endpoint. When the recall cache is on (by
+  default with the self-join key file), your memories are also kept unencrypted on
+  your device; see Local recall cache below.
 - **Post-quantum** — ML-DSA-65 for identity and signing, ML-KEM-768 for
   authenticated sharing, via
   [`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro).
@@ -354,14 +357,14 @@ deleted somewhere.
 
 | Property | Guarantee |
 | --- | --- |
-| Confidentiality vs the endpoint | The endpoint holds ciphertext, wrapped DEKs, and public keys only — no key able to decrypt. |
+| Confidentiality vs the endpoint | The endpoint holds ciphertext, wrapped DEKs, public keys and the routing details each cell needs, such as its id and time — no key able to decrypt. |
 | Integrity / authenticity | Every cell is ML-DSA-65-signed over its contents, including the sequence number. |
 | Anti-replay | The signed monotonic sequence is rejected by the endpoint if it does not strictly increase. |
 | Tenant isolation | Your `agentIdHash` (the JWT `sub`) namespaces your state; a write whose signed identity differs from the JWT is rejected. |
 | Authenticated sharing | Grantee public keys are pinned out-of-band and verified before any secret is bound to them; on the recipient side, `recallShared` pins the sharer's key and verifies the cell signature before returning any plaintext. |
 | Erasure | Destroying the endpoint-side wrapped DEK crypto-shreds the cell. |
-| Local recall cache | When the recall cache is on, memories this device has opened are also kept unencrypted in a mode-600 file beside your key. `forget` removes the memory from it; `SAIHM_RECALL_CACHE=0` keeps no local copy. |
-| Warm-start snapshots | Encrypted in this process under a fresh key per snapshot, which is wrapped under your key-encryption key and never stored unwrapped. The endpoint holds the ciphertext and the wrapped key only. A forget that reaches your snapshots destroys them before it reports the erasure complete. |
+| Local recall cache | When the recall cache is on, every memory saved or read on this device and, after the first recall, all of your memories are also kept unencrypted in a mode-600 file beside your key, one file shared by every process on the device that uses that key with the cache on. `forget` removes the memory from it, and `SAIHM_RECALL_CACHE` below says how to go without one. |
+| Warm-start snapshots | Encrypted in this process under a fresh key per snapshot, which is wrapped under your key-encryption key and never stored unwrapped. The endpoint holds the ciphertext and the wrapped key. A forget that reaches your snapshots destroys them before it reports the erasure complete. |
 | Erasure cascade | Each `forget` appends one line to `$SAIHM_HOME/tenants/<agentIdHash>/erasures.ndjson`. The line carries the cell id, the identity and the time — never cell content — and, beside `complete: false`, the `reason` the forget returns: `not-found` means there was nothing (more) to erase, not a failed erasure. With your own cells followed (`SAIHM_EVENTS=1`), erasures made elsewhere are added as they are reported. |
 
 ### Where encrypted cells are stored
@@ -375,8 +378,8 @@ provisioning that storage yourself.
 
 Prefer not to run storage at all? The hosted operator at
 <https://saihm.net> provides durable storage and is **non-custodial** —
-because this client encrypts every cell locally, the hosted operator only ever
-stores ciphertext and never holds a key.
+because this client encrypts every cell locally, the hosted operator never holds a
+key that can open your memories.
 
 ## Configuration
 
@@ -395,11 +398,11 @@ the rest have working defaults.
 | `SAIHM_EPHEMERAL_HOME` | no | Says whether this environment discards its home directory when a session ends. Set it (e.g. `1`) where it does: the join then refuses to create a key that would be lost. `0` declares the home kept and overrides a host's own signal. Unset: detected where the host says so. |
 | `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600), where per-restart bookkeeping is kept, and where the erasure feed is written unless `SAIHM_ERASURE_FEED_DIR` overrides it. Defaults to `~/.saihm`. Give a full path: a JSON config does not expand `~`, so `~/.saihm` there is a relative path, and a relative path (or one that begins with a space) is refused at start. Versions before 0.13.0 used it, under the server's working directory: a key made there is still there, so move it into the full path you set. |
 | `SAIHM_AUTH_HEADER` | no | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended) — the client mints and refreshes its own token, so there is nothing to paste or re-paste. |
-| `SAIHM_TIER` | paid self-onboard; any self-onboard with `SAIHM_SELF_JOIN=0` | Plan label recorded in encrypted metadata (`FREE`, `PRO`, …). Defaults to `FREE` while self-join is on (the default); set it for a paid plan, and with self-join off for every plan, `FREE` included. An `export-identity` token carries its own, which a non-empty value here overrides. With self-join off and a static `SAIHM_AUTH_HEADER`, resolved via `status()`. |
+| `SAIHM_TIER` | paid self-onboard; any self-onboard with `SAIHM_SELF_JOIN=0` | Plan label carried with each memory's routing details (`FREE`, `PRO`, …). Defaults to `FREE` while self-join is on (the default); set it for a paid plan, and with self-join off for every plan, `FREE` included. An `export-identity` token carries its own, which a non-empty value here overrides. With self-join off and a static `SAIHM_AUTH_HEADER`, resolved via `status()`. |
 | `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan: `stripe` for the card checkout that `upgrade` prints, which keeps the key you have and its memories; `stablecoin` for a plan paid on [the join page](https://saihm.net/join). Paying there starts a new identity with its own key, and the memories on a key you already have do not move to it, so upgrade an existing key with the card link. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. An identity token carries it; a non-empty value here overrides the token's. |
 | `SAIHM_SEQ_STATE_PATH` | no | Overrides where the anti-rollback bookkeeping is written. Running as an MCP server this is **on by default** at `$SAIHM_HOME/seq.<id>.json`; set it only to relocate it. The default location is ours to manage: if it can't be written, the tally stays in memory for the session and `status` says so. A location **you** set is yours: if it can't be written, calls fail and name the path, so a safeguard you asked for never goes quiet without telling you. `status` reports this as `seq-state=…` followed by `rollback-guard=persisting` (writes still work, so the next one rewrites the file) or `memory-only-this-run` (it retries at the next restart). Either way, if the file couldn't be READ at startup the safeguard starts from scratch and rebuilds as each memory is next read — so an older copy of a memory would not be caught during that window. At the default location that window is about accidental corruption rather than an attacker: writing to that file takes the same access that reads the identity key sitting beside it. Somewhere you relocate it to, that no longer follows — give it the protection you give `$SAIHM_HOME`. Give a full path: a relative one resolves against the server's working directory. |
-| `SAIHM_RECALL_CACHE` | no | Controls the recall cache: the memories this device has already opened, kept so that recall asks the service only for new ones. **On by default** when your key is the self-join identity file in `SAIHM_HOME`; set to `0` to keep no local copy. The copy is **unencrypted** in a file readable only by your user (mode 600), beside the key; `forget` removes a memory from it, and a memory erased from another device leaves it at the next recall. |
-| `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. **With a cache, a recall fetches only what has changed since the last one; without a cache it fetches every memory, every time** — measured against about 208 memories on the hosted endpoint: a warm recall took 24 ms with a cache and 818 ms without, and because the cache is a file it survives a restart — the FIRST recall of a new process took 114-115 ms with a populated cache against 1,022-1,094 ms without. Only the very first run, which builds the cache, pays the full fetch. The cache defaults ON only for an identity that boots from the key file in `$SAIHM_HOME` (that installation already keeps its key and sequence marks there). For any other key source — including `SAIHM_MASTER_SECRET_FILE` pointing elsewhere, or an inline secret — it is OFF unless you set this, and the client says so once on its first recall. **The file holds your memories as plaintext at rest**, which is why it is not simply on for everyone: it is your decision. `SAIHM_RECALL_CACHE=0` turns it off in every case, an explicit path included, and silences the notice. Give a full path: a relative one resolves against the server's working directory. |
+| `SAIHM_RECALL_CACHE` | no | Controls the recall cache: a copy of every memory saved or read on this device and, after the first recall, of all your memories, kept so that recall asks the service only for memories that are new or have changed, on this device or another. **On by default** when your key is the self-join identity file in `SAIHM_HOME`; `0` stops making one. Every process on this device that uses your key with the cache on writes the same file; the README's [How it works](./README.md#how-it-works) has the steps to turn the copy off everywhere and delete one already written. The copy is **unencrypted** in a file readable only by your user (mode 600), beside the key; `forget` removes a memory from it, and a memory erased from another device leaves it at the next successful recall. |
+| `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. **With a cache, a recall first checks each memory's version with the service and fetches only what is new or has changed since the last one; without a cache it fetches every memory, every time.** The cache is a file, so it survives a restart: only the very first run, which builds it, pays the full fetch. If the service offers no version check, the recall fetches every memory; if the check fails, the recall reports the error. It never answers from the cache unchecked. The cache defaults ON only for an identity that boots from the key file in `$SAIHM_HOME` (that installation already keeps its key and sequence marks there). For any other key source — including `SAIHM_MASTER_SECRET_FILE` pointing elsewhere, or an inline secret — it is OFF unless you set this, and the client says so once on its first recall. **The file holds your memories as plaintext at rest**, which is why it is not simply on for everyone: it is your decision. `SAIHM_RECALL_CACHE=0` turns it off in every case, an explicit path included, and silences the notice. Give a full path: a relative one resolves against the server's working directory. |
 | `SAIHM_STATE_DIR` | no | Where transient operator state (such as `checkout-url.txt`) is written. Does **not** relocate your identity or its bookkeeping. Give a full path: a relative one is refused at start. |
 | `SAIHM_ERASURE_FEED` | no | Controls the erasure feed — one line appended per `forget`, so a consumer can drop whatever it derived from that cell. **On by default**; set to `0` to write nothing. Writing the line can never fail an erasure: the erasure is what you asked for and the line is a notification about it, so a feed that can't be written is reported beside the result and the erasure still stands. With `SAIHM_EVENTS=1`, `0` also means the own-cell kinds are never asked for, and while the endpoint offers them this process writes no `share-states.json` (the file would vouch for change files it does not write). |
 | `SAIHM_EVENTS` | no | Set to `1` to follow share events: from the moment the server starts, it long-polls the endpoint for shares made to you (new, updated, stale, ended, erased), and for changes to your own cells when the endpoint offers them (one process per identity and directory then writes `changes.ndjson`, rotating it and `erasures.ndjson`: see *Changes to your own cells* below). `saihm_recall` then returns a summary as `shareStates` when it lists memories, beside `shared`, with every entry when the call passes `shareEntries: true`, and the map is written to `share-states.json` beside the erasure feed for other processes to read (see *Following shares* below). **Off by default.** The map and the position in the feed survive a restart (see `SAIHM_SHARE_MAP_STORE`); a sender is marked verified only after a shared memory is read and its signature checked. Endpoints that do not offer events are left alone. |

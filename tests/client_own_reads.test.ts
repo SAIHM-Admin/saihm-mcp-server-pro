@@ -128,10 +128,15 @@ test('the version listing: requested alone, paged with after, a null seq kept; a
     const two = await r.client.listVersions(one.next!);
     assert.deepEqual(two, { cells: [{ cellId: 'c', seq: '1', commitment: C1 }], next: null });
     assert.deepEqual(r.calls.map((c) => c.params), [{ listOnly: true }, { listOnly: true, after: 'b' }], 'nothing else travels with it');
+    // The recall-all array an endpoint without the listing answers with is refused by name; any other answer that is not
+    // a listing (no hosted build sends one) is a listing this client cannot read.
     r.set('list', () => [{ cellId: 'a', found: false }]);
     await assert.rejects(r.client.listVersions(), (e: unknown) => e instanceof SaihmEndpointError && e.code === 'listing_unsupported');
     r.set('list', () => ({ mode: 'delta', added: [], liveCellIds: [] }));
-    await assert.rejects(r.client.listVersions(), (e: unknown) => e instanceof SaihmEndpointError && e.code === 'listing_unsupported');
+    await assert.rejects(
+      r.client.listVersions(),
+      (e: unknown) => e instanceof SaihmEndpointError && e.code === 'malformed_response' && e.message.endsWith('(not a listing)'),
+    );
   } finally { await r.done(); }
 });
 

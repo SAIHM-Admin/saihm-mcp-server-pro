@@ -7,7 +7,7 @@ If you believe you have found a security vulnerability in
 report it privately so that we can investigate and remediate before public
 disclosure.
 
-**Private channel:** architect@saihm.coti.global
+**Private channel:** security@saihm.net
 
 Please include, where possible:
 
@@ -19,7 +19,7 @@ Please include, where possible:
   endpoint, or in a dependency
 - Your name or handle if you wish to be credited in the fix
 
-We acknowledge reports within **14 days**. We aim to provide an initial
+We aim to acknowledge reports within **72 hours**, and to provide an initial
 assessment and a fix or mitigation plan within **30 days** for confirmed
 vulnerabilities, depending on severity and complexity.
 
@@ -39,7 +39,6 @@ Out of scope (please report to the relevant project instead):
   Cursor, etc.) — report to the client vendor
 - Vulnerabilities in the underlying Model Context Protocol — report to
   https://github.com/modelcontextprotocol
-- Vulnerabilities in the COTI V2 blockchain network — report to COTI Group
 - Vulnerabilities in your specific SAIHM operator deployment — report to your
   operator
 - Vulnerabilities in unrelated open-source dependencies — please report
@@ -56,10 +55,13 @@ available we will:
 
 ## Cryptographic concerns
 
-The master secret, key-encryption key, and plaintext never leave this
-process; cells are sealed client-side via `@saihm/client-pro` before transport
-(ML-DSA-65 identity/signing, ML-KEM-768 sharing, AES-256-GCM per cell). The
-operator endpoint stores and meters over ciphertext only.
+The master secret, the key-encryption key and the plaintext of memories are
+never sent to the endpoint; cells are sealed client-side via `@saihm/client-pro`
+before transport (ML-DSA-65 identity/signing, ML-KEM-768 sharing, AES-256-GCM
+per cell). The operator endpoint stores ciphertext, wrapped keys and the
+routing details each cell needs, meters usage, and holds no key that can
+decrypt. When the local recall copy is on (by default with the self-join key
+file), memories are also kept unencrypted on the user's device.
 
 If a vulnerability is in the protocol specification itself rather than this
 implementation, please indicate that in your report.

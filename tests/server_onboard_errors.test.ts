@@ -321,7 +321,11 @@ test('while a join waits, a 401 for another reason is reported as itself, not as
   assert.match(r.recall.text, /bad_signature/, r.recall.text);
 });
 
-async function joinThenCalls(onboard: (n: number) => { status: number; body?: unknown; headers?: Record<string, string> }, calls: number) {
+async function joinThenCalls(
+  onboard: (n: number) => { status: number; body?: unknown; headers?: Record<string, string> },
+  calls: number,
+  opts: { tool?: string; copy?: boolean } = {},
+) {
   let onboards = 0;
   const m = await listen((route, _body, res) => {
     const send = (s: number, b: unknown) => void res.writeHead(s, { 'content-type': 'application/json' }).end(JSON.stringify(b));
@@ -339,11 +343,20 @@ async function joinThenCalls(onboard: (n: number) => { status: number; body?: un
   const home = mkdtempSync(join(tmpdir(), 'saihm-oberr-'));
   // A key left by an earlier session: this process did not create it.
   writeFileSync(join(home, 'free-identity.key'), 'cd'.repeat(32), { mode: 0o600 });
-  const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
+  // A recall copy that holds a memory: a recall then reads the version listing first, and signs in for it.
+  const copy = join(home, 'recall-copy.json');
+  if (opts.copy === true)
+    writeFileSync(copy, JSON.stringify({ c1: { cellId: 'c1', plaintext: 'held', seq: '1', commitmentHash: 'ab'.repeat(32) } }), { mode: 0o600 });
+  const d = await startServer({
+    HOME: home,
+    SAIHM_HOME: home,
+    SAIHM_ENDPOINT_URL: `${m.base}/mcp`,
+    ...(opts.copy === true ? { SAIHM_RECALL_CACHE_PATH: copy } : {}),
+  });
   try {
     await d.call('saihm_join', {});
     const texts: string[] = [];
-    for (let i = 0; i < calls; i++) texts.push((await d.call('saihm_status', {})).text);
+    for (let i = 0; i < calls; i++) texts.push((await d.call(opts.tool ?? 'saihm_status', {})).text);
     return { texts, onboards };
   } finally {
     d.proc.kill();
@@ -363,6 +376,18 @@ test('a rate limit during a join answers with the join steps, then the wait', as
   assert.match(r.texts[0]!, /^SAIHM memory is not active yet: the join is waiting for approval\.\nTo activate/, r.texts[0]);
   assert.match(r.texts[0]!, /rate_limited/, r.texts[0]);
   assert.match(r.texts[0]!, /Wait 10 seconds, then try again\./, r.texts[0]);
+});
+
+test('a recall with the copy on during a join: its sign-in limit and refusal answer as the join, as without the copy', async () => {
+  // The recall's version check wraps the sign-in's failure in its own opening ("Recall stopped: ..."), so the join's
+  // steps must be found from the cause the error carries, not from how its message begins.
+  const limited = await joinThenCalls(() => ({ status: 429, headers: { 'retry-after': '10' } }), 1, { tool: 'saihm_recall', copy: true });
+  assert.match(limited.texts[0]!, /^SAIHM memory is not active yet: the join is waiting for approval\.\nTo activate/, limited.texts[0]);
+  assert.match(limited.texts[0]!, /\nSAIHM error \[rate_limited\] \(status 429\): Recall stopped: this device's copy of your memories could not be checked/, limited.texts[0]);
+  assert.match(limited.texts[0]!, /SAIHM onboard failed: 429 Too Many Requests\. Wait 10 seconds, then try again\.$/, limited.texts[0]);
+  const refused = await joinThenCalls(() => ({ status: 401, body: { error: 'verification_failed', reason: 'no_free_entitlement' } }), 2, { tool: 'saihm_recall', copy: true });
+  for (const t of refused.texts) assert.match(t, /^SAIHM memory is not active yet: the join is waiting for approval\.\nTo activate/, t);
+  assert.equal(refused.onboards, 1, 'one onboard, then the join answers for itself');
 });
 
 type Answer = { status: number; body?: unknown; headers?: Record<string, string> };

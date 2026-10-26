@@ -32,9 +32,10 @@ AI assistants forget everything when the session ends. SAIHM gives yours a memor
 that doesn't — one that follows you to a different assistant, a different model,
 or a different company's product.
 
-**Encrypted at rest, by default.** Every memory is encrypted on your own machine
-before it goes anywhere, and SAIHM stores only that ciphertext. Nobody else can read
-your memories — not the storage, not SAIHM. There is nothing to switch on.
+**Encrypted before it leaves your machine.** Nobody else can read your memories — not
+the storage, not SAIHM. There is nothing to switch on. With the standard setup, SAIHM
+also keeps an unencrypted copy of your memories on your own device for fast recall. Only
+your account can read it, and [one setting](#how-it-works) turns it off.
 
 ## Start free — one command
 
@@ -75,7 +76,7 @@ the others are documented from each vendor's own documentation. Every configurat
 subject to change at the vendor's discretion.
 
 SAIHM runs on your machine as a local MCP server that your AI client starts with
-`npx`, so you need Node.js 20 or later. The package is
+`npx`, so you need Node.js 20.19 or later. The package is
 [`@saihm/mcp-server-pro`](https://www.npmjs.com/package/@saihm/mcp-server-pro) on npm,
 and the official [MCP Registry](https://registry.modelcontextprotocol.io) lists it as
 `io.github.SAIHM-Admin/saihm-mcp-server-pro`.
@@ -265,6 +266,42 @@ then restart the server from **MCP: List Servers**.
 For the GitHub Copilot cloud agent, see
 [Hosted agent environments](#hosted-agent-environments).
 
+### GitHub Copilot for enterprises (Microsoft)
+
+If your company decides which MCP servers GitHub Copilot may run, an enterprise owner can
+allow SAIHM:
+
+1. If your company keeps an MCP allowlist, add SAIHM in the same form as the entries
+   already on it, because in a list with command entries, Copilot can require every
+   local server to match one.
+
+   - In a list with command entries, add one with the command in this README's setup
+     blocks:
+
+     ```json
+     { "serverCommand": ["npx", "-y", "@saihm/mcp-server-pro"] }
+     ```
+
+     VS Code's MCP server gallery installs SAIHM pinned to the current version and
+     without `-y`, for example `["npx", "@saihm/mcp-server-pro@0.14.2"]`. Copilot matches
+     the command and each argument exactly, so list each form your users run.
+   - In a list without command entries, add `{ "serverName": "saihm" }`, and have your
+     users add SAIHM with this README's setup blocks, which give it that name. A copy
+     installed from VS Code's gallery carries a different name, so it doesn't match this
+     entry.
+2. Make sure the **MCP servers in Copilot** policy is on for your enterprise, or for the
+   organizations that should use SAIHM.
+
+If your company limits MCP servers to a registry, SAIHM's ID in the official MCP Registry
+is `io.github.SAIHM-Admin/saihm-mcp-server-pro`. GitHub's
+[guide to enterprise MCP allowlists](https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-enterprise-allowlist)
+covers the rest, including how entries are matched and how changes reach your users.
+
+With the standard setup, SAIHM keeps an unencrypted copy of each user's memories on their
+device for fast recall, readable only by their account. Users who prefer not to keep one
+can turn it off, as [How it works](#how-it-works) describes; the allowlist can't do this
+for them.
+
 ### Other MCP clients
 
 For clients that run local MCP servers from an `mcpServers` block, such as Cline,
@@ -292,8 +329,8 @@ terminal. It downloads the package, prints its version and exits. Then restart C
 ## Agent frameworks
 
 Building agents in Python? The same encrypted memory plugs into the major frameworks. Each
-adapter needs Node.js 20 or later, like this server, and encrypts inside your process, so
-Python never holds a key.
+adapter needs Node.js 20.19 or later, like this server, and encrypts inside your process,
+so Python never holds a key.
 
 | Framework | What you get | Install |
 |---|---|---|
@@ -320,7 +357,7 @@ You don't call tools by name — you talk to your assistant. Some starters:
 
 > Share that note with my colleague's agent until 5:00 pm today.
 
-> How much of my SAIHM allowance is left?
+> Show my SAIHM status.
 
 > Forget everything I told you about the Henderson account.
 
@@ -329,7 +366,7 @@ You don't call tools by name — you talk to your assistant. Some starters:
 | `saihm_remember` | Encrypts on your machine, then stores it |
 | `saihm_recall` | Fetches and decrypts on your machine |
 | `saihm_forget` | **Permanently erases.** No undo |
-| `saihm_status` | Your usage and settings |
+| `saihm_status` | Your identity, plan and memory counts |
 | `saihm_share` | Grants one memory to one agent, optionally with an expiry |
 | `saihm_revoke_share` | Withdraws that grant |
 
@@ -469,8 +506,7 @@ that would be lost with it.
 
 Start free. The free tier is a fixed, one-time allowance of writes, reads, and shares
 for trying SAIHM on real infrastructure — it doesn't reset or refill. **No card, and
-nothing to cancel.** Your assistant shows what's left and warns you as it runs low, so
-nothing fails by surprise.
+nothing to cancel.**
 
 Paid plans are monthly; prices are on the [pricing page](https://saihm.net/pricing).
 Upgrading keeps the same key and every memory you already
@@ -513,24 +549,34 @@ Proxies, erasure answers and everything else are in the
 
 ## How it works
 
-Everything is encrypted on your machine before it is sent, and decrypted on your
-machine after it comes back. What SAIHM stores is unreadable ciphertext, and no key
-that opens it. To erase something, its key is destroyed — which is why erasure is
-immediate and final rather than a promise that a copy was deleted somewhere.
+Your memories are encrypted on your machine before they are sent, and decrypted on your
+machine after they come back. SAIHM stores them encrypted, with the few routing details
+they need and each memory's key locked under yours. To erase something, that key is
+destroyed — which is why erasing the stored memory is immediate and final rather than a
+promise that a copy was deleted somewhere.
 
 - **Post-quantum by design.** ML-DSA-65 signs every memory, and ML-KEM-768 protects
   sharing.
 - **Non-custodial.** The hosted service at <https://saihm.net> provides the durable
-  storage, yet only ever holds ciphertext and never a key.
+  storage, yet never holds a key that can open your memories.
 - **Erasure that travels.** Each `forget` also writes a notice, so anything built from
   that memory — an index, a mirror, an extracted fact — can drop it too.
-- **Fast recall on your device.** With the standard setup, this client keeps a local
-  copy of the memories you have already opened, so a recall fetches only what is new.
-  That copy is not encrypted, only your user account can read it, and `forget` removes
-  a memory from it too.
-- **Everything encrypted at rest, if you prefer.** Set `SAIHM_RECALL_CACHE=0` and this
-  client keeps no local copy, so every memory SAIHM holds at rest is ciphertext. The
-  trade-off is speed: each recall then fetches all your memories again.
+- **Fast recall on your device.** With the standard setup, SAIHM keeps a local copy of
+  every memory you save or read on this device and, after the first recall, of all your
+  memories, so a recall fetches only what is new or has changed, on this device or
+  another. That copy is not encrypted, and only your user account can read it. `forget`
+  removes a memory from it too, and your other devices drop it at their next successful
+  recall. Backups of your device keep the copy as it was when they were made.
+- **Everything encrypted at rest, if you prefer.** Set `SAIHM_RECALL_CACHE` to `0` in
+  every AI client and app that runs SAIHM with your key on this device, in the same place
+  as its `SAIHM_ENDPOINT_URL` setting and written the same way. Then quit all of them,
+  every open session and window included, delete the files beside your key whose names
+  start with `recall.`, and start them again. From then on SAIHM keeps no local copy, so
+  every memory it holds at rest is ciphertext, and each recall fetches all your memories
+  again. That is slower and, on a plan that limits recalls, such as the free tier, uses up
+  its allowance faster. Add the setting to any client or app you set up later, too.
+  If a `recall.` file ever comes back beside your key, a client or app still has the
+  copy on.
 
 The [technical reference](./REFERENCE.md#how-it-works) has the security model, where
 the encrypted memories are stored, and every setting.
@@ -639,6 +685,13 @@ The [reference](./REFERENCE.md#shm-and-this-client) lists the tools and files SH
 The [SAIHM manual](https://saihm.net/manual) covers both: chapter 4 for what SHM adds,
 chapter 5 for its levers and recipes, and chapter 9 for why to choose SAIHM and SHM
 together.
+
+## Questions
+
+Message SAIHM on WhatsApp at `@saihm.inc`, ask in the
+[SAIHM community group on WhatsApp](https://chat.whatsapp.com/LYYL1MgKe3IE2hcR8qfErf), or write through
+[saihm.net/contact](https://saihm.net/contact). SAIHM personnel never ask for your key
+file; never send it to anyone.
 
 ## Support SAIHM
 

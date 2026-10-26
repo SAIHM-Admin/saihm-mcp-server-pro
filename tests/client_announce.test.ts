@@ -110,6 +110,20 @@ async function withStack(
       const wire = store.get(params.cellId);
       return wire ? { found: true, wire } : { found: false };
     }
+    // The version listing a delta endpoint serves beside the delta (0.14.2: a recall with a cache reads it first and
+    // sends as known only the cells it lists at the cached version). Without the delta gate this endpoint predates
+    // both, so a listing request is answered as a recall-all, below.
+    if (params.listOnly === true && process.env.SAIHM_BLIND_RECALL_DELTA === '1') {
+      return {
+        mode: 'list',
+        cells: [...store.keys()].sort().map((cellId) => ({
+          cellId,
+          seq: null,
+          commitment: store.get(cellId)!.publicMeta.commitmentHash.toLowerCase(),
+        })),
+        next: null,
+      };
+    }
     if (Array.isArray(params.knownCellIds) && process.env.SAIHM_BLIND_RECALL_DELTA === '1') {
       const known = new Set(params.knownCellIds as string[]);
       return {
@@ -453,6 +467,7 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
     const prev = process.env.SAIHM_BLIND_RECALL_DELTA;
     process.env.SAIHM_BLIND_RECALL_DELTA = '1';
     const cacheDir = mkdtempSync(join(tmpdir(), 'saihm-ann-delta-'));
+    let sawDelta = false;
     try {
       await withStack(
         async (ctx) => {
@@ -475,10 +490,16 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
             'deleting the delta branch assignment must not leave this suite green',
           );
           assert.equal(r.announcements[0].cellId, 'via-delta');
+          assert.equal(sawDelta, true, 'the endpoint answered with a delta: the delta branch carried the announcement');
           // A pointer must never be written into the on-disk own-cell cache.
           assert.ok(!Object.keys(cached).includes('via-delta'), 'announcements are never cached');
         },
-        { transform: inject(announce('via-delta', SHARER_A, 'read', '5000000000')) },
+        {
+          transform: (method, text) => {
+            if (method === 'saihm_recall' && (JSON.parse(text) as { mode?: unknown }).mode === 'delta') sawDelta = true;
+            return inject(announce('via-delta', SHARER_A, 'read', '5000000000'))(method, text);
+          },
+        },
       );
     } finally {
       if (prev === undefined) delete process.env.SAIHM_BLIND_RECALL_DELTA;
@@ -489,8 +510,9 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
 
   it('LEGACY-ARRAY FALLBACK with a cache configured: announcements still reach the caller', async () => {
     // The third recall path, and the one easiest to leave behind: a DELTA-configured client talking to
-    // an endpoint whose delta gate is OFF. It takes the cache branch (so it sends knownCellIds and
-    // writes the cache) but gets the legacy ARRAY back, and must open that array for announcements
+    // an endpoint whose delta gate is OFF. It takes the cache branch (since 0.14.2 its first request is
+    // the version listing, which such an endpoint answers as a recall-all; it writes the cache) but gets
+    // the legacy ARRAY back, and must open that array for announcements
     // exactly as the uncached full path does. Dropping them here fails silently — the caller sees a
     // well-formed, complete-looking recall with no pointers in it.
     const prev = process.env.SAIHM_BLIND_RECALL_DELTA;
@@ -543,6 +565,7 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
     process.env.SAIHM_BLIND_RECALL_DELTA = '1';
     const cacheDir = mkdtempSync(join(tmpdir(), 'saihm-ann-cap-'));
     const flood = Array.from({ length: 300 }, (_, i) => announce(`cap-${i}`, SHARER_A));
+    let sawDelta = false;
     try {
       await withStack(
         async (ctx) => {
@@ -561,8 +584,14 @@ describe('PC-SHARED-ANNOUNCE: announcements are pointers, never memories', () =>
           // Kept in arrival order, so the caller can reason about WHICH 256 survived.
           assert.equal(r.announcements[0].cellId, 'cap-0');
           assert.equal(r.announcements[255].cellId, 'cap-255');
+          assert.equal(sawDelta, true, 'the endpoint answered with a delta: the cap was applied to `added`');
         },
-        { transform: inject(...flood) },
+        {
+          transform: (method, text) => {
+            if (method === 'saihm_recall' && (JSON.parse(text) as { mode?: unknown }).mode === 'delta') sawDelta = true;
+            return inject(...flood)(method, text);
+          },
+        },
       );
     } finally {
       if (prev === undefined) delete process.env.SAIHM_BLIND_RECALL_DELTA;

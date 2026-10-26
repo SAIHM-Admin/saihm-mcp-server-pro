@@ -42,6 +42,8 @@ import {
 import {
   SaihmConfigError,
   SaihmEndpointError,
+  copyCheckFailed,
+  staleWriteRefusal,
   markPathBearing,
   isPathBearing,
   MAX_ERROR_CODE_CHARS,
@@ -1026,6 +1028,93 @@ test('failText fences a PLAIN Error and a non-Error throw too — no unfenced br
   assert.equal(failText({ toString: () => 'boom' }), 'boom', 'the String(e) arm still stringifies');
 });
 
+test("failText: a recall's failed copy check shows its opening, then the cause as whole as the cause alone (R14)", () => {
+  // R14-F1. The client puts its own opening before the cause of a failed copy check. Fenced as ONE message, the
+  // opening spent the budget the cause needed: a certificate the machine does not trust lost "Never disable
+  // certificate checks" and the NODE_EXTRA_CA_CERTS remedy. The opening is fenced apart now, and the cause gets the
+  // budget it has alone - no more, so an endpoint gains nothing.
+  const OPENING =
+    "Recall stopped: this device's copy of your memories could not be checked for changes made elsewhere, so it was " +
+    'not used. Nothing was lost.';
+  const shown = (e: unknown): string => failText(e).replace(/^SAIHM error \[[^\]]*\] \(status -?\d+\): /, '');
+  const hosted = 'https://saihm.net/mcp';
+  // The longest cause of each class on the hosted address: the longest code a network that inspects TLS produces, a
+  // proxy variable, an unusable proxy setting, a reset, a limit, a timeout, and the sign-in's own transport errors.
+  const causes: Array<[number, string, string]> = [
+    [0, 'network', `SAIHM endpoint saihm_recall could not reach ${hosted} (UNABLE_TO_GET_ISSUER_CERT_LOCALLY). Never disable certificate checks; if TLS is inspected here, set NODE_EXTRA_CA_CERTS to a file of the network admin's CA certificate.`],
+    [0, 'network', `SAIHM endpoint saihm_recall could not reach ${hosted} (PROXY_CONNECT_TIMEOUT). Via https_proxy: if hosted, allow this host in its network settings; else check the proxy and NO_PROXY.`],
+    [0, 'network', `SAIHM endpoint saihm_recall could not reach ${hosted} (https_proxy_NOT_AN_HTTP_PROXY). Only an http proxy URL is supported: fix the variable named above, or add this host to NO_PROXY.`],
+    [0, 'network', `SAIHM endpoint saihm_recall could not reach ${hosted} (ECONNRESET). If hosted, allow that host in its network settings; to use a proxy, set HTTPS_PROXY and check NO_PROXY.`],
+    [429, 'rate_limited', 'SAIHM endpoint saihm_recall failed: 429 Too Many Requests. Wait a minute, then try again.'],
+    [429, 'quota_hard_cap', 'SAIHM endpoint saihm_recall failed: 429 Too Many Requests (quota_hard_cap)'],
+    [503, 'upstream_unavailable', 'SAIHM endpoint saihm_recall failed: 503 Service Unavailable (upstream_unavailable)'],
+    [408, 'timeout', 'SAIHM endpoint saihm_recall timed out after 30000ms'],
+    [0, 'network', "SAIHM onboard transport error: the SAIHM endpoint's certificate is not trusted here. Never turn certificate checks off: if this network inspects TLS, get its CA certificate from its administrator, set NODE_EXTRA_CA_CERTS to that file and restart."],
+    [0, 'network', 'SAIHM onboard transport error: the SAIHM endpoint could not be reached through the proxy in https_proxy. In a hosted agent environment, allow its host (saihm.net by default) in the network settings; else check the proxy and NO_PROXY.'],
+    [0, 'network', "SAIHM onboard transport error: the SAIHM endpoint could not be reached. In a hosted agent environment, allow the endpoint's host (saihm.net by default) in its network settings; if traffic must go through a proxy, set HTTPS_PROXY."],
+  ];
+  for (const [status, code, cause] of causes) {
+    const alone = new SaihmEndpointError(status, code, cause);
+    assert.equal(failText(alone), `SAIHM error [${code}] (status ${status}): ${cause}`, `control: alone it is whole (${cause.length})`);
+    const wrapped = copyCheckFailed(alone);
+    assert.equal(failText(wrapped), `SAIHM error [${code}] (status ${status}): ${OPENING} ${cause}`, cause);
+    assert.equal(wrapped.message, `${OPENING} ${cause}`, 'the message a library caller reads is the same text');
+    assert.deepEqual(failCode(wrapped), { code, status }, "the cause's code and status");
+  }
+  // Past the budget a cause is cut where it is cut alone, and the opening is not cut at all.
+  const long = new SaihmEndpointError(503, 'busy', `SAIHM endpoint saihm_recall failed: 503 ${'S'.repeat(400)}`);
+  assert.ok(shown(long).endsWith('…'), 'setup: alone, this cause is cut');
+  assert.equal(shown(copyCheckFailed(long)), `${OPENING} ${shown(long)}`);
+  // A cause in lower case begins its own sentence after the opening.
+  assert.equal(
+    shown(copyCheckFailed(new SaihmEndpointError(502, 'malformed_response', 'endpoint returned a malformed version listing (next)'))),
+    `${OPENING} Endpoint returned a malformed version listing (next)`,
+  );
+  assert.equal(shown(copyCheckFailed('not an error')), `${OPENING} The check failed`);
+  // A message that is not a string is read as text, not called as one.
+  const odd = new SaihmEndpointError(502, 'x', 'x');
+  Object.defineProperty(odd, 'message', { value: { toString: () => 'odd message' } });
+  assert.equal(shown(copyCheckFailed(odd)), `${OPENING} Odd message`);
+  // The endpoint's share stays one budget: a megabyte cause renders as the opening and one budget's worth.
+  assert.equal(shown(copyCheckFailed(new SaihmEndpointError(500, 'h', 'h'.repeat(1_000_000)))).length, OPENING.length + 1 + MAX_ERROR_MESSAGE_CHARS + 1);
+  // The two fences are for the error the client made, and only while its message still opens that way: text that
+  // merely begins with the same words is one message under one budget, and so is the client's error once its message
+  // is replaced.
+  assert.equal(shown(new SaihmEndpointError(0, 'x', `${OPENING} ${'y'.repeat(600)}`)).length, MAX_ERROR_MESSAGE_CHARS + 1);
+  const replaced = copyCheckFailed(new SaihmEndpointError(0, 'x', 'z'));
+  replaced.message = 'q'.repeat(600);
+  assert.equal(shown(replaced), `${'q'.repeat(MAX_ERROR_MESSAGE_CHARS)}…`);
+  // What the opening says is true wherever it is raised: nothing is said to be retried, and nothing reads as "no changes".
+  assert.ok(OPENING.length < MAX_ERROR_MESSAGE_CHARS, 'the opening fits its own fence whole');
+  assert.doesNotMatch(OPENING, /try again|Nothing was changed|Cause:/);
+});
+
+test('failText: a write refused as stale says what happened and what to do, whole, with any reason phrase', () => {
+  // A refusal as stale read "409 Conflict (BLIND_STALE_SEQ)" with no way forward. Its remedy now opens the message and
+  // is fenced apart from the cause, so the longest reason phrase an endpoint may send cannot cut it.
+  const CHANGED =
+    'This memory has changed since this device last read or saved it, so your edit was not saved. Recall it to see ' +
+    'the newer version, then make your edit again.';
+  const ERASED =
+    'This memory was erased, so your edit was not saved. Ask the user before saving this text again as a new memory ' +
+    'without a cellId.';
+  const USED =
+    'This cellId was already used by a memory saved earlier, which may since have been erased, so this one was not ' +
+    'saved under it. Ask the user before saving this text as a new memory without a cellId.';
+  const phrase = 'P'.repeat(MAX_ERROR_CODE_CHARS);
+  const cause = new SaihmEndpointError(409, 'BLIND_STALE_SEQ', `SAIHM endpoint saihm_remember failed: 409 ${phrase} (BLIND_STALE_SEQ)`);
+  for (const [why, opening] of [['changed', CHANGED], ['erased', ERASED], ['used', USED]] as const) {
+    const e = staleWriteRefusal(cause, why);
+    assert.equal(failText(e), `SAIHM error [BLIND_STALE_SEQ] (status 409): ${opening} ${cause.message}`);
+    assert.deepEqual(failCode(e), { code: 'BLIND_STALE_SEQ', status: 409 });
+    assert.ok(opening.length < MAX_ERROR_MESSAGE_CHARS);
+  }
+  // Every other failure of a write is passed on as it was.
+  const other = new SaihmEndpointError(503, 'busy', 'SAIHM endpoint saihm_remember failed: 503 Service Unavailable (busy)');
+  assert.equal(staleWriteRefusal(other, 'changed'), other);
+  assert.equal(staleWriteRefusal('x', 'used'), 'x');
+});
+
 test('failText widens the fence to fit the path a config error MESSAGE carries', () => {
   // The defect: `SAIHM_MASTER_SECRET_FILE could not be read: <path>` was fenced at
   // MAX_ERROR_MESSAGE_CHARS, and the sentence plus setupHint() spent 197 of those 256 characters --
@@ -1294,6 +1383,11 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       // longest cell id or `next` it may carry. Bounds on what is accepted, not render budgets.
       MAX_LISTING_PAGE: 4096,
       MAX_LISTED_CELL_ID_CHARS: 4096,
+      // 0.14.2, the version check of a recall with the copy on: the most listing pages it reads; a longer listing fails
+      // the recall. A bound on requests, not a render budget.
+      MAX_COPY_LISTING_PAGES: 1024,
+      // ...and how many times such a recall runs when a write on this computer overtakes it, before it fails plainly.
+      COPY_RECALL_ATTEMPTS: 3,
       // Warm start: the most an answer other than a part or the listing may hold, the most a listing may hold, the room
       // a part read leaves for a refusal's body, and how many times a part or a commit is sent before its refusal is the
       // answer.
@@ -2240,8 +2334,10 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     'render_fence.ts': {
       'safeField:max': 1, // a pass-through: the caller's own budget, not one of ours
       'safeField:MAX_ERROR_CODE_CHARS': 1,
-      // the endpoint message, the unmarked plain-Error arm, and the non-Error coerce arm
-      'safeField:MAX_ERROR_MESSAGE_CHARS': 3,
+      // the endpoint message, the unmarked plain-Error arm, and the non-Error coerce arm; and (0.14.2, R14) the two
+      // parts of an endpoint error the client opened with its own sentence: that opening, and the cause after it at the
+      // budget the cause has alone - both message-class text, so the message budget, fenced apart (see endpointMessageText)
+      'safeField:MAX_ERROR_MESSAGE_CHARS': 5,
       // A config error naming a URL. It was `safeField:MAX_URL_MESSAGE_CHARS` until round 11: the
       // BUDGET had been widened to fit the URL while the CHARACTER policy stayed on the prose
       // fence, which is the defect class this release exists to close, surviving in the module
@@ -2978,9 +3074,14 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
   // exclusion is dead and should be deleted, or the call-site resolution is broken; both need a
   // person, so neither may pass in silence. PINNED like `total`, so a new excluded call site has to
   // be looked at rather than absorbed.
+  // FIVE (0.14.2), up from three: `keepInCopy` puts the version a single read of an own cell just authenticated into
+  // the copy (its `upsert`) and, when the copy cannot be written, drops the entry instead (its `remove`), swallowing
+  // both as `remember` does, so a read or a share never fails because of the copy. SIX: `dropGoneFromCopy` takes a
+  // memory a read found gone out of the copy (its `remove`), swallowed the same way: a read, a share or a refused
+  // write never fails, nor changes its answer, because the copy could not be written.
   assert.equal(
     excluded,
-    3,
+    6,
     'the number of EXCLUDED persist-reaching call sites changed - each one is exempt from the ' +
       'wrapper sweep only because its failure is swallowed there, so a new one is a decision',
   );
@@ -4252,7 +4353,9 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // client.ts: 8 (0.13.0) - a status answer's `features` is walked whole to bound its DEPTH before it may pass to
   // structured output. The walk reads no value into anything: it pushes children and compares a counter, and the object
   // then passes unread or becomes null. Nothing it reads reaches a renderer.
-  const ANON: Record<string, number> = { 'change-feed.ts': 1, 'client.ts': 8, 'share-events.ts': 4, 'tool-input.ts': 1 };
+  // client.ts: 7 (0.14.2) - one fewer: the recall copy no longer sends every id it holds (`keys()` of its own map). It
+  // sends the cells whose listed version it holds, found by iterating its own map with each value named.
+  const ANON: Record<string, number> = { 'change-feed.ts': 1, 'client.ts': 7, 'share-events.ts': 4, 'tool-input.ts': 1 };
   // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
   // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
   // measured green, which is this round's whole lesson landing on the fix for this round's finding.

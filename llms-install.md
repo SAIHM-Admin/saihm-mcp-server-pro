@@ -21,7 +21,7 @@ the bootstrap tool that answers "Join SAIHM": on by default, removed by
 
 ## Step 1 — write the MCP config
 
-The server is local (stdio), starts with `npx`, and needs Node.js 20 or later.
+The server is local (stdio), starts with `npx`, and needs Node.js 20.19 or later.
 Write the entry in the host's own format, and merge it into what is there rather
 than overwriting it. Per host (from each provider's documentation;
 `README.md` has a ready block for each; the configurations for Claude Code, Gemini

@@ -70,6 +70,12 @@ const b64url = (o: unknown): string =>
 interface MockOpts {
   recallAll?: unknown[];
   recallOneWire?: unknown;
+  /**
+   * A read by id answered with no envelope and no word that the cell is gone (`{found: true}`), so a write has neither a
+   * version to re-seed from nor a record that the memory was erased: only a marks FILE can carry its sequence forward.
+   * (`{found: false}` beside a mark held here says the memory was erased, and an edit of it is refused before its write.)
+   */
+  recallOneUnreadable?: boolean;
   checkoutUrl?: string;
   /** Extra keys merged into the saihm_forget 2xx body — used to inject fields the endpoint has no
    *  business setting, e.g. the client's own `localCacheResidual`. */
@@ -234,7 +240,9 @@ function startMock(opts: MockOpts = {}): {
           return send(
             200,
             params.cellId
-              ? opts.recallOneWire === undefined ? { found: false } : { found: true, wire: opts.recallOneWire }
+              ? opts.recallOneUnreadable === true
+                ? { found: true }
+                : opts.recallOneWire === undefined ? { found: false } : { found: true, wire: opts.recallOneWire }
               : (opts.recallAll ?? []),
           );
         if (m === 'saihm_share')
@@ -1074,7 +1082,7 @@ test('server.ts: the server DEFAULTS a seq-state path, and marks survive a resta
   // Derived from the IDENTITY's directory, not the state directory, and scoped by identity - so two
   // identities sharing a home cannot inherit each other's marks and refuse each other's reads.
   const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-defhome-'));
-  const mock = startMock();
+  const mock = startMock({ recallOneUnreadable: true });
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   try {
     // EVERY assertion inside this try. The first cut put the disk checks between two try blocks, so
@@ -1300,7 +1308,7 @@ test('server.ts: a mark that cannot be a real seq is dropped, not admitted', asy
   // outright - or a file never read at all - would drop the two bad marks too and pass this test
   // while proving nothing about the parse.
   const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-mark-'));
-  const mock = startMock();
+  const mock = startMock({ recallOneUnreadable: true });
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   try {
     const d1 = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
@@ -1955,7 +1963,7 @@ test("server.ts: a cell named `__proto__` keeps its mark across a restart", asyn
   // live envelope here on purpose - with no cell to re-seed from, the marks FILE is the only thing
   // that can carry the sequence forward, so the second write's number is a clean read of it.
   const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-proto-'));
-  const mock = startMock();
+  const mock = startMock({ recallOneUnreadable: true });
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
   try {
     const first = startServer(mock.base() + '/mcp', [], { SAIHM_HOME: home });
@@ -1990,7 +1998,7 @@ test("server.ts: a cell named `__proto__` keeps its mark across a restart", asyn
   }
 });
 
-test('server.ts: batching a recall persists EVERY mark, including when a row aborts the loop', async () => {
+test('server.ts: batching a recall persists every mark of its answer, and none from a response refused part way', async () => {
   // `observe` used to call `persist` per advancing mark, and `persist` rewrites the WHOLE file. A
   // cold recall observes every cell, so an n-cell recall performed n whole-file rewrites of a file
   // that is itself O(n) - quadratic, on the first operation this package tells anyone to run. The
@@ -1999,10 +2007,10 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
   // Removing the batching is a PERFORMANCE change: it passes every CORRECTNESS assertion by
   // construction, because the marks it writes one-at-a-time are the same marks, and the file it
   // leaves behind is byte-identical. Arms 1 and 2 therefore pin only the property the batch is
-  // allowed to keep - that no mark is lost by deferring it - on both exits from the batched scope.
-  // The second arm is the one that can actually regress: the flush on the failure path is
-  // best-effort and separate from the success path, so deleting it turns this red while the first
-  // arm stays green.
+  // allowed to keep - that no mark of an ANSWER is lost by deferring it - and arm 2 pins the other
+  // exit: a response refused part way is no answer, so it moves NO mark (0.14.2). A mark ahead of
+  // what this computer holds and answers lets an edit built on older text be stored over a newer
+  // version the endpoint would otherwise refuse as stale; the marks now move only with the answer.
   //
   // The COUNT needs a different instrument, and arm 3 is it. An earlier version of this comment
   // said the saving could not be measured here; that was too strong - it cannot be measured by
@@ -2054,7 +2062,7 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
   }
 
   // ARM 2 - the loop THROWS partway. A duplicate cellId in one response is a `malformed_response`,
-  // raised from inside the batched scope, and the marks earned before it must still reach disk.
+  // raised from inside the batched scope: no mark of that response may reach memory or disk.
   {
     const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-batch-throw-'));
     const mock = startMock({
@@ -2066,14 +2074,9 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
       await handshake(d);
       const r = await callText(d, 3, 'saihm_recall', {});
       assert.equal(r.isError, true, 'premise: a repeated cellId aborts the loop');
-      // A batch that ends in a throw does NOT flush - deliberately, because a marks-file error
-      // raised there would replace the error being reported. What it must not do is LOSE the marks,
-      // and it does not: the pending flag survives and `flushMarks` writes every cellId this process
-      // holds, so the next persisting operation carries them out with its own.
-      // This write is also what proves the batch UNWOUND. `withBatch` restores the batching flag on
-      // the throw path as well as the success path, and if it did not, every later `persist` would
-      // note a pending flush inside a batch that never ends and no marks file would exist at all -
-      // so the assertion below fails on the file's absence rather than on its contents.
+      // The batch still UNWINDS on the throw path: if it did not, every later `persist` would note a
+      // pending flush inside a batch that never ends and no marks file would exist at all, so the
+      // assertion on the file's existence below is what proves it.
       const w = await callText(d, 4, 'saihm_remember', { content: 'the next operation' });
       assert.equal(w.isError, false);
       d.proc.kill();
@@ -2083,14 +2086,11 @@ test('server.ts: batching a recall persists EVERY mark, including when a row abo
         string,
         { seq: string }
       >;
-      // 3, not 1, and that is correct rather than a leak. The duplicate row is a REAL envelope this
-      // identity sealed at seq 3: `openRow` opens it, and the AEAD binds seq into the AAD, so the
-      // mark it advances is authenticated before the duplicate check further down rejects the
-      // RESPONSE. A monotonic high-water may safely take the highest authenticated seq it has seen;
-      // the endpoint gains nothing by serving that envelope inside a malformed response that it
-      // would not gain by serving it inside a well-formed one.
-      assert.equal(marks['k0']?.seq, '3', 'a mark learned inside the aborted batch is not lost');
-      assert.equal(marks['k1']?.seq, '2', 'nor is the one before it');
+      // NOT 3 and NOT 2, though both envelopes are real ones this identity sealed and `openRow` opened
+      // them: the response was refused whole, so it answered nothing, and its marks are dropped with it.
+      assert.equal(marks['k0'], undefined, 'no mark from a refused response');
+      assert.equal(marks['k1'], undefined, 'not even one opened before the row that refused it');
+      assert.equal(Object.keys(marks).length, 1, "only the next operation's own mark");
     } finally {
       d.proc.kill();
       rmSync(home, { recursive: true, force: true });

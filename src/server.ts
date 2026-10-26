@@ -92,6 +92,7 @@ import {
   identityTokenSet,
   displayableKeyPath,
   SaihmEndpointError,
+  causeMessageOf,
   identityHomeName,
   keyShapedHomeRefusal,
   saihmHomeSetting,
@@ -243,9 +244,10 @@ function fail(thrown: unknown) {
     // Refused once for having no free memory yet: the rest of this join answers without asking the endpoint again.
     s.refused = true;
     text = joinPendingNotice(s);
-  } else if (s?.running && e instanceof SaihmEndpointError && e.code === 'rate_limited' && e.message.startsWith('SAIHM onboard failed:')) {
+  } else if (s?.running && e instanceof SaihmEndpointError && e.code === 'rate_limited' && causeMessageOf(e).startsWith('SAIHM onboard failed:')) {
     // A limit on the ONBOARD during the join (an identity not active yet): its steps first, then the wait. A limit on
-    // a memory call means the identity is already active, and is reported as itself.
+    // a memory call means the identity is already active, and is reported as itself. Read from the CAUSE: a recall with
+    // the copy on puts its own opening before a failure of the sign-in inside its version check.
     text = `${joinPendingNotice(s)}\n${failText(e)}`;
   } else text = failText(e);
   // The same failure as structured content, for a reader that branches on the code rather than parsing the text. Its

@@ -1,6 +1,6 @@
 {
   "name": "saihm",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "Free-to-start portable memory for AI agents: encrypted, shareable, provably erased.",
   "mcpServers": {
     "saihm": {
