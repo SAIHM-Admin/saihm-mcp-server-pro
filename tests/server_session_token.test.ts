@@ -117,6 +117,8 @@ interface Session {
   stderr: () => string;
   /** saihm_status: its text and whether it failed. */
   status: () => Promise<{ text: string; isError: boolean; raw: string }>;
+  /** The names of the tools the server lists. */
+  tools: () => Promise<string[]>;
   stop: () => Promise<void>;
 }
 
@@ -163,6 +165,7 @@ async function session(env: Record<string, string>): Promise<Session> {
       const m = await rpc('tools/call', { name: 'saihm_status', arguments: {} });
       return { text: String(m.result?.content?.[0]?.text ?? ''), isError: m.result?.isError === true, raw: String(m.raw) };
     },
+    tools: async () => ((await rpc('tools/list', {})).result?.tools ?? []).map((t: { name: string }) => t.name),
     stop: async () => {
       if (proc.exitCode === null) {
         const exited = new Promise<void>((r) => proc.once('exit', () => r()));
@@ -451,6 +454,52 @@ test('an inline secret or a key file outside SAIHM_HOME signs in each session, a
     await oneSession(d, d.env(m));
     assert.deepEqual(readdirSync(d.home).filter((n) => n.startsWith('session.')), [`session.${d.agentIdHash.slice(0, 16)}.json`]);
     assertNoTokenShown(d, m);
+  } finally {
+    await close(m);
+    rmSync(d.dir, { recursive: true, force: true });
+  }
+});
+
+test('where the home is temporary or kept for later jobs (CI, a hosted session), nothing is kept; SAIHM_EPHEMERAL_HOME=0 keeps it', async () => {
+  const m = startMock();
+  await listen(m);
+  const d = device();
+  try {
+    for (const signal of [{ CI: 'true' }, { GITHUB_ACTIONS: 'true' }, { CLAUDE_CODE_REMOTE: 'true' }, { SAIHM_EPHEMERAL_HOME: '1' }]) {
+      const before = m.signIns();
+      const r = await oneSession(d, d.env(m, signal));
+      assert.equal(r.isError, false, r.text);
+      assert.equal(m.signIns(), before + 1, `${JSON.stringify(signal)}: a sign-in, as before`);
+      assert.equal(existsSync(d.keptPath), false, `${JSON.stringify(signal)}: nothing kept`);
+    }
+    await oneSession(d, d.env(m, { CI: 'true', SAIHM_EPHEMERAL_HOME: '0' }));
+    assert.equal(keptToken(d.keptPath), m.issued[m.issued.length - 1], 'a home declared kept keeps the sign-in');
+    assertNoTokenShown(d, m);
+  } finally {
+    await close(m);
+    rmSync(d.dir, { recursive: true, force: true });
+  }
+});
+
+test('a paid plan without SAIHM_PAYMENT_METHOD: the server starts, and each memory call fails naming the setting', async () => {
+  const m = startMock();
+  await listen(m);
+  const d = device();
+  try {
+    const s = await session(d.env(m, { SAIHM_TIER: 'PRO' }));
+    try {
+      const tools = await s.tools();
+      assert.ok(tools.includes('saihm_status') && tools.includes('saihm_recall'), 'it starts and lists its tools');
+      for (let i = 0; i < 2; i++) {
+        const r = await s.status();
+        assert.equal(r.isError, true, r.text);
+        assert.match(r.text, /SAIHM_PAYMENT_METHOD/, 'the call names the setting');
+      }
+    } finally {
+      await s.stop();
+    }
+    assert.equal(m.signIns(), 0, 'and it never signs in without it');
+    assert.equal(existsSync(d.keptPath), false);
   } finally {
     await close(m);
     rmSync(d.dir, { recursive: true, force: true });

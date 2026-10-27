@@ -58,10 +58,10 @@ Then [add SAIHM to your AI client](#add-saihm-to-your-ai-client), restart it, an
 **No GitHub account?** Start at <https://saihm.net/free> instead: you sign in with
 Google or Microsoft, and the page gives you your key and the steps to connect your
 assistant. Follow them, then say **"Recall my SAIHM memories."** Keep your key safe: it
-is the only key to your memory. It is ready to use, so skip *"Join SAIHM"*: a join would
-make a second, different key.
+is the only key to your memory. Your key is already active, so skip *"Join SAIHM"*: there
+is nothing to join, and saying it anyway makes no new key.
 
-**Prefer not to touch a terminal?** Install SAIHM in your AI client first: for Claude
+**Rather let your assistant set it up?** Install SAIHM in your AI client first: for Claude
 Code that is the one command under [Claude Code](#claude-code-anthropic), and the other
 clients are [below](#add-saihm-to-your-ai-client). Restart the client, then say **"Join
 SAIHM"** to your assistant. It asks whether you already have a SAIHM identity, then runs
@@ -103,8 +103,12 @@ confirm it connects. Each client's fine print is in the
 
 **Adding another AI client on this computer?** It uses the key already in `~/.saihm` by
 itself, so don't join again there: add its block, restart it and say *"Recall my SAIHM
-memories."* If your key file is somewhere else, set the same `SAIHM_MASTER_SECRET_FILE` in
-its block, and on a paid plan add `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` too.
+memories."* Give it the same settings as your first client:
+
+- **Your key in another folder or file:** set the same `SAIHM_HOME`, or the same
+  `SAIHM_MASTER_SECRET_FILE`, in its block.
+- **A paid plan:** add `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` to its block, wherever your
+  key is, `~/.saihm` included. Without them the new client signs in on the free plan.
 
 ### Claude Code (Anthropic)
 
@@ -438,7 +442,8 @@ paid plan keeps the same key and every memory.
   settings as the first machine (on a paid plan, `SAIHM_TIER` and
   `SAIHM_PAYMENT_METHOD` too), and say *"Recall my SAIHM memories."*
 - **Keep work and personal apart** — start fresh on the second machine and share
-  across instead: *"Share these notes with my work agent until 5:00 pm."* A share can
+  across instead: *"Share my SAIHM notes on the launch with the agent in
+  ./identities/work-agent.json until 17:00 UTC."* A share can
   be revoked or given an expiry, so the two stay separate. Each side needs the other's
   identity record, made as below.
 
@@ -454,10 +459,14 @@ npx -y @saihm/mcp-server-pro identity-record qa-agent.json
 It holds only their public keys and agent ID, so it is safe to send by email or chat:
 nothing in it can read, change or erase their memory. Put the file in your project and
 name it when you share, for example *"Share my SAIHM memory about the release runbook with
-the agent in ./identities/qa-agent.json, read-only, until Friday 17:00 UTC."* To read what
-you share, their agent needs your identity record too, made the same way. If the file
-reaches you by a channel someone else could change, check the agent ID with your colleague
-another way. The record is not the `export-identity` file: never send that one to anyone.
+the agent in ./identities/qa-agent.json, read-only, until Friday 17:00 UTC."* Your agent
+gives the file to SAIHM, which reads the record from it. A full path is surest: a relative
+one is read from the folder the SAIHM server runs in. To read what you share, their agent
+needs your identity record too, made the same way, and the memory's cellId, which arrives
+with the share. If the file reaches you by a channel someone else could change, check the
+agent ID with your colleague another way and give it to your agent with the share: SAIHM
+then refuses a file that names a different one. The record is not the `export-identity`
+file: never send that one to anyone.
 
 ## Hosted agent environments
 
@@ -567,16 +576,23 @@ SAIHM_TIER=FREE \
 ```
 
 That prints a checkout link tied to your identity, to open in a browser, and the two
-lines to add to your client's `env` block once you have paid. Add both and restart the
-client:
+settings to add to your client's configuration once you have paid. Add both, in the form
+your client's settings use, and restart the client. In a JSON `env` block:
 
 ```json
 "SAIHM_TIER": "PRO",
 "SAIHM_PAYMENT_METHOD": "stripe"
 ```
 
-A paid plan needs both lines: without `SAIHM_PAYMENT_METHOD`, which names the payment
-rail to check, the server won't start. Then say *"Show my SAIHM status"* to see the plan.
+In a TOML configuration, such as Codex's or Grok's, inside `env = { ... }`:
+
+```toml
+env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }
+```
+
+A paid plan needs both: without `SAIHM_PAYMENT_METHOD`, which names the payment rail to
+check, the server starts, but every memory call fails and names it until it is set. Then
+say *"Show my SAIHM status"* to see the plan.
 
 | How you pay | Where | Your key and memories | `SAIHM_PAYMENT_METHOD` |
 |---|---|---|---|
@@ -627,7 +643,9 @@ promise that a copy was deleted somewhere.
   devices drop it at their next successful recall. A memory erased on this device and
   then saved again elsewhere may not show in a recall here. Backups of your device keep
   the copy as it was when they were made. From 0.14.3, a key file kept anywhere has the
-  copy, not only the standard one.
+  copy, not only the standard one, except in a hosted agent session or on a CI runner,
+  where the home is temporary or kept for later jobs: there SAIHM keeps no copy unless you
+  name one.
 - **Everything encrypted at rest, if you prefer.** Set `SAIHM_RECALL_CACHE` to `0` in
   every AI client and app that runs SAIHM with your key on this device, in the same place
   as its `SAIHM_ENDPOINT_URL` setting and written the same way. Then quit all of them,

@@ -18,12 +18,13 @@ removed.
   holds no secret and asks the endpoint nothing. The README's "Share with a colleague"
   shows how.
 - **`saihm_share` reads the record file.** A new optional input, `recipientRecordFile`,
-  takes the full path of the file `identity-record` writes. SAIHM reads the record and the
-  agent ID from it on your machine, so the agent no longer copies about 13 KB of keys into
-  the call. A `recipientPinnedAgentIdHashHex` given too must match the file's agent ID. Only
-  a regular file of up to 64 KB holding exactly that record is read, its record is checked
-  before anything is shared, and a refusal never shows what is in the file. An inline
-  `recipientRecord` works as before.
+  takes the path of the file `identity-record` writes, best in full: a relative path is
+  read from the server's working directory. SAIHM reads the record and the agent ID from
+  it on your machine, so the agent no longer copies about 13 KB of keys into the call. A
+  `recipientPinnedAgentIdHashHex` given too, checked with your colleague another way, must
+  match the file's agent ID. Only a regular file of up to 64 KB holding exactly that record
+  is read, its record is checked before anything is shared, and a refusal never shows what
+  is in the file. An inline `recipientRecord` works as before.
 - **`CASE-STUDY.md`.** A worked case study of three agent roles doing a quarter of
   regulated work ships with the package, linked from the README's "Things to say".
 
@@ -35,20 +36,23 @@ removed.
   new or has changed, so it is faster and uses fewer reads. The copy stays on your
   device, in `~/.saihm` (or `SAIHM_HOME`), readable only by your user account. To keep
   no copy, set `SAIHM_RECALL_CACHE` to `0`, as before. An identity token or an inline
-  secret keeps no copy unless you set one up.
+  secret keeps no copy unless you set one up, and neither does any identity in a hosted
+  agent session or on a CI runner, where the home is temporary or kept for later jobs.
 - **One sign-in per device, not per session (a new default).** With the key file in
   `~/.saihm` (or `SAIHM_HOME`), a session keeps its sign-in there, readable only by your
   user account, and a new session on the same device uses it until it expires instead of
   signing in again, so a team behind one office address signs in far less often. The kept
   sign-in holds no key and is used only for the same endpoint, identity, plan and payment
-  method. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0`.
+  method, and none is kept in a hosted agent session or on a CI runner. To keep it in
+  memory only, set `SAIHM_SESSION_CACHE` to `0`.
 - **"Join SAIHM" asks first.** The first join call that would create a new key now
   answers with the question about an existing identity, even when the call says a new
   one is wanted, and only a call after it creates the key. A join that would refuse
   anyway says so before it asks.
 - **The upgrade command prints the two settings a paid plan needs,** `SAIHM_TIER` and
-  `SAIHM_PAYMENT_METHOD`, as they go into a client's `env` block, and how to check the
-  plan once the client has restarted.
+  `SAIHM_PAYMENT_METHOD`, as they go into a client's JSON `env` block and into a TOML
+  configuration such as Codex's or Grok's, and how to check the plan once the client has
+  restarted.
 - **`free-join` says at once that it is starting.** A first run that downloads the
   package and then signs in showed nothing for a while, and could look hung.
 - **README.** "Things to say" has new starters for a team, each naming SAIHM, and points

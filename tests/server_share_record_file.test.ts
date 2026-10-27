@@ -311,7 +311,12 @@ test('every refusal is made before anything is asked of the endpoint, with a fix
       ['a file holding a secret', { cellId: s.cellId, recipientRecordFile: envFile }, 'bad_recipient_record_file', /is not a SAIHM identity record/],
       ['a forged record', { cellId: s.cellId, recipientRecordFile: forged }, 'bad_recipient_record_file', /does not verify/],
       ['a folder', { cellId: s.cellId, recipientRecordFile: folder }, 'bad_recipient_record_file', /is not a regular file\.$/],
-      ['a relative path', { cellId: s.cellId, recipientRecordFile: 'qa-agent.json' }, 'bad_recipient_record_file', /must be the full path/],
+      [
+        'a relative path naming nothing in the working directory',
+        { cellId: s.cellId, recipientRecordFile: 'qa-agent.json' },
+        'bad_recipient_record_file',
+        /could not be read \(ENOENT\); a relative path is read from the server's working directory, so give the full path\.$/,
+      ],
     ];
     if (POSIX) {
       const fifo = join(s.dir, 'pipe.json');

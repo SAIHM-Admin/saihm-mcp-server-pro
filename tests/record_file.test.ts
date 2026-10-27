@@ -1,6 +1,7 @@
 // recipientRecordFile (0.14.3): the identity record file saihm_share reads, so an agent never copies a record's ~13 KB
 // of hex into a call. What these tests hold it to: only the exact document `identity-record` writes is accepted, from a
-// regular file named by its full path, of at most 64 KB, whose record verifies against its own agent ID; a folder, a
+// regular file of at most 64 KB (a relative path read from the working directory, and a refusal of one saying so), whose
+// record verifies against its own agent ID; a folder, a
 // pipe, a device or a link to one is refused from its metadata, without blocking; the bound holds on what is read, not
 // on the size a file reports; every refusal is a fixed sentence that names neither the path nor anything in the file.
 // Runner: npx tsx --test tests/record_file.test.ts
@@ -179,16 +180,27 @@ test('a missing file, a dangling link and an unreadable file are refused with th
   }
 });
 
-test('a relative path, or one starting with ~, is refused even where it names a record', () => {
+test('a relative path is read from the working directory; a refusal of one says so, and one of a full path does not', () => {
   const dir = scratch();
   try {
+    const doc = recordDoc();
     const p = join(dir, 'qa-agent.json');
-    writeFileSync(p, asWritten(recordDoc()));
+    writeFileSync(p, asWritten(doc));
     const rel = relative(process.cwd(), p);
-    assert.equal(readRecordFile(join(process.cwd(), rel)).agentIdHash.length, 64, 'positive control: the same file, named in full');
-    for (const q of [rel, './' + rel, '~/qa-agent.json', 'qa-agent.json']) {
-      assertRefused(q, /must be the full path of the file \(a relative path, or one starting with ~, is not used\)\.$/);
-    }
+    for (const q of [rel, './' + rel]) assert.equal(readRecordFile(q).agentIdHash, doc.agentIdHash, q);
+    const relativeHint = /; a relative path is read from the server's working directory, so give the full path\.$/;
+    // `~` is not expanded, and a name that is not in the working directory is not looked for elsewhere.
+    for (const q of ['~/qa-agent.json', 'qa-agent-nowhere.json']) assertRefused(q, relativeHint);
+    assertRefused('~/qa-agent.json', /could not be read \(ENOENT\); a relative path/);
+    const folder = join(dir, 'records');
+    mkdirSync(folder);
+    assertRefused(relative(process.cwd(), folder), /is not a regular file; a relative path/);
+    writeFileSync(join(dir, 'not-a-record.json'), '{}');
+    assertRefused(relative(process.cwd(), join(dir, 'not-a-record.json')), /is not a SAIHM identity record .*; a relative path/);
+    // A full path's refusal carries no such hint.
+    const e = refusal(join(dir, 'qa-agent-nowhere.json'));
+    assert.doesNotMatch(e.message, /relative path/);
+    assert.match(e.message, /could not be read \(ENOENT\)\.$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

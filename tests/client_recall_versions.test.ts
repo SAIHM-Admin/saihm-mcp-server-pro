@@ -374,6 +374,8 @@ describe('PC-RECALL-VERSIONS reproducer: an edit made on computer B reaches comp
         SAIHM_AUTH_HEADER: 'Bearer test',
         SAIHM_TIER: 'PRO',
         SAIHM_ERASURE_FEED_DIR: saved.get('SAIHM_ERASURE_FEED_DIR'),
+        // A home kept between runs, whatever the runner says (GitHub Actions sets CI): this test is about the copy.
+        SAIHM_EPHEMERAL_HOME: '0',
       });
       try {
         return SaihmProClient.bootFromEnv();

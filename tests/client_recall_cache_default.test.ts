@@ -32,6 +32,13 @@ const KEYS = [
   'SAIHM_ERASURE_FEED_DIR',
   'SAIHM_IDENTITY',
   'SAIHM_IDENTITY_PASSPHRASE',
+  // The signals of a temporary or shared home (0.14.3 review): cleared, so a runner that sets them (GitHub Actions sets
+  // CI and GITHUB_ACTIONS) does not decide these tests; the tests that are about them set them.
+  'SAIHM_EPHEMERAL_HOME',
+  'CI',
+  'GITHUB_ACTIONS',
+  'CLAUDE_CODE_REMOTE',
+  'SAIHM_SESSION_CACHE',
 ] as const;
 
 function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
@@ -85,6 +92,48 @@ test('the same key reached through SAIHM_MASTER_SECRET_FILE (as a join leaves th
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('0.14.3 review: no default copy where the home is temporary or kept for later jobs, whichever signal says so', () => {
+  const { home, keyPath } = homeWithDefaultKey();
+  const elsewhere = mkdtempSync(join(tmpdir(), 'saihm-rc-key-'));
+  try {
+    const keyFile = join(elsewhere, 'agent.key');
+    writeFileSync(keyFile, randomBytes(32).toString('hex'), { mode: 0o600 });
+    const signals: Record<string, string>[] = [
+      { GITHUB_ACTIONS: 'true' },
+      { CI: 'true' },
+      { CI: '1' },
+      { CLAUDE_CODE_REMOTE: 'true' },
+      { SAIHM_EPHEMERAL_HOME: '1' },
+      { SAIHM_EPHEMERAL_HOME: 'yes' },
+    ];
+    for (const signal of signals) {
+      for (const keyEnv of [{}, { SAIHM_MASTER_SECRET_FILE: keyPath }, { SAIHM_MASTER_SECRET_FILE: keyFile }]) {
+        withEnv({ SAIHM_HOME: home, ...keyEnv, ...signal }, () => {
+          const c = SaihmProClient.bootFromEnv();
+          assert.equal(cachePathOf(c), undefined, `${JSON.stringify(signal)} ${JSON.stringify(keyEnv)}: no default copy`);
+          const kept = (c as unknown as { sessionTokens?: unknown }).sessionTokens;
+          assert.equal(kept, undefined, `${JSON.stringify(signal)}: no kept sign-in either`);
+        });
+      }
+      // A path set on purpose is still honoured there.
+      withEnv({ SAIHM_HOME: home, ...signal, SAIHM_RECALL_CACHE_PATH: join(elsewhere, 'chosen.json') }, () => {
+        assert.equal(cachePathOf(SaihmProClient.bootFromEnv()), join(elsewhere, 'chosen.json'), `${JSON.stringify(signal)}: a chosen path`);
+      });
+    }
+    // SAIHM_EPHEMERAL_HOME=0 declares the home kept, over the host's own signal; and with no signal, the default stands.
+    for (const kept of [{ CI: 'true', SAIHM_EPHEMERAL_HOME: '0' }, { GITHUB_ACTIONS: 'true', SAIHM_EPHEMERAL_HOME: 'false' }, { CI: 'false' }, { CI: '0' }, {}]) {
+      withEnv({ SAIHM_HOME: home, ...kept }, () => {
+        const c = SaihmProClient.bootFromEnv();
+        assert.equal(cachePathOf(c), join(home, `recall.${c.agentIdHash.slice(0, 16)}.json`), `${JSON.stringify(kept)}: the default copy`);
+        assert.notEqual((c as unknown as { sessionTokens?: unknown }).sessionTokens, undefined, `${JSON.stringify(kept)}: and the kept sign-in`);
+      });
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
   }
 });
 
@@ -307,7 +356,7 @@ test('an identity with no cache is TOLD so, once, and only when it did not choos
       const c = SaihmProClient.bootFromEnv();
       const first = stderrDuring(() => { void c.recall().catch(() => undefined); });
       const second = stderrDuring(() => { void c.recall().catch(() => undefined); });
-      assert.match(first, /^saihm: recall is fetching every memory on every call/);
+      assert.match(first, /^saihm: recall fetches every memory on each call here, because this identity keeps no local copy/);
       assert.match(first, /SAIHM_RECALL_CACHE_PATH/);
       assert.match(first, /plaintext at rest/, 'the trade is stated, not buried');
       assert.equal(second, '', 'said twice');

@@ -1738,7 +1738,7 @@ function shareRecipient(
     throw new SaihmEndpointError(
       0,
       'recipient_required',
-      'Nothing was shared: name the recipient with recipientRecordFile (the full path of their identity record file), or with recipientRecord and recipientPinnedAgentIdHashHex together.',
+      'Nothing was shared: name the recipient with recipientRecordFile (the path of their identity record file), or with recipientRecord and recipientPinnedAgentIdHashHex together.',
     );
   }
   return { record, pin };
@@ -1749,11 +1749,11 @@ server.registerTool(
   {
     title: 'Share',
     description:
-      "Grant one other agent access to a single memory cell, named by cellId. Identify the recipient by the identity record file their identity-record command wrote: pass its full path as recipientRecordFile, and the server reads the record and agent ID from it (no need to open the file). Or pass their recipientRecord with their recipientPinnedAgentIdHashHex, pinned out-of-band. With the file, a recipientPinnedAgentIdHashHex you also pass must match the agent ID in it. Set scope to 'read', 'write' or 'readwrite'. Only that one cell is exposed, and sharing re-wraps its key rather than copying the memory.",
+      "Grant one other agent access to a single memory cell, named by cellId. Identify the recipient by the identity record file their identity-record command wrote: pass its path, in full, as recipientRecordFile (a relative path is read from the server's working directory), and the server reads the record and agent ID from it (no need to open the file). Or pass their recipientRecord with their recipientPinnedAgentIdHashHex, pinned out-of-band. With the file, pass recipientPinnedAgentIdHashHex too when the user has the agent ID from their colleague another way: it must match the agent ID in the file. Set scope to 'read', 'write' or 'readwrite'. Only that one cell is exposed, and sharing re-wraps its key rather than copying the memory.",
     inputSchema: {
       cellId: z.string().describe('The cell to share'),
       recipientRecordFile: optionalInput(z.string()).describe(
-        "The full path of the grantee's identity record file, the JSON that identity-record writes. The server reads recipientRecord and the agent ID from it. Instead of recipientRecord, not with it",
+        "The path of the grantee's identity record file, the JSON that identity-record writes, in full: a relative path is read from the server's working directory. The server reads recipientRecord and the agent ID from it. Instead of recipientRecord, not with it",
       ),
       recipientRecord: optionalInput(
         z.object({
@@ -1763,7 +1763,7 @@ server.registerTool(
         }),
       ).describe("The grantee's published identity record (hex fields). Required unless recipientRecordFile is given"),
       recipientPinnedAgentIdHashHex: optionalInput(z.string()).describe(
-        "The grantee's agentIdHash (hex), pinned out-of-band. Required with recipientRecord; with recipientRecordFile, optional, and it must match the file's agent ID",
+        "The grantee's agentIdHash (hex), pinned out-of-band. Required with recipientRecord; with recipientRecordFile, optional: the out-of-band check of the file, which must name the same agent ID",
       ),
       scope: optionalChoice(['read', 'write', 'readwrite']).describe('Access scope (blank = read)'),
       expiryEpoch: optionalPattern(/^[0-9]+$/, 'expiryEpoch must be a decimal count of whole hours since the UNIX epoch').describe(
@@ -2080,7 +2080,7 @@ if (selfJoinEnabled()) {
     {
       title: 'Join SAIHM (activate free memory)',
       description:
-        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory: first ask whether they already have a SAIHM identity (from another machine or an earlier session) - if so, do not join; they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Pass newIdentity: true once they confirm they want a new one here. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, the join finishes by itself and the memory tools work; there is no need to call saihm_join again. No payment.',
+        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory, so the first call answers with a question instead: whether they already have a SAIHM identity (from another machine or an earlier session). Put it to them once; if they do, do not join: they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Once they confirm they want a new one here, call again with newIdentity: true. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, the join finishes by itself and the memory tools work; there is no need to call saihm_join again. No payment.',
       inputSchema: {
         newIdentity: optionalInput(z.boolean()).describe(
           'true once the user confirms they have no SAIHM identity to bring here and want a new, empty memory',
@@ -2841,17 +2841,41 @@ async function runUpgrade(): Promise<void> {
       '',
       // THE TWO LINES THEMSELVES (0.14.3, customer F8): a payment that went through left a client that would not
       // start when only one of them was set, and the reader had to work out both from the names alone.
-      '  After payment, add these two lines to the "env" settings of SAIHM in each AI client that',
-      '  uses this key, then restart the client:',
+      '  After payment, add these two settings to SAIHM in each AI client that uses this key, in',
+      '  the form that client\'s settings use, then restart the client. In a JSON "env" block:',
       '',
       paidTierEnvLine(target),
       '    "SAIHM_PAYMENT_METHOD": "stripe"',
       '',
-      '  A paid plan needs both: without SAIHM_PAYMENT_METHOD the server does not start. Then say',
+      '  In a TOML config (Codex, Grok), inside env = { ... }, with a comma before each:',
+      '',
+      paidTierTomlLine(target),
+      '',
+      '  A paid plan needs both: without SAIHM_PAYMENT_METHOD the server starts, but every memory',
+      '  call fails and names it until it is set. Then say',
       '  "Show my SAIHM status": it names your plan, and every memory on this key is still there.',
       '',
     ].join('\n'),
   );
+}
+
+/**
+ * The two settings as they go inside a TOML client's `env = { ... }` (Codex, Grok), for a monthly plan `upgrade`
+ * accepted: written out per plan, like {@link paidTierEnvLine}, so nothing anyone typed is rendered inside the quotes.
+ */
+function paidTierTomlLine(tier: string): string {
+  switch (tier) {
+    case 'PRO':
+      return '    SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe"';
+    case 'PRO_FAST':
+      return '    SAIHM_TIER = "PRO_FAST", SAIHM_PAYMENT_METHOD = "stripe"';
+    case 'ENTERPRISE':
+      return '    SAIHM_TIER = "ENTERPRISE", SAIHM_PAYMENT_METHOD = "stripe"';
+    case 'ENTERPRISE_FAST':
+      return '    SAIHM_TIER = "ENTERPRISE_FAST", SAIHM_PAYMENT_METHOD = "stripe"';
+    default:
+      return '    SAIHM_TIER = the name of the plan you paid for, SAIHM_PAYMENT_METHOD = "stripe"';
+  }
 }
 
 /**

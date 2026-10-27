@@ -4520,15 +4520,21 @@ export class SaihmProClient {
     // ONLY WHERE THAT FOLDER CAN BE WRITTEN: a copy that cannot be written fails the recall it belongs to, and a
     // key file kept elsewhere is how a container mounts a secret beside a home it does not let anyone write. There,
     // 0.14.2 kept no copy and recalled; so does this. Measured: such a recall failed EACCES with the copy on.
+    // NOR WHERE THE HOME IS TEMPORARY OR KEPT FOR LATER JOBS (0.14.3 review): a hosted session or a CI runner, as the
+    // join reads it (ephemeralHomeSignal). A self-hosted runner keeps its home for the next job, so a default copy there
+    // would leave every recalled memory, unencrypted, for jobs that never asked for it. A path set on purpose is kept,
+    // and SAIHM_EPHEMERAL_HOME=0 declares the home kept.
     const recallCacheOff = process.env.SAIHM_RECALL_CACHE === '0';
+    const temporaryHome = ephemeralHomeSignal() !== null;
     if (!recallCacheOff && optRecallCachePath) opts.recallCachePath = optRecallCachePath;
-    else if (!recallCacheOff && id.keyFile && dirCanBeWritten(dirname(defaultIdentityPath()))) opts.persistRecallCache = true;
+    else if (!recallCacheOff && id.keyFile && !temporaryHome && dirCanBeWritten(dirname(defaultIdentityPath()))) opts.persistRecallCache = true;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
     // THE SERVER OPTS IN to keeping its sign-in between sessions (0.14.3), for the DEFAULT key file only: the token file
     // then sits beside the key that can mint any number of them. A key file elsewhere (a removable or encrypted volume,
-    // a mounted secret), an identity token and an inline secret sign in once per session, as before.
-    if (process.env.SAIHM_SESSION_CACHE !== '0' && id.defaultKey) opts.persistSessionToken = true;
+    // a mounted secret), an identity token and an inline secret sign in once per session, as before; so does any
+    // identity where the home is temporary or kept for later jobs, as for the recall copy above.
+    if (process.env.SAIHM_SESSION_CACHE !== '0' && id.defaultKey && !temporaryHome) opts.persistSessionToken = true;
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
     // SAIHM_PAYMENT_METHOD + SAIHM_TIER (paste-once). Set => used verbatim, no self-onboarding.
     try {
@@ -4542,8 +4548,8 @@ export class SaihmProClient {
    * Say once, on the first recall, that this client is fetching every memory each time.
    *
    * The cache is deliberately off for an identity whose key did not come from a key file (an identity token, or an
-   * inline secret: how hosted and CI environments carry one) — this cache holds plaintext at rest, so it is not
-   * switched on for them. What was
+   * inline secret: how hosted and CI environments carry one), and from 0.14.3 where the home is temporary or kept for
+   * later jobs — this cache holds plaintext at rest, so it is not switched on for them. What was
    * missing is that nobody was TOLD: the difference is a recall that fetches only what changed against one that
    * fetches everything, and a subscriber had no way to know which one they were paying for.
    *
@@ -4557,10 +4563,11 @@ export class SaihmProClient {
     this.saidRecallIsUncached = true;
     if (process.env.SAIHM_RECALL_CACHE === '0') return;
     process.stderr.write(
-      'saihm: recall is fetching every memory on every call, because no recall cache is configured for this ' +
-      'identity. Point SAIHM_RECALL_CACHE_PATH at a file you own to fetch only what has changed since the last ' +
-      'recall. That file holds your memories as plaintext at rest, so it is your decision, not a default. ' +
-      'Set SAIHM_RECALL_CACHE=0 to keep it off and silence this.\n',
+      'saihm: recall fetches every memory on each call here, because this identity keeps no local copy: it comes ' +
+      'from an identity token or an inline secret, SAIHM_HOME cannot be written, or the home is temporary or kept ' +
+      'for later jobs. To fetch only what has changed since the last recall, point SAIHM_RECALL_CACHE_PATH at a ' +
+      'file you own; it holds your memories as plaintext at rest, readable only by you. SAIHM_RECALL_CACHE=0 ' +
+      'keeps it off and silences this.\n',
     );
   }
 

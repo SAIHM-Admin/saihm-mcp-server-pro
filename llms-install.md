@@ -128,12 +128,11 @@ yourself.
 
 ## Step 4 — activation (only when the user says "Join SAIHM")
 
-When they do, confirm they have no identity to bring, then call `saihm_join`
-with `newIdentity: true`. The first call that would create a key answers with that
-question even with `newIdentity: true`; once they have answered, call it again with
-`newIdentity: true`. It
-generates a 32-byte master secret locally at `~/.saihm/free-identity.key`
-(mode 600) and returns a one-time device sign-in link plus a short code. The
+When they do, call `saihm_join`. The first call that would create a key answers
+with a question: whether they already have an identity to bring. Put it to them once,
+in your own words, and if they want a new one, call `saihm_join` again with
+`newIdentity: true`. It generates a 32-byte master secret locally at
+`~/.saihm/free-identity.key` (mode 600) and returns a one-time device sign-in link plus a short code. The
 user does the next part, in a browser: they open the link, sign in to GitHub,
 enter the code, and approve. That step confirms a unique person. The secret never
 leaves the machine. A user without a GitHub account can start from
@@ -154,9 +153,9 @@ Three things to tell the user, in your own words:
 
 1. **`saihm_join` is one-time.** It claims a lifetime free grant for this
    device identity. Do not call it speculatively, in a loop, or to test that
-   the install worked. Ask first whether they already have a SAIHM identity:
-   a join creates a NEW, EMPTY memory, so pass `newIdentity: true` only once
-   they confirm they want one. In a hosted or cloud session that starts fresh
+   the install worked. Its first call asks whether they already have a SAIHM
+   identity: a join creates a NEW, EMPTY memory, so pass `newIdentity: true` only
+   once they confirm they want one. In a hosted or cloud session that starts fresh
    each time, do not join there either: they join on a machine they keep, then
    bring that identity in (point 3). Where it can tell that the home directory is
    discarded when the session ends (the host marks a hosted or CI session, or

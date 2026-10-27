@@ -1,4 +1,4 @@
-// The recipient's identity record as a FILE (0.14.3): `saihm_share` takes the full path of the JSON document that
+// The recipient's identity record as a FILE (0.14.3): `saihm_share` takes the path of the JSON document that
 // `identity-record` writes, so an agent never copies the record's ~13 KB of hex into a call.
 //
 // The path is chosen by the agent, so it may name anything this user can read: a key, a token, an environment file.
@@ -25,8 +25,11 @@ export interface RecordFile {
   identityRecord: WireIdentityRecord;
 }
 
-const refuse = (why: string): SaihmEndpointError =>
-  new SaihmEndpointError(0, RECORD_FILE_REFUSED, `Nothing was shared: recipientRecordFile ${why}.`);
+const refuse = (why: string, hint = ''): SaihmEndpointError =>
+  new SaihmEndpointError(0, RECORD_FILE_REFUSED, `Nothing was shared: recipientRecordFile ${why}${hint}.`);
+
+/** Added to a refusal of a relative path: where it was read from, without naming the folder, and what to do. */
+const RELATIVE_HINT = "; a relative path is read from the server's working directory, so give the full path";
 
 const NOT_A_RECORD = 'is not a SAIHM identity record (the JSON file the identity-record command writes)';
 const TOO_LARGE = `is larger than an identity record can be (${MAX_RECORD_FILE_BYTES / 1024} KB)`;
@@ -70,7 +73,7 @@ function recordOf(doc: unknown): RecordFile | undefined {
 }
 
 /**
- * Read and check the record file at `path`: a regular file named by its full path, at most MAX_RECORD_FILE_BYTES,
+ * Read and check the record file at `path`: a regular file (a relative path is read from the working directory), at most MAX_RECORD_FILE_BYTES,
  * holding exactly the document `identity-record` writes, whose keys hash to its agent ID and whose self-signature
  * verifies. Asks nothing of the endpoint. Throws a SaihmEndpointError (status 0) carrying only a fixed reason.
  *
@@ -78,41 +81,42 @@ function recordOf(doc: unknown): RecordFile | undefined {
  * binds anything to it.
  */
 export function readRecordFile(path: string): RecordFile {
-  // A relative path resolves against the server's working directory, which the agent naming it does not know: it
-  // could read a different file of the same name, and share with whoever that file names.
-  if (!isAbsolute(path)) throw refuse('must be the full path of the file (a relative path, or one starting with ~, is not used)');
+  // A RELATIVE PATH is read from the server's working directory, as every path this package is given is: the project
+  // in some AI clients and not in others, so the agent naming it may not know which folder that is. It is read like a
+  // full one; a refusal of it says where it was read from, and the tool asks for a full path. `~` is not expanded.
+  const hint = isAbsolute(path) ? '' : RELATIVE_HINT;
   let st;
   try {
     st = statSync(path);
   } catch (e) {
-    throw refuse(`could not be read${errnoOf(e)}`);
+    throw refuse(`could not be read${errnoOf(e)}`, hint);
   }
-  if (!st.isFile()) throw refuse(NOT_REGULAR);
-  if (st.size > MAX_RECORD_FILE_BYTES) throw refuse(TOO_LARGE);
+  if (!st.isFile()) throw refuse(NOT_REGULAR, hint);
+  if (st.size > MAX_RECORD_FILE_BYTES) throw refuse(TOO_LARGE, hint);
   let fd: number;
   try {
     // Without blocking, and never as a controlling terminal: what was a regular file a moment ago may not be now.
     fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOCTTY ?? 0));
   } catch (e) {
-    throw refuse(`could not be read${errnoOf(e)}`);
+    throw refuse(`could not be read${errnoOf(e)}`, hint);
   }
   const buf = Buffer.alloc(MAX_RECORD_FILE_BYTES + 1);
   let total = 0;
   let doc: unknown;
   try {
     try {
-      if (!fstatSync(fd).isFile()) throw refuse(NOT_REGULAR);
+      if (!fstatSync(fd).isFile()) throw refuse(NOT_REGULAR, hint);
       while (total < buf.length) {
         const n = readSync(fd, buf, total, buf.length - total, null);
         if (n === 0) break;
         total += n;
       }
     } catch (e) {
-      throw e instanceof SaihmEndpointError ? e : refuse(`could not be read${errnoOf(e)}`);
+      throw e instanceof SaihmEndpointError ? e : refuse(`could not be read${errnoOf(e)}`, hint);
     } finally {
       closeSync(fd);
     }
-    if (total > MAX_RECORD_FILE_BYTES) throw refuse(TOO_LARGE);
+    if (total > MAX_RECORD_FILE_BYTES) throw refuse(TOO_LARGE, hint);
     try {
       doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, total)));
     } catch {
@@ -123,7 +127,7 @@ export function readRecordFile(path: string): RecordFile {
     buf.fill(0);
   }
   const record = recordOf(doc);
-  if (record === undefined) throw refuse(NOT_A_RECORD);
+  if (record === undefined) throw refuse(NOT_A_RECORD, hint);
   try {
     verifyIdentityRecord(decodeIdentityRecord(record.identityRecord), fromHex(record.agentIdHash));
   } catch {

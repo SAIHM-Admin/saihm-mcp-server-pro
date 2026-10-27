@@ -1,6 +1,6 @@
-# Case study (template): a quarter of regulated work with three agent roles, SAIHM + SHM
+# Case study: a quarter of regulated work with three agent roles, SAIHM + SHM
 
-Every capability named here is one SAIHM -pro or SHM documents publicly. The company is fictional. The staffing
+Every capability named here is one SAIHM or SHM documents publicly. The company is fictional. The staffing
 comparison is a worked scenario, and each removed role is matched to the capability that replaces it. SHM works with
 a paid SAIHM plan, and each agent identity that runs SHM needs one.
 
@@ -63,8 +63,9 @@ so the count tracks the context limits instead of the work.
 | keyword, brings forward what the task needs within  |
 | your budget, and records why each one was chosen    |
 +-----------------------------------------------------+
-| SAIHM: memory encrypted on your machine, portable   |
-| across AI tools and machines, erasure that is final |
+| SAIHM: memory encrypted on your machine before it   |
+| leaves it, portable across AI tools and machines,   |
+| and erasure that is final                           |
 +-----------------------------------------------------+
 ```
 
@@ -77,7 +78,7 @@ need no coordinator, no handoff agents and no retrieval agent.
 | Coordinator and 2 handoff agents | SAIHM memory persists across sessions, tools and machines. SHM's warm start resumes its own state in a new session or on another device. Agents pass each other exactly the memories they need through scoped shares, and SHM follows share states to stay in step. |
 | Retrieval agent | SHM's hybrid ranking, with an optional reranker on your own machine, runs beside each agent and puts the relevant memories in front of it as the work begins, before it asks. |
 | Incident commander and scribe | The Lead saves each decision as it is made, naming the memories it drew on, and SHM shows why each of those was brought forward. The postmortem is written from those records. |
-| 3 deletion agents | One SAIHM erasure destroys the memory's key, so the stored copy is permanently unreadable; each computer's local copy drops it at its next recall, and SHM removes it from its index, its caches and everything it derived from it. |
+| 3 deletion agents | One SAIHM erasure destroys the memory's key, so the stored copy is permanently unreadable. Each computer's local copy drops it at its next recall, a backup of a computer keeps that copy as it was then, and SHM removes the memory from its index, its caches and everything it derived from it. |
 | Partner liaison | A read or read-write SAIHM share pinned to the bank agent's identity, with an expiry on the contract date. Revoking it ends access at once; what the bank already read stays with the bank. |
 | Compliance and CI rules agents | The team's rules live as SAIHM memories. The Guard recalls them in every review and every CI run, and a correction is saved once and recalled in every later review. In CI, a resident SHM service keeps the index warm, so each job asks a running service instead of rebuilding it. |
 
@@ -158,7 +159,7 @@ reports. The difference repeats in every session, for every agent, every day.
   watching agents. The memory carries the context, so the agent count follows the work.
 - **Clean context.** Each agent spends its tokens on the task in front of it.
 - **One memory everywhere.** It follows your key across AI tools and machines.
-- **Private by design.** Memories are encrypted on your machine, SHM runs on your side with its models on your own machine, and its index is encrypted at rest under a key your team holds.
+- **Private by design.** Memories are encrypted on your machine before they leave it, SHM runs on your side with its models on your own machine, and its index is encrypted at rest under a key your team holds.
 - **Erasure you can stand behind.** A destroyed key is final, and SHM forgets everything it derived.
 - **Sharing that ends on time.** Every grant is scoped, pinned to one identity, and can carry an expiry.
 - **Nothing to rip out.** It works with the AI tools your team already uses, and you can start free.
