@@ -759,7 +759,7 @@ SAIHM keeps memory safe. SHM, Super-Human Memory, makes it work efficiently: it 
 layer on top of SAIHM that organises memory and brings the right part of it forward, by
 meaning, before the agent asks. It keeps tasks apart and the context
 window clean, so one agent can take on work that today needs several, and a correction
-saved once is recalled every time after.
+saved once is there to be recalled every time after.
 
 SHM runs on your side, next to your agent, over the memories your agent can read, so none
 of this requires your plaintext to leave home. It ranks them with hybrid retrieval and an

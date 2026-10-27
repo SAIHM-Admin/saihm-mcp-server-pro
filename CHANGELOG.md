@@ -87,8 +87,8 @@ removed.
   New: a note on adding another AI client on the same computer, one table of the ways to
   pay and which of them keep your key, and that once the free tier is used up you can
   still list and erase your memories. The free start at saihm.net/free names its Google
-  or Microsoft sign-in, and the SHM section says a correction saved once is recalled
-  every time after.
+  or Microsoft sign-in, and the SHM section says a correction saved once is there to be
+  recalled every time after.
 
 ### Fixed
 

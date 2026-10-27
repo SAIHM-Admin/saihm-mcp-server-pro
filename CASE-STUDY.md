@@ -9,8 +9,8 @@ a paid SAIHM plan, and each agent identity that runs SHM needs one.
 - **About twenty agents become three roles.** Memory carries the context, so you stop adding agents to hold it.
 - **Every turn costs less.** SHM brings forward only what the task needs, within a budget you set, and finds it on your
   own machine without spending model tokens.
-- **The savings outgrow the subscription.** In the worked month below, the team saves about $37,700 in model tokens and
-  supervision time. Set that against your plan on the pricing page.
+- **The savings outgrow the subscription.** In the worked month below, with assumptions you replace with yours, the
+  team saves about $37,700 in model tokens and supervision time. Set that against your plan on the pricing page.
 - **Nothing to rip out.** Keep your AI tools and your way of working. SAIHM works with the tools your team already uses,
   and you can start free.
 
@@ -88,7 +88,7 @@ Token economy comes from six places:
 
 - **No cold starts.** Memory persists across sessions, tools and machines, and SHM's warm start resumes its own state, so
   no agent re-reads the same files, wiki pages and tickets each morning.
-- **Small, steady context.** SHM's per-turn budget caps what it brings forward, so long sessions stay lean.
+- **Small, steady turns.** SHM's per-turn budget caps what it brings forward each turn.
 - **Ranking without model tokens.** SHM's embedder and reranker run on your machine, so finding the right memory costs
   no model tokens.
 - **No coordination traffic.** Shared memory replaces the handoff summaries and status messages agents send each other.
