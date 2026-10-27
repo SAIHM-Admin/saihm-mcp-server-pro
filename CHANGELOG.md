@@ -56,9 +56,9 @@ removed.
   the install step. Cline has its own section, with its settings file and restart steps.
   New: a note on adding another AI client on the same computer, one table of the ways to
   pay and which of them keep your key, and that once the free tier is used up you can
-  still list and erase your memories. The free sign-in page now offers Google or
-  Microsoft and gives the key as a file for `~/.saihm`, and the SHM section says a
-  correction saved once is recalled every time after.
+  still list and erase your memories. The free start at saihm.net/free names its Google
+  or Microsoft sign-in, and the SHM section says a correction saved once is recalled
+  every time after.
 
 ### Fixed
 

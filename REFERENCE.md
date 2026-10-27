@@ -21,13 +21,10 @@ and for SHM.
 ## Joining in detail
 
 No GitHub account? Start at <https://saihm.net/free> instead. It signs you in with
-Google or Microsoft, in the browser, and then gives you your new key as a file to
-download. Save it as `free-identity.key` in `~/.saihm` (or in your `SAIHM_HOME`), where
-the server reads it with no setting, readable only by you (`chmod 600` on macOS or
-Linux). The configuration the page shows holds only `SAIHM_ENDPOINT_URL` and `SAIHM_TIER`
-set to `FREE`. Never put the key itself in a settings file, least of all one in a project
-or workspace, which can be committed with a repository. Do not ask your assistant to
-join: that makes a different key, and its approval needs GitHub.
+Google or Microsoft, in the browser, and then gives you your key and the steps to connect
+your assistant. Keep the key out of project and workspace settings, which can be committed
+with a repository. Do not ask your assistant to join: that makes a different key, and its
+approval needs GitHub.
 
 **If a join stops before you approve it.** A join, from the command or from *"Join
 SAIHM"*, writes your key when it starts, before you approve. If the join stops while it

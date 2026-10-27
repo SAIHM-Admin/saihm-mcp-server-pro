@@ -137,12 +137,10 @@ generates a 32-byte master secret locally at `~/.saihm/free-identity.key`
 user does the next part, in a browser: they open the link, sign in to GitHub,
 enter the code, and approve. That step confirms a unique person. The secret never
 leaves the machine. A user without a GitHub account can start from
-<https://saihm.net/free> instead, which signs in with Google or Microsoft. That page gives
-the user their new key as a file to download: have them save it as
-`~/.saihm/free-identity.key` (or in their `SAIHM_HOME`), readable only by them, where the
-server reads it with no setting, and use the configuration the page shows, which holds
-only `SAIHM_ENDPOINT_URL` and `SAIHM_TIER` set to `FREE`. Never have them paste the key
-into the chat, and do not call `saihm_join` for them.
+<https://saihm.net/free> instead, which signs in with Google or Microsoft and gives the
+user their key and the steps to connect their assistant: let them follow those steps
+themselves. Never have them paste the key into the chat, and do not call `saihm_join` for
+them.
 
 If the join is interrupted: the key file is written when the join starts, before
 approval, and it stays if the join stops while it waits. Calling `saihm_join` again

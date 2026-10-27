@@ -52,16 +52,14 @@ sign-in that confirms you're a real person:
 2. Open the link, sign in to GitHub, enter the code and approve.
 3. The command finishes by itself and shows where your key is saved.
 
-**No GitHub account?** Start at <https://saihm.net/free> instead: you sign in with
-Google or Microsoft, and the page gives you your new key as a file to download. Save it
-as `~/.saihm/free-identity.key` (or in your `SAIHM_HOME`), where SAIHM finds it with no
-setting, and keep it safe: it is the only key to your memory. On macOS or Linux,
-`chmod 600 ~/.saihm/free-identity.key` makes it readable only by you. The settings the
-page shows hold only `SAIHM_ENDPOINT_URL` and `SAIHM_TIER` set to `FREE`. Your key is
-ready, so skip *"Join SAIHM"*: a join would make a second, different key.
-
 Then [add SAIHM to your AI client](#add-saihm-to-your-ai-client), restart it, and say
 **"Recall my SAIHM memories."** You're running.
+
+**No GitHub account?** Start at <https://saihm.net/free> instead: you sign in with
+Google or Microsoft, and the page gives you your key and the steps to connect your
+assistant. Follow them, then say **"Recall my SAIHM memories."** Keep your key safe: it
+is the only key to your memory. It is ready to use, so skip *"Join SAIHM"*: a join would
+make a second, different key.
 
 **Prefer not to touch a terminal?** Install SAIHM in your AI client first: for Claude
 Code that is the one command under [Claude Code](#claude-code-anthropic), and the other
