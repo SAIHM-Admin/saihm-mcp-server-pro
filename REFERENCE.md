@@ -10,6 +10,7 @@ and for SHM.
 - [Client setup in detail](#client-setup-in-detail)
 - [Tools](#tools)
 - [Exporting your identity](#exporting-your-identity)
+- [Your identity record, for sharing](#your-identity-record-for-sharing)
 - [Hosted agent environments in detail](#hosted-agent-environments-in-detail)
 - [Troubleshooting](#troubleshooting)
 - [How it works](#how-it-works)
@@ -20,11 +21,13 @@ and for SHM.
 ## Joining in detail
 
 No GitHub account? Start at <https://saihm.net/free> instead. It signs you in with
-Google, in the browser, and then shows a configuration that holds your new key. Save
-the key to a file only you can read and set `SAIHM_MASTER_SECRET_FILE` to that file's
-path in your client's block in the README. Never put the key itself in a settings file, least of
-all one in a project or workspace, which can be committed with a repository. Do not ask
-your assistant to join: that makes a different key, and its approval needs GitHub.
+Google or Microsoft, in the browser, and then gives you your new key as a file to
+download. Save it as `free-identity.key` in `~/.saihm` (or in your `SAIHM_HOME`), where
+the server reads it with no setting, readable only by you (`chmod 600` on macOS or
+Linux). The configuration the page shows holds only `SAIHM_ENDPOINT_URL` and `SAIHM_TIER`
+set to `FREE`. Never put the key itself in a settings file, least of all one in a project
+or workspace, which can be committed with a repository. Do not ask your assistant to
+join: that makes a different key, and its approval needs GitHub.
 
 **If a join stops before you approve it.** A join, from the command or from *"Join
 SAIHM"*, writes your key when it starts, before you approve. If the join stops while it
@@ -34,6 +37,13 @@ writes no second key. While a join started by your assistant waits for approval,
 memory tools answer with its steps (an identity that was already active keeps working). To stop a join you don't want, stop the command
 (Ctrl+C) or end the session, and don't enter the code; it expires after the time the
 join shows. Keep the key file all the same: a later join on this machine uses it.
+
+**Your assistant asks first.** When a join would create a new key, the first *"Join SAIHM"*
+answers with a question for you: whether you already have a SAIHM identity, on another
+machine or from an earlier session, and whether this environment keeps its home directory.
+Only a call after that question creates the key, even when the assistant says at once that
+you want a new one. A join that would refuse anyway (a temporary home, a `SAIHM_HOME` with
+the shape of a key, a paid `SAIHM_TIER` with no identity here) says so before asking.
 
 ## Client setup in detail
 
@@ -143,24 +153,28 @@ otherwise. It reads `~/.grok/config.toml` for user-level servers and a project's
 `~/.claude.json` or a project's `.mcp.json`, merged below `config.toml` in priority. Check
 with `grok mcp list`, or `grok mcp doctor saihm`.
 
-### Other MCP clients
-
-The README's block is documented for Cline; for other clients it is the generic MCP form. Add the `"saihm"`
-entry inside the existing `mcpServers` object rather than replacing it.
+### Cline
 
 `timeout` is in seconds in Cline. Without it, the Cline CLI gives a server only a few
-seconds to start (the editor extension waits longer). If your client documents another unit for `timeout`, or none, follow its
-documentation.
+seconds to start (the editor extension waits longer).
 
 - **Cline in the editor:** open the Cline panel, select the **MCP Servers** icon, then
-  **Configure > Configure MCP Servers**.
-- **Cline CLI:** the file is `~/.cline/data/settings/cline_mcp_settings.json`.
-  `cline mcp install` writes its entry in another shape (`"transport": { ... }`), with no
-  `timeout` and no `env`: add `"timeout": 60` beside `"transport"`, or use the entry
-  in the README.
+  **Configure > Configure MCP Servers**. Cline's documentation says a server that does not
+  respond can be restarted from its MCP settings.
+- **Cline CLI:** the file is `~/.cline/data/settings/cline_mcp_settings.json`, or the file
+  `CLINE_MCP_SETTINGS_PATH` names. `cline mcp install` writes its entry in another shape
+  (`"transport": { ... }`), with no `timeout` and no `env`: add `"timeout": 60` beside
+  `"transport"`, or use the entry in the README. Start a new CLI session after editing it.
+  If `cline` is not found in your shell, run it from the shell where you installed it.
 
 If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro --version` in a
-terminal. It downloads the package, prints its version and exits. Then restart Cline.
+terminal. It downloads the package, prints its version and exits. Then restart the server.
+
+### Other MCP clients
+
+The README's block for other clients is the generic MCP form. Add the `"saihm"` entry
+inside the existing `mcpServers` object rather than replacing it. If your client documents
+a start-up time, give it about a minute, in the unit its documentation gives.
 
 ### Which clients are checked
 
@@ -208,6 +222,29 @@ from the next session. Don't say *"Join SAIHM"* there: a join creates a new, emp
 memory. Together the two values **are** your identity: never paste them into a
 chat or write them into a config file in a repository. Keep a copy in a password
 manager, then delete the export file.
+
+## Your identity record, for sharing
+
+`npx -y @saihm/mcp-server-pro identity-record [FILE]` writes this identity's public
+identity record: one JSON document with your agent ID (`agentIdHash`) and your
+`identityRecord` (`mldsaPubKey`, `mlkemPubKey` and `mlkemPubKeySelfSig`, in hex). With
+`FILE` it writes there, never over a file that exists and never into a folder that is not
+there; with no `FILE`, or `-`, it writes the document to stdout and what it is to stderr.
+It reads the identity a server started from this shell would use, as `export-identity`
+does, never creates one, and asks the endpoint nothing.
+
+The record holds no secret: nothing in it can read, change or erase your memory, so it can
+be sent to anyone. A colleague's agent uses it in two ways:
+
+- to share a memory with you: `saihm_share` takes `identityRecord` as `recipientRecord` and
+  `agentIdHash` as `recipientPinnedAgentIdHashHex`;
+- to read a memory you shared with them: `saihm_recall` takes `identityRecord` as
+  `sharerRecord` and `agentIdHash` as `sharerPinnedAgentIdHashHex`, with the `cellId`.
+
+The agent ID is the pin: SAIHM refuses a record whose keys do not hash to it, so a record
+swapped in transit fails unless the agent ID was swapped with it. If the file travels by a
+channel someone else could change, check the agent ID with your colleague another way. The
+self-signature changes each time the command runs; any one of them verifies.
 
 ## Hosted agent environments in detail
 
@@ -307,6 +344,8 @@ session.
 | No SAIHM tools appear, and no error anywhere | The client stopped waiting before `npx` finished its first download: keep the start-up setting in [your client's block](./README.md#add-saihm-to-your-ai-client). Then check the file is valid JSON |
 | Every other tool vanished too | The settings file is no longer valid JSON: a trailing comma, or non-breaking spaces (U+00A0) from a copy and paste. Claude Code may replace a broken `~/.claude.json` with a fresh one and keep the original under `~/.claude/backups/`: fix that copy and put it back |
 | The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve. The join then finishes by itself, and the next memory call works |
+| A memory call says a free join may still be waiting for approval | This identity has no free memory yet: approve the join you started (in a terminal or another session), or say *"Join SAIHM"*, which reuses the key that is there and shows its link and code. A paid identity needs `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` for its plan |
+| "SAIHM could not sign in: too many sign-ins in a short time" | The sign-in that starts a session, or renews it, met the endpoint's limit. Wait the time it names, then try again |
 | Tools appear but every call fails | `SAIHM_ENDPOINT_URL` unreachable |
 | Every call fails behind a proxy | In a hosted environment, allow the endpoint's host in its network settings; otherwise check `HTTPS_PROXY` (an `http://` URL) and `NO_PROXY`. A network that inspects TLS needs its CA certificate, from its administrator, in a file named by `NODE_EXTRA_CA_CERTS` |
 | "No SAIHM identity is configured" | Self-join is off (`SAIHM_SELF_JOIN=0`) and no identity is set here: set one, or remove that setting to join |
@@ -334,8 +373,8 @@ a copy was deleted somewhere.
 - **Encrypt before send** — `remember` encrypts client-side; `recall` decrypts
   client-side. The plaintext of your memories, your master secret and your
   key-encryption key are never sent to the endpoint. When the recall cache is on (by
-  default with the self-join key file), your memories are also kept unencrypted on
-  your device; see Local recall cache below.
+  default with a key file), your memories are also kept unencrypted on your device; see
+  Local recall cache below.
 - **Post-quantum** — ML-DSA-65 for identity and signing, ML-KEM-768 for
   authenticated sharing, via
   [`@saihm/client-pro`](https://www.npmjs.com/package/@saihm/client-pro).
@@ -363,7 +402,7 @@ a copy was deleted somewhere.
 | Tenant isolation | Your `agentIdHash` (the JWT `sub`) namespaces your state; a write whose signed identity differs from the JWT is rejected. |
 | Authenticated sharing | Grantee public keys are pinned out-of-band and verified before any secret is bound to them; on the recipient side, `recallShared` pins the sharer's key and verifies the cell signature before returning any plaintext. |
 | Erasure | Destroying the endpoint-side wrapped DEK crypto-shreds the cell. |
-| Local recall cache | When the recall cache is on, every memory saved or read on this device and, after the first recall, all of your memories are also kept unencrypted in a mode-600 file beside your key, one file shared by every process on the device that uses that key with the cache on. `forget` removes the memory from it, and `SAIHM_RECALL_CACHE` below says how to go without one. |
+| Local recall cache | When the recall cache is on, every memory saved or read on this device and, after the first recall, all of your memories are also kept unencrypted in a mode-600 file in `SAIHM_HOME` (`~/.saihm` by default), one file shared by every process on the device that uses that key with the cache on. `forget` removes the memory from it, and `SAIHM_RECALL_CACHE` below says how to go without one. |
 | Warm-start snapshots | Encrypted in this process under a fresh key per snapshot, which is wrapped under your key-encryption key and never stored unwrapped. The endpoint holds the ciphertext and the wrapped key. A forget that reaches your snapshots destroys them before it reports the erasure complete. |
 | Erasure cascade | Each `forget` appends one line to `$SAIHM_HOME/tenants/<agentIdHash>/erasures.ndjson`. The line carries the cell id, the identity and the time — never cell content — and, beside `complete: false`, the `reason` the forget returns: `not-found` means there was nothing (more) to erase, not a failed erasure. With your own cells followed (`SAIHM_EVENTS=1`), erasures made elsewhere are added as they are reported. |
 
@@ -401,8 +440,8 @@ the rest have working defaults.
 | `SAIHM_TIER` | paid self-onboard; any self-onboard with `SAIHM_SELF_JOIN=0` | Plan label carried with each memory's routing details (`FREE`, `PRO`, …). Defaults to `FREE` while self-join is on (the default); set it for a paid plan, and with self-join off for every plan, `FREE` included. An `export-identity` token carries its own, which a non-empty value here overrides. With self-join off and a static `SAIHM_AUTH_HEADER`, resolved via `status()`. |
 | `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan: `stripe` for the card checkout that `upgrade` prints, which keeps the key you have and its memories; `stablecoin` for a plan paid on [the join page](https://saihm.net/join). Paying there starts a new identity with its own key, and the memories on a key you already have do not move to it, so upgrade an existing key with the card link. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. An identity token carries it; a non-empty value here overrides the token's. |
 | `SAIHM_SEQ_STATE_PATH` | no | Overrides where the anti-rollback bookkeeping is written. Running as an MCP server this is **on by default** at `$SAIHM_HOME/seq.<id>.json`; set it only to relocate it. The default location is ours to manage: if it can't be written, the tally stays in memory for the session and `status` says so. A location **you** set is yours: if it can't be written, calls fail and name the path, so a safeguard you asked for never goes quiet without telling you. `status` reports this as `seq-state=…` followed by `rollback-guard=persisting` (writes still work, so the next one rewrites the file) or `memory-only-this-run` (it retries at the next restart). Either way, if the file couldn't be READ at startup the safeguard starts from scratch and rebuilds as each memory is next read — so an older copy of a memory would not be caught during that window. At the default location that window is about accidental corruption rather than an attacker: writing to that file takes the same access that reads the identity key sitting beside it. Somewhere you relocate it to, that no longer follows — give it the protection you give `$SAIHM_HOME`. Give a full path: a relative one resolves against the server's working directory. |
-| `SAIHM_RECALL_CACHE` | no | Controls the recall cache: a copy of every memory saved or read on this device and, after the first recall, of all your memories, kept so that recall asks the service only for memories that are new or have changed, on this device or another. **On by default** when your key is the self-join identity file in `SAIHM_HOME`; `0` stops making one. Every process on this device that uses your key with the cache on writes the same file; the README's [How it works](./README.md#how-it-works) has the steps to turn the copy off everywhere and delete one already written. The copy is **unencrypted** in a file readable only by your user (mode 600), beside the key; `forget` removes a memory from it, and a memory erased from another device leaves it at the next successful recall. |
-| `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. **With a cache, a recall first checks each memory's version with the service and fetches only what is new or has changed since the last one; without a cache it fetches every memory, every time.** The cache is a file, so it survives a restart: only the very first run, which builds it, pays the full fetch. If the service offers no version check, the recall fetches every memory; if the check fails, the recall reports the error. It never answers from the cache unchecked. The cache defaults ON only for an identity that boots from the key file in `$SAIHM_HOME` (that installation already keeps its key and sequence marks there). For any other key source — including `SAIHM_MASTER_SECRET_FILE` pointing elsewhere, or an inline secret — it is OFF unless you set this, and the client says so once on its first recall. **The file holds your memories as plaintext at rest**, which is why it is not simply on for everyone: it is your decision. `SAIHM_RECALL_CACHE=0` turns it off in every case, an explicit path included, and silences the notice. Give a full path: a relative one resolves against the server's working directory. |
+| `SAIHM_RECALL_CACHE` | no | Controls the recall cache: a copy of every memory saved or read on this device and, after the first recall, of all your memories, kept so that recall asks the service only for memories that are new or have changed, on this device or another. **On by default** when your key comes from a key file: the self-join identity file in `SAIHM_HOME`, or the file `SAIHM_MASTER_SECRET_FILE` names, wherever it is (from 0.14.3; before, only the first), as long as files can be written in `SAIHM_HOME` (where they cannot, recall fetches every memory, as with the copy off); `0` stops making one. Every process on this device that uses your key with the cache on writes the same file; the README's [How it works](./README.md#how-it-works) has the steps to turn the copy off everywhere and delete one already written. The copy is kept unencrypted, so recall can use it at once, in a file readable only by your user (mode 600) in `SAIHM_HOME`; `forget` removes a memory from it, and a memory erased from another device leaves it at the next successful recall. A memory erased on this device and then saved again elsewhere may not show in a recall here. |
+| `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. **With a cache, a recall first checks each memory's version with the service and fetches only what is new or has changed since the last one; without a cache it fetches every memory, every time.** The cache is a file, so it survives a restart: only the very first run, which builds it, pays the full fetch. If the service offers no version check, the recall fetches every memory; if the check fails, the recall reports the error. It never answers from the cache unchecked. The cache defaults ON for an identity that boots from a key file: the one in `$SAIHM_HOME`, or one `SAIHM_MASTER_SECRET_FILE` names anywhere (from 0.14.3; before, only the first). It is then written in `$SAIHM_HOME`, beside the sequence marks. For an identity token or an inline secret, which usually run where the home folder is not kept, it is OFF unless you set this, and the client says so once on its first recall. The copy is kept unencrypted, in a file only your user can read, so a recall can use it at once. `SAIHM_RECALL_CACHE=0` turns it off in every case, an explicit path included, and silences the notice. Give a full path: a relative one resolves against the server's working directory. |
 | `SAIHM_STATE_DIR` | no | Where transient operator state (such as `checkout-url.txt`) is written. Does **not** relocate your identity or its bookkeeping. Give a full path: a relative one is refused at start. |
 | `SAIHM_ERASURE_FEED` | no | Controls the erasure feed — one line appended per `forget`, so a consumer can drop whatever it derived from that cell. **On by default**; set to `0` to write nothing. Writing the line can never fail an erasure: the erasure is what you asked for and the line is a notification about it, so a feed that can't be written is reported beside the result and the erasure still stands. With `SAIHM_EVENTS=1`, `0` also means the own-cell kinds are never asked for, and while the endpoint offers them this process writes no `share-states.json` (the file would vouch for change files it does not write). |
 | `SAIHM_EVENTS` | no | Set to `1` to follow share events: from the moment the server starts, it long-polls the endpoint for shares made to you (new, updated, stale, ended, erased), and for changes to your own cells when the endpoint offers them (one process per identity and directory then writes `changes.ndjson`, rotating it and `erasures.ndjson`: see *Changes to your own cells* below). `saihm_recall` then returns a summary as `shareStates` when it lists memories, beside `shared`, with every entry when the call passes `shareEntries: true`, and the map is written to `share-states.json` beside the erasure feed for other processes to read (see *Following shares* below). **Off by default.** The map and the position in the feed survive a restart (see `SAIHM_SHARE_MAP_STORE`); a sender is marked verified only after a shared memory is read and its signature checked. Endpoints that do not offer events are left alone. |
@@ -419,7 +458,8 @@ The [README](./README.md#for-developers) shows the client library in action; thi
 The derived `saihm.agentIdHash` is the `sub` the endpoint binds your tenant to —
 when self-onboarding the client proves it via ML-DSA; with a static
 `SAIHM_AUTH_HEADER` it must equal the JWT `sub`. Publish `saihm.identityRecord` so
-other agents can share to you.
+other agents can share to you, or have the `identity-record` command write it, with the
+agent ID, to a file (see [Your identity record, for sharing](#your-identity-record-for-sharing)).
 
 Constructing `SaihmProClient` directly writes nothing to your home directory; the
 per-restart bookkeeping is opted into by the MCP server's boot path, or by setting

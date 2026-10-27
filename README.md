@@ -33,9 +33,10 @@ that doesn't — one that follows you to a different assistant, a different mode
 or a different company's product.
 
 **Encrypted before it leaves your machine.** Nobody else can read your memories — not
-the storage, not SAIHM. There is nothing to switch on. With the standard setup, SAIHM
-also keeps an unencrypted copy of your memories on your own device for fast recall. Only
-your account can read it, and [one setting](#how-it-works) turns it off.
+the storage, not SAIHM. There is nothing to switch on. With your key in a file, as in the
+standard setup, SAIHM also keeps an unencrypted copy of your memories on your own device
+for fast recall. Only your account can read it, and [one setting](#how-it-works) turns it
+off.
 
 ## Start free — one command
 
@@ -46,22 +47,27 @@ npx -y @saihm/mcp-server-pro free-join
 No card and no wallet. You need a browser and a GitHub account once, for a quick
 sign-in that confirms you're a real person:
 
-1. The command creates your key on this machine and shows a link and a short code.
+1. The command creates your key on this machine and shows a link and a short code. Its
+   first run downloads the package, which can take a minute before anything appears.
 2. Open the link, sign in to GitHub, enter the code and approve.
 3. The command finishes by itself and shows where your key is saved.
 
 **No GitHub account?** Start at <https://saihm.net/free> instead: you sign in with
-Google, and the page gives you your new key. Save it to a file only you can read, and
-point `SAIHM_MASTER_SECRET_FILE` at that file in your client's settings below. Never
-paste the key itself into a settings file. Your key is ready, so skip *"Join SAIHM"*:
-a join would make a second, different key.
+Google or Microsoft, and the page gives you your new key as a file to download. Save it
+as `~/.saihm/free-identity.key` (or in your `SAIHM_HOME`), where SAIHM finds it with no
+setting, and keep it safe: it is the only key to your memory. On macOS or Linux,
+`chmod 600 ~/.saihm/free-identity.key` makes it readable only by you. The settings the
+page shows hold only `SAIHM_ENDPOINT_URL` and `SAIHM_TIER` set to `FREE`. Your key is
+ready, so skip *"Join SAIHM"*: a join would make a second, different key.
 
 Then [add SAIHM to your AI client](#add-saihm-to-your-ai-client), restart it, and say
 **"Recall my SAIHM memories."** You're running.
 
-**Prefer not to touch a terminal?** Add SAIHM to your client first, then say **"Join
-SAIHM"** to your assistant. It runs the same setup and gives you the same link and code
-to approve.
+**Prefer not to touch a terminal?** Install SAIHM in your AI client first: for Claude
+Code that is the one command under [Claude Code](#claude-code-anthropic), and the other
+clients are [below](#add-saihm-to-your-ai-client). Restart the client, then say **"Join
+SAIHM"** to your assistant. It asks whether you already have a SAIHM identity, then runs
+the same setup and gives you the same link and code to approve.
 
 **If a join is interrupted**, join again on the same machine: it reuses the key it
 already created, so you keep the same identity. To cancel a join, stop it and don't
@@ -96,6 +102,11 @@ Each block follows that client's own documentation. Before every release, the se
 is started from these blocks in Claude Code, Gemini CLI and the OpenAI Agents SDK to
 confirm it connects. Each client's fine print is in the
 [reference](./REFERENCE.md#client-setup-in-detail).
+
+**Adding another AI client on this computer?** It uses the key already in `~/.saihm` by
+itself, so don't join again there: add its block, restart it and say *"Recall my SAIHM
+memories."* If your key file is somewhere else, set the same `SAIHM_MASTER_SECRET_FILE` in
+its block, and on a paid plan add `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` too.
 
 ### Claude Code (Anthropic)
 
@@ -283,7 +294,7 @@ allow SAIHM:
      ```
 
      VS Code's MCP server gallery installs SAIHM pinned to the current version and
-     without `-y`, for example `["npx", "@saihm/mcp-server-pro@0.14.2"]`. Copilot matches
+     without `-y`, for example `["npx", "@saihm/mcp-server-pro@0.14.3"]`. Copilot matches
      the command and each argument exactly, so list each form your users run.
    - In a list without command entries, add `{ "serverName": "saihm" }`, and have your
      users add SAIHM with this README's setup blocks, which give it that name. A copy
@@ -297,15 +308,17 @@ is `io.github.SAIHM-Admin/saihm-mcp-server-pro`. GitHub's
 [guide to enterprise MCP allowlists](https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-enterprise-allowlist)
 covers the rest, including how entries are matched and how changes reach your users.
 
-With the standard setup, SAIHM keeps an unencrypted copy of each user's memories on their
-device for fast recall, readable only by their account. Users who prefer not to keep one
-can turn it off, as [How it works](#how-it-works) describes; the allowlist can't do this
-for them.
+With a key file, as in the standard setup, SAIHM keeps an unencrypted copy of each user's
+memories on their device for fast recall, readable only by their account. Users who prefer
+not to keep one can turn it off, as [How it works](#how-it-works) describes; the allowlist
+can't do this for them.
 
-### Other MCP clients
+### Cline
 
-For clients that run local MCP servers from an `mcpServers` block, such as Cline,
-Cursor or Windsurf, add the `"saihm"` entry inside the existing `mcpServers` object:
+Add the `"saihm"` entry inside the existing `mcpServers` object of Cline's MCP settings.
+In the editor, open the Cline panel, select the **MCP Servers** icon, then **Configure >
+Configure MCP Servers**. The Cline CLI reads `~/.cline/data/settings/cline_mcp_settings.json`,
+or the file `CLINE_MCP_SETTINGS_PATH` names.
 
 ```json
 {
@@ -320,11 +333,19 @@ Cursor or Windsurf, add the `"saihm"` entry inside the existing `mcpServers` obj
 }
 ```
 
-`timeout` is in seconds in Cline. If your client documents another unit, follow its
-documentation.
+`timeout` is in seconds in Cline: keep it, so the first `npx` download has time to finish.
+After saving, restart the server from Cline's MCP settings if its tools don't appear, and
+start a new session of the Cline CLI, which reads the file when it starts. If the tools
+still don't appear, run `npx -y @saihm/mcp-server-pro --version` in a terminal once: it
+downloads the package, prints its version and exits. Then restart the server again.
 
-If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro --version` in a
-terminal. It downloads the package, prints its version and exits. Then restart Cline.
+### Other MCP clients
+
+For other clients that run local MCP servers from an `mcpServers` block, such as Cursor
+or Windsurf, add the same `"saihm"` entry inside the existing `mcpServers` object. Keep a
+start-up time of about a minute where your client has one, in the unit its documentation
+gives. If the tools don't appear the first time, run `npx -y @saihm/mcp-server-pro --version`
+in a terminal, then restart the client.
 
 ## Agent frameworks
 
@@ -345,21 +366,32 @@ demos.
 
 ## Things to say
 
-You don't call tools by name — you talk to your assistant. Some starters:
+You talk to your assistant in plain language and name SAIHM, and it picks the tools.
+Name SAIHM each time: some assistants, Claude Code among them, keep notes of their own,
+and a request that does not name SAIHM may go there. Some starters for a team:
 
-> Liberally use SAIHM protocol to maximize token economy.
+> Liberally use SAIHM to maximize token economy. Recall by topic instead of re-reading files, and save each decision as we make it.
 
-> Recall my SAIHM memories before you start.
+> Recall only my SAIHM memories about the billing service, then give me its open decisions and next steps in five bullets before we write any code.
 
-> Remember that I prefer short answers and no preamble.
+> Remember in SAIHM as a decision record: webhook retries use idempotency keys, decided 2026-10-20 by Dana; revisit if duplicate charges exceed 0.1%.
 
-> Set an invariant to doubly confirm before any SAIHM forget action.
+> Set a SAIHM invariant: ask me twice before any SAIHM erase, and never store passwords, keys or customer personal data in SAIHM.
 
-> Share that note with my colleague's agent until 5:00 pm today.
+> Before we finish, save a SAIHM memory of what we changed, why, and what is still open, so any agent with my key can pick it up tomorrow.
 
-> Show my SAIHM status.
+> Share my SAIHM memory about the release runbook with the agent in ./identities/qa-agent.json, read-only, until Friday 17:00 UTC.
 
-> Forget everything I told you about the Henderson account.
+> A customer asked us to delete their data. Find every SAIHM memory that mentions Acme Corp, show me each one, and erase them one at a time after I confirm.
+
+> In this CI job, recall the team's SAIHM memory "release rules" and fail the job if the changelog breaks any of them.
+
+The sharing starter needs your colleague's identity record, which one command makes (see
+[Share with a colleague](#share-with-a-colleague)). The CI starter needs the job's own
+identity, set as in [Hosted agent environments](#hosted-agent-environments).
+
+More prompts, and a case study of three agent roles doing the work of about twenty agents,
+are in the [SAIHM manual](https://saihm.net/manual) and in [CASE-STUDY.md](./CASE-STUDY.md).
 
 | Tool | What it does |
 |---|---|
@@ -409,7 +441,25 @@ paid plan keeps the same key and every memory.
   `SAIHM_PAYMENT_METHOD` too), and say *"Recall my SAIHM memories."*
 - **Keep work and personal apart** — start fresh on the second machine and share
   across instead: *"Share these notes with my work agent until 5:00 pm."* A share can
-  be revoked or given an expiry, so the two stay separate.
+  be revoked or given an expiry, so the two stay separate. Each side needs the other's
+  identity record, made as below.
+
+### Share with a colleague
+
+To share a memory with a colleague's agent, ask them for their identity record. They make
+it with one command, on the machine that has their key:
+
+```sh
+npx -y @saihm/mcp-server-pro identity-record qa-agent.json
+```
+
+It holds only their public keys and agent ID, so it is safe to send by email or chat:
+nothing in it can read, change or erase their memory. Put the file in your project and
+name it when you share, for example *"Share my SAIHM memory about the release runbook with
+the agent in ./identities/qa-agent.json, read-only, until Friday 17:00 UTC."* To read what
+you share, their agent needs your identity record too, made the same way. If the file
+reaches you by a channel someone else could change, check the agent ID with your colleague
+another way. The record is not the `export-identity` file: never send that one to anyone.
 
 ## Hosted agent environments
 
@@ -506,11 +556,11 @@ that would be lost with it.
 
 Start free. The free tier is a fixed, one-time allowance of writes, reads, and shares
 for trying SAIHM on real infrastructure — it doesn't reset or refill. **No card, and
-nothing to cancel.**
+nothing to cancel.** Once it is used up you can still list your memories and erase them,
+and upgrading keeps every one.
 
 Paid plans are monthly; prices are on the [pricing page](https://saihm.net/pricing).
-Upgrading keeps the same key and every memory you already
-have:
+Upgrading keeps the same key and every memory you already have:
 
 ```sh
 SAIHM_MASTER_SECRET_FILE=$HOME/.saihm/free-identity.key \
@@ -518,8 +568,9 @@ SAIHM_TIER=FREE \
   npx -y @saihm/mcp-server-pro upgrade PRO
 ```
 
-That prints a checkout link tied to your identity. Pay, then add two lines to your
-config's `env` block and restart:
+That prints a checkout link tied to your identity, to open in a browser, and the two
+lines to add to your client's `env` block once you have paid. Add both and restart the
+client:
 
 ```json
 "SAIHM_TIER": "PRO",
@@ -527,11 +578,16 @@ config's `env` block and restart:
 ```
 
 A paid plan needs both lines: without `SAIHM_PAYMENT_METHOD`, which names the payment
-rail to check, the server won't start. The upgrade command's link is card checkout,
-and goes with `stripe`. It keeps your key and every memory on it. Stablecoin is paid on
-the website's [join page](https://saihm.net/join) and goes with `stablecoin`. Paying there
-starts a new identity with its own key. The memories on a key you already have stay on
-that key and do not move to the new one, so to upgrade the key you have, use the card link.
+rail to check, the server won't start. Then say *"Show my SAIHM status"* to see the plan.
+
+| How you pay | Where | Your key and memories | `SAIHM_PAYMENT_METHOD` |
+|---|---|---|---|
+| Card, for the key you have | the `upgrade` command's link | kept | `stripe` |
+| Card or another method on the website | the [join page](https://saihm.net/join) | a new identity with its own key | the one in the configuration the page gives you |
+| Stablecoin | the [join page](https://saihm.net/join) | a new identity with its own key | `stablecoin` |
+
+The memories on a key you already have stay on that key and do not move to a new one, so
+to upgrade the key you have, use the card link.
 
 ## If something isn't working
 
@@ -540,6 +596,8 @@ that key and do not move to the new one, so to upgrade the key you have, use the
 | No SAIHM tools appear, and no error anywhere | The client stopped waiting before `npx` finished its first download. Keep the start-up setting in [your client's block](#add-saihm-to-your-ai-client), and check that the file is valid JSON |
 | Every other tool vanished too | The settings file is no longer valid JSON: look for a trailing comma, or non-breaking spaces from a copy and paste |
 | The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve. The join then finishes by itself, and the next memory call works |
+| A memory call says a free join may still be waiting for approval | Approve the join you started. Or say *"Join SAIHM"*: it reuses the key that is there and shows its link and code |
+| SAIHM could not sign in: too many sign-ins in a short time | Wait the time it names, then try again |
 | Tools appear but every call fails | The machine cannot reach the endpoint (`saihm.net`, unless you set another). In a hosted environment, allow it in the network settings |
 | A hosted session keeps asking to join | The environment has no identity of yours: see [Hosted agent environments](#hosted-agent-environments) |
 | A different memory than you expected | This machine has its own key rather than yours |
@@ -561,22 +619,27 @@ promise that a copy was deleted somewhere.
   storage, yet never holds a key that can open your memories.
 - **Erasure that travels.** Each `forget` also writes a notice, so anything built from
   that memory — an index, a mirror, an extracted fact — can drop it too.
-- **Fast recall on your device.** With the standard setup, SAIHM keeps a local copy of
-  every memory you save or read on this device and, after the first recall, of all your
-  memories, so a recall fetches only what is new or has changed, on this device or
-  another. That copy is not encrypted, and only your user account can read it. `forget`
-  removes a memory from it too, and your other devices drop it at their next successful
-  recall. Backups of your device keep the copy as it was when they were made.
+- **Fast recall on your device.** With your key in a file (the standard setup, or the
+  file `SAIHM_MASTER_SECRET_FILE` names, wherever it is), SAIHM keeps a local copy of every
+  memory you save or read on this device and, after the first recall, of all your
+  memories. A recall then fetches only what is new or has changed, on this device or
+  another, so it is faster and uses fewer reads. The copy is kept unencrypted on your
+  device, in `~/.saihm` (or your `SAIHM_HOME`), so recall can use it at once, and only
+  your user account can read it. `forget` removes a memory from it too, and your other
+  devices drop it at their next successful recall. A memory erased on this device and
+  then saved again elsewhere may not show in a recall here. Backups of your device keep
+  the copy as it was when they were made. From 0.14.3, a key file kept anywhere has the
+  copy, not only the standard one.
 - **Everything encrypted at rest, if you prefer.** Set `SAIHM_RECALL_CACHE` to `0` in
   every AI client and app that runs SAIHM with your key on this device, in the same place
   as its `SAIHM_ENDPOINT_URL` setting and written the same way. Then quit all of them,
-  every open session and window included, delete the files beside your key whose names
-  start with `recall.`, and start them again. From then on SAIHM keeps no local copy, so
-  every memory it holds at rest is ciphertext, and each recall fetches all your memories
-  again. That is slower and, on a plan that limits recalls, such as the free tier, uses up
-  its allowance faster. Add the setting to any client or app you set up later, too.
-  If a `recall.` file ever comes back beside your key, a client or app still has the
-  copy on.
+  every open session and window included, delete the files in `~/.saihm` (or your
+  `SAIHM_HOME`) whose names start with `recall.`, and start them again. From then on SAIHM
+  keeps no local copy, so every memory it holds at rest is ciphertext, and each recall
+  fetches all your memories again. That is slower and, on a plan that limits recalls, such
+  as the free tier, uses up its allowance faster. Add the setting to any client or app you
+  set up later, too. If a `recall.` file ever comes back there, a client or app still has
+  the copy on.
 
 The [technical reference](./REFERENCE.md#how-it-works) has the security model, where
 the encrypted memories are stored, and every setting.
@@ -627,7 +690,7 @@ await saihm.forget(cellId);
 // out-of-band; the library rejects directory key-substitution.
 await saihm.share({
   cellId,
-  recipientRecord, // the grantee's published identity record (hex)
+  recipientRecord, // the grantee's published identity record (hex fields), as `identity-record` writes it
   recipientPinnedAgentIdHashHex, // pinned out-of-band
   expiryEpoch, // optional whole HOURS since the UNIX epoch (498192n = 2026-11-01 00:00 UTC); omit or null for no time bound
 });
@@ -652,8 +715,8 @@ const status = await saihm.status();
 SAIHM keeps memory safe. SHM, Super-Human Memory, makes it work efficiently: it is the
 layer on top of SAIHM that organises memory and brings the right part of it forward, by
 meaning, before the agent asks. It keeps tasks apart and the context
-window clean, so one agent can take on work that today needs several, and a mistake
-corrected once stays corrected.
+window clean, so one agent can take on work that today needs several, and a correction
+saved once is recalled every time after.
 
 SHM runs on your side, next to your agent, over the memories your agent can read, so none
 of this requires your plaintext to leave home. It ranks them with hybrid retrieval and an

@@ -129,17 +129,20 @@ yourself.
 ## Step 4 — activation (only when the user says "Join SAIHM")
 
 When they do, confirm they have no identity to bring, then call `saihm_join`
-with `newIdentity: true` (without it, a tool call that would create a key asks
-that question instead). It
+with `newIdentity: true`. The first call that would create a key answers with that
+question even with `newIdentity: true`; once they have answered, call it again with
+`newIdentity: true`. It
 generates a 32-byte master secret locally at `~/.saihm/free-identity.key`
 (mode 600) and returns a one-time device sign-in link plus a short code. The
 user does the next part, in a browser: they open the link, sign in to GitHub,
 enter the code, and approve. That step confirms a unique person. The secret never
 leaves the machine. A user without a GitHub account can start from
-<https://saihm.net/free> instead, which signs in with Google. That page gives the user a
-configuration holding their new key: have them save the key to a file only they can
-read (never by pasting it into the chat) and set `SAIHM_MASTER_SECRET_FILE` to its path,
-and do not call `saihm_join` for them.
+<https://saihm.net/free> instead, which signs in with Google or Microsoft. That page gives
+the user their new key as a file to download: have them save it as
+`~/.saihm/free-identity.key` (or in their `SAIHM_HOME`), readable only by them, where the
+server reads it with no setting, and use the configuration the page shows, which holds
+only `SAIHM_ENDPOINT_URL` and `SAIHM_TIER` set to `FREE`. Never have them paste the key
+into the chat, and do not call `saihm_join` for them.
 
 If the join is interrupted: the key file is written when the join starts, before
 approval, and it stays if the join stops while it waits. Calling `saihm_join` again
@@ -169,7 +172,10 @@ Three things to tell the user, in your own words:
    identity on the second machine plus `saihm_share` (which takes an optional
    `expiryEpoch` in whole hours since the UNIX epoch, e.g. `498192` for
    2026-11-01 00:00 UTC) keeps work and personal apart, and a share can be revoked where
-   a copied key cannot. If they want the SAME memory there, have them run
+   a copied key cannot. Each side needs the other's identity record, which
+   `npx -y @saihm/mcp-server-pro identity-record <file>` writes: public keys and the agent
+   ID only, safe to send. `saihm_share` takes its `identityRecord` as `recipientRecord` and
+   its `agentIdHash` as `recipientPinnedAgentIdHashHex`. If they want the SAME memory there, have them run
    `npx -y @saihm/mcp-server-pro export-identity` on the machine that holds the
    key, with the same `SAIHM_*` settings their MCP client uses there (on a paid
    plan, `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`), and set the two values it
@@ -196,7 +202,8 @@ table: see `REFERENCE.md`.
 
 Prices are on https://saihm.net/pricing. The `upgrade` command prints a card
 checkout link, which goes with `SAIHM_PAYMENT_METHOD=stripe` and keeps the user's
-key and memories. Stablecoin is paid on the website's join page,
+key and memories, and the two lines, `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`, to add
+to the client's settings after paying. Stablecoin is paid on the website's join page,
 https://saihm.net/join, and goes with `stablecoin`. Paying there starts a new
 identity with its own key; the memories on a key the user already has do not move
 to it. To upgrade an existing key, the user pays with the card link.
@@ -208,4 +215,6 @@ to it. To upgrade an existing key, the user pays with the card link.
 | No tools appear, no error | Start-up setting missing or too low, or the config file is not valid JSON — see step 1 |
 | Tools appear, calls fail | `SAIHM_ENDPOINT_URL` unreachable |
 | Memory tools say the join is waiting for approval | The user has not approved yet. They open the link, sign in, enter the code and approve; the join then finishes by itself and the next memory call works, with no second `saihm_join` |
+| A memory call says a free join may still be waiting for approval | The identity has no free memory yet: the user approves the join they started, or says "Join SAIHM", which reuses the key that is there |
+| "SAIHM could not sign in: too many sign-ins in a short time" | Wait the time it names, then try again |
 | Tool calls report no identity | New user: `saihm_join` not yet run. Second machine or hosted session: `SAIHM_IDENTITY` and its passphrase not set there (point 3) |

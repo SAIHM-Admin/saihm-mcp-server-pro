@@ -60,8 +60,8 @@ never sent to the endpoint; cells are sealed client-side via `@saihm/client-pro`
 before transport (ML-DSA-65 identity/signing, ML-KEM-768 sharing, AES-256-GCM
 per cell). The operator endpoint stores ciphertext, wrapped keys and the
 routing details each cell needs, meters usage, and holds no key that can
-decrypt. When the local recall copy is on (by default with the self-join key
-file), memories are also kept unencrypted on the user's device.
+decrypt. When the local recall copy is on (by default with a key file), memories
+are also kept unencrypted on the user's device.
 
 If a vulnerability is in the protocol specification itself rather than this
 implementation, please indicate that in your report.
