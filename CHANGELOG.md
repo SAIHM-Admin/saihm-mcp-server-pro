@@ -48,8 +48,9 @@ removed.
   home is temporary or kept for later jobs: in a hosted agent session, on the CI runners
   SAIHM recognizes (the REFERENCE lists them), and wherever `SAIHM_EPHEMERAL_HOME=1` is
   set, as it should be on any other runner.
-- **One sign-in per device, not per session (a new default).** With the key file in
-  `~/.saihm` (or `SAIHM_HOME`), a session keeps its sign-in there, readable only by your
+- **One sign-in per device, not per session (a new default).** With the standard key
+  file, the one a join creates in `~/.saihm` (or `SAIHM_HOME`), a session keeps its
+  sign-in there, readable only by your
   user account, and a new session on the same device uses it until it expires instead of
   signing in again, so a team behind one office address signs in far less often. The kept
   sign-in holds no key and is used only for the same endpoint, identity, plan and payment

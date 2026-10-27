@@ -228,6 +228,33 @@ test('a file that is not JSON is refused with a fixed reason: a secret in it nev
   }
 });
 
+test('a record written as UTF-16 (a PowerShell redirect) is refused with a sentence that says so; UTF-8 with a mark is read', () => {
+  const dir = scratch();
+  try {
+    const doc = recordDoc();
+    const text = asWritten(doc);
+    const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, 'utf16le')]);
+    const be = Buffer.from(le);
+    be.swap16();
+    const UTF16 = /is UTF-16 text, as a PowerShell redirect writes it: have it written with identity-record FILE, or save it as UTF-8\.$/;
+    for (const [name, body] of [['le', le], ['be', be]] as const) {
+      const p = join(dir, `utf16${name}.json`);
+      writeFileSync(p, body);
+      assertRefused(p, UTF16, [doc.agentIdHash, doc.agentIdHash.slice(0, 10)]);
+    }
+    // A relative path keeps its hint.
+    const rel = relative(process.cwd(), join(dir, 'utf16le.json'));
+    assertRefused(rel, /is UTF-16 text, .*; a relative path is read from the server's working directory, so give the full path\.$/);
+    // Controls: the same record as UTF-8, with and without its mark, is read.
+    writeFileSync(join(dir, 'utf8.json'), text);
+    writeFileSync(join(dir, 'utf8bom.json'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text, 'utf8')]));
+    assert.equal(readRecordFile(join(dir, 'utf8.json')).agentIdHash, doc.agentIdHash);
+    assert.equal(readRecordFile(join(dir, 'utf8bom.json')).agentIdHash, doc.agentIdHash);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a document that is not exactly the record is refused, and nothing in it is shown', () => {
   const dir = scratch();
   try {

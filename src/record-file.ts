@@ -34,6 +34,7 @@ const RELATIVE_HINT = "; a relative path is read from the server's working direc
 const NOT_A_RECORD = 'is not a SAIHM identity record (the JSON file the identity-record command writes)';
 const TOO_LARGE = `is larger than an identity record can be (${MAX_RECORD_FILE_BYTES / 1024} KB)`;
 const NOT_REGULAR = 'is not a regular file';
+const UTF16 = 'is UTF-16 text, as a PowerShell redirect writes it: have it written with identity-record FILE, or save it as UTF-8';
 
 /** A system error code, as Node names it (ENOENT, EACCES, ...), or nothing: never a message, which can quote the path. */
 function errnoOf(e: unknown): string {
@@ -117,6 +118,9 @@ export function readRecordFile(path: string): RecordFile {
       closeSync(fd);
     }
     if (total > MAX_RECORD_FILE_BYTES) throw refuse(TOO_LARGE, hint);
+    // A UTF-16 byte-order mark (0.14.3 review 2): PowerShell 5.1 writes `identity-record - > file` so. Named, so the
+    // reader is told how to fix it rather than that the file is not a record; it says no more of the file than that.
+    if (total >= 2 && ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff))) throw refuse(UTF16, hint);
     try {
       doc = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, total)));
     } catch {

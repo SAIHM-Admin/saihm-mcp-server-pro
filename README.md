@@ -481,7 +481,9 @@ settings — never in the chat — and start a new session, because the environm
 its variables when a session starts. The server runs locally in the session and needs
 to reach `saihm.net`, and npm for `npx`. The steps below follow each host's own
 documentation; the [reference](./REFERENCE.md#hosted-agent-environments-in-detail)
-covers proxies and the finer points.
+covers proxies and the finer points. A CI job is one such environment: give it its own
+key file as a secret file, named by `SAIHM_MASTER_SECRET_FILE`, or set the two values as
+the job's secrets.
 
 - **Claude Code on the web** — add both values under the environment's *Environment
   variables*. Anyone who uses that environment can read them, so use a dedicated
@@ -652,6 +654,12 @@ promise that a copy was deleted somewhere.
   recognizes (the [reference](./REFERENCE.md#configuration) lists them under
   `SAIHM_EPHEMERAL_HOME`), and wherever `SAIHM_EPHEMERAL_HOME=1` is set. Set it on any
   other runner, and wherever the home folder outlives the job.
+- **One sign-in per device.** With the standard key file, the one a join creates, a session
+  keeps its short-lived sign-in in a file beside the key, readable only by your user
+  account, and the next session on this device uses it until it expires. It holds no key
+  and is used only for the same endpoint, identity, plan and payment method. Like the copy,
+  it is not kept where the home is temporary or kept for later jobs. Set
+  `SAIHM_SESSION_CACHE` to `0` to keep it in memory only.
 - **Everything encrypted at rest, if you prefer.** Set `SAIHM_RECALL_CACHE` to `0` in
   every AI client and app that runs SAIHM with your key on this device, in the same place
   as its `SAIHM_ENDPOINT_URL` setting and written the same way. Then quit all of them,

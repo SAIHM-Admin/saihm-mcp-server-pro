@@ -305,6 +305,15 @@ test('every refusal is made before anything is asked of the endpoint, with a fix
         'invalid_input',
         /give the recipient once, as recipientRecordFile or as recipientRecord, not both\.$/,
       ],
+      // A malformed pin beside the file is refused as malformed, before it is compared (0.14.3 review 2).
+      ...[` ${s.doc.agentIdHash}`, `0x${s.doc.agentIdHash}`, s.doc.agentIdHash.slice(0, 63), `${s.doc.agentIdHash} `].map(
+        (pin): [string, Record<string, unknown>, string, RegExp] => [
+          `a malformed pin ${JSON.stringify(pin.slice(0, 4))}`,
+          { cellId: s.cellId, recipientRecordFile: s.recordFile, recipientPinnedAgentIdHashHex: pin },
+          'bad_recipient',
+          /^SAIHM error \[bad_recipient\] \(status 0\): Nothing was shared: recipientPinnedAgentIdHashHex is not an agent ID, which is 64 hex characters with no spaces and no 0x\.$/,
+        ],
+      ),
       ['no recipient', { cellId: s.cellId }, 'recipient_required', /name the recipient with recipientRecordFile/],
       ['a record without its pin', { cellId: s.cellId, recipientRecord: encodeIdentityRecord(s.recipient.identityRecord) }, 'recipient_required', /together\.$/],
       ['a pin without a record', { cellId: s.cellId, recipientPinnedAgentIdHashHex: s.doc.agentIdHash }, 'recipient_required', /together\.$/],

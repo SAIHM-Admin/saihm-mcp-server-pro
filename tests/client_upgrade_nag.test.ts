@@ -1065,8 +1065,10 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       assert.match(stdout, /https:\/\/checkout\.stripe\.test\/session\/PRO/);
       // 0.14.3 (customer F8): the two lines a paid plan needs, as they go into a client's env block, and a check.
       assert.ok(stdout.includes('\n    "SAIHM_TIER": "PRO",\n    "SAIHM_PAYMENT_METHOD": "stripe"\n'), stdout);
-      // In TOML too (Codex, Grok), where the JSON lines are a parse error.
-      assert.ok(stdout.includes('\n    SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe"\n'), stdout);
+      // In TOML too (Codex, Grok), where the JSON lines are a parse error: the whole env line, as the README gives it,
+      // since an inline table ends at its line (0.14.3 review 2) and the pair on a line of its own does not parse.
+      assert.ok(stdout.includes('\n    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }\n'), stdout);
+      assert.ok(!stdout.includes('\n    SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD'), 'never the pair on a line of its own');
       // What happens without the payment method, as measured: the server starts, and each memory call names it.
       assert.match(stdout, /A paid plan needs both: without SAIHM_PAYMENT_METHOD the server starts, but every memory\n  call fails and names it until it is set\./);
       assert.match(stdout, /"Show my SAIHM status": it names your plan, and every memory on this key is still there\./);

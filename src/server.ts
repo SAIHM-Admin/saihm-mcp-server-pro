@@ -1732,6 +1732,15 @@ function shareRecipient(
       );
     }
     const f = readRecordFile(file);
+    // An agent ID's shape is checked before it is compared (0.14.3 review 2): a pin with a space or a 0x is malformed, not
+    // another agent's, and "check it with your colleague" would send the user after the wrong problem.
+    if (pin !== undefined && !/^[0-9a-fA-F]{64}$/.test(pin)) {
+      throw new SaihmEndpointError(
+        0,
+        'bad_recipient',
+        'Nothing was shared: recipientPinnedAgentIdHashHex is not an agent ID, which is 64 hex characters with no spaces and no 0x.',
+      );
+    }
     if (pin !== undefined && pin.toLowerCase() !== f.agentIdHash) {
       throw new SaihmEndpointError(
         0,
@@ -2855,7 +2864,8 @@ async function runUpgrade(): Promise<void> {
       paidTierEnvLine(target),
       '    "SAIHM_PAYMENT_METHOD": "stripe"',
       '',
-      '  In a TOML config (Codex, Grok), inside env = { ... }, with a comma before each:',
+      '  In a TOML config (Codex, Grok), env = { ... } stays on one line: add the two inside it,',
+      '  after a comma, so that it reads like this:',
       '',
       paidTierTomlLine(target),
       '',
@@ -2868,21 +2878,23 @@ async function runUpgrade(): Promise<void> {
 }
 
 /**
- * The two settings as they go inside a TOML client's `env = { ... }` (Codex, Grok), for a monthly plan `upgrade`
- * accepted: written out per plan, like {@link paidTierEnvLine}, so nothing anyone typed is rendered inside the quotes.
+ * A TOML client's whole `env = { ... }` line (Codex, Grok) with the two settings in it, for a monthly plan `upgrade`
+ * accepted, in the form the README gives: ONE line, because TOML 1.0 ends an inline table at its line, so the two
+ * pasted on a line of their own inside the braces do not parse (0.14.3 review 2). Written out per plan, like
+ * {@link paidTierEnvLine}, so nothing anyone typed is rendered inside the quotes.
  */
 function paidTierTomlLine(tier: string): string {
   switch (tier) {
     case 'PRO':
-      return '    SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe"';
+      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }';
     case 'PRO_FAST':
-      return '    SAIHM_TIER = "PRO_FAST", SAIHM_PAYMENT_METHOD = "stripe"';
+      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO_FAST", SAIHM_PAYMENT_METHOD = "stripe" }';
     case 'ENTERPRISE':
-      return '    SAIHM_TIER = "ENTERPRISE", SAIHM_PAYMENT_METHOD = "stripe"';
+      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "ENTERPRISE", SAIHM_PAYMENT_METHOD = "stripe" }';
     case 'ENTERPRISE_FAST':
-      return '    SAIHM_TIER = "ENTERPRISE_FAST", SAIHM_PAYMENT_METHOD = "stripe"';
+      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "ENTERPRISE_FAST", SAIHM_PAYMENT_METHOD = "stripe" }';
     default:
-      return '    SAIHM_TIER = the name of the plan you paid for, SAIHM_PAYMENT_METHOD = "stripe"';
+      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = the name of the plan you paid for, SAIHM_PAYMENT_METHOD = "stripe" }';
   }
 }
 

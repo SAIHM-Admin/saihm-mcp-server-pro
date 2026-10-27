@@ -259,7 +259,8 @@ verifies.
 
 With `recipientRecordFile`, the agent names the file and SAIHM reads it on your machine,
 so the agent does not copy the record's 13 KB of keys into the call. The file must be a
-regular file of at most 64 KB holding exactly the document the command writes, and its
+regular file of at most 64 KB holding exactly the document the command writes, in UTF-8
+(a file saved as UTF-16, as a PowerShell redirect writes it, is refused and says so), and its
 record must check out against its agent ID before anything is shared. Name it by its full
 path: a relative path is read from the server's working directory, which is your project
 in some AI clients and not in others, and `~` is not expanded. The agent ID in the file
@@ -267,9 +268,10 @@ came with the file, so it is only as sure as the way the file reached you: to ch
 get the agent ID from your colleague another way and pass it as
 `recipientPinnedAgentIdHashHex` beside the file. It must then be the agent ID in the file,
 or nothing is shared. A refused share says why in a fixed sentence, with its code:
-`bad_recipient_record_file` for the file, `recipient_mismatch` for an agent ID that is not
-the file's, `recipient_required` when no recipient is named, and `invalid_input` for a
-file and an inline record together. It never shows the file's contents or its path.
+`bad_recipient_record_file` for the file, `bad_recipient` for an agent ID that is not 64
+hex characters, `recipient_mismatch` for an agent ID that is not the file's,
+`recipient_required` when no recipient is named, and `invalid_input` for a file and an
+inline record together. It never shows the file's contents or its path.
 
 ## Hosted agent environments in detail
 
