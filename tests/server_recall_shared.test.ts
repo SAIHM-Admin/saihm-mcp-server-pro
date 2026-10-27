@@ -796,6 +796,9 @@ test("saihm_recall shared-read: a malformed pin, or a record that is not the pin
         const r = await callFull(d, id++, 'saihm_recall', args);
         assert.equal(r.isError, true, bad);
         assert.match(r.text, /^SAIHM error \[bad_sharer\]/, bad);
+        // It says what an agent ID is, and blames no record (0.14.3 review 3): the record, given or not, is not at fault.
+        assert.match(r.text, /must be 64 lowercase hex characters, 0-9 and a-f, with no spaces and no 0x$/, bad);
+        assert.doesNotMatch(r.text, /record/, bad);
       }
     }
     // A record given beside the pin is still checked against it, before any request.

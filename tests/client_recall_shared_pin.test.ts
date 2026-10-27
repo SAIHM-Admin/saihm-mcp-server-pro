@@ -182,6 +182,13 @@ test('a pin that is not 64 lowercase hex is refused before any request, with or 
     for (const pin of pins) {
       for (const read of [{ sharerPinnedAgentIdHashHex: pin, cellId: 'doc' }, { sharerPinnedAgentIdHashHex: pin, cellId: 'doc', sharerRecord: RECORD_A }]) {
         await refused(client.recallShared(read as Read), 'bad_sharer', JSON.stringify(read).slice(0, 120));
+        // The sentence says what an agent ID is, and names no record: none was given, or the one given is not the fault.
+        await assert.rejects(client.recallShared(read as Read), (e: unknown) => {
+          const m = (e as Error).message;
+          assert.match(m, /^the sharer's agent ID \(sharerPinnedAgentIdHashHex\) must be 64 lowercase hex characters, 0-9 and a-f, with no spaces and no 0x$/, m);
+          assert.doesNotMatch(m, /record/, m);
+          return true;
+        });
       }
     }
     assert.equal(e.requests(), 0, 'no malformed pin reaches the endpoint');
@@ -341,8 +348,12 @@ test("a record that is not the pinned agent's is refused before any request, as 
   const e = await endpoint(reply(grant(A, env), env));
   try {
     await assert.rejects(clientFor(e).recallShared(withRecord('doc', PIN_A, encodeIdentityRecord(M.identityRecord))), (err: unknown) => err instanceof KeySubstitutionError);
-    // A record that does not decode is malformed.
+    // A record that does not decode is malformed, and the sentence names the record, the one input at fault.
     await refused(clientFor(e).recallShared(withRecord('doc', PIN_A, { ...RECORD_A, mldsaPubKey: 'zz' })), 'bad_sharer', 'record');
+    await assert.rejects(clientFor(e).recallShared(withRecord('doc', PIN_A, { ...RECORD_A, mldsaPubKey: 'zz' })), (err: unknown) => {
+      assert.match((err as Error).message, /^the sharer's identity record given with the agent ID \(sharerRecord\) is malformed; it is optional, so it can be left out$/);
+      return true;
+    });
     assert.equal(e.requests(), 0);
   } finally {
     await e.close();

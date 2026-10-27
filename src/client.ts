@@ -6981,19 +6981,25 @@ export class SaihmProClient {
     // 1) The pin, checked for its shape before anything else: 64 lowercase hex, the only form an agentIdHash takes, so a
     //    short or padded one is refused here rather than sent. A record, when given, is pinned now (defeats
     //    key-substitution) and supplies the sharer's ML-DSA key; without one the key comes with the cell, at step 3.
+    //    Each refusal names only what it refuses (0.14.3 review 3): the agent ID's shape, or a record that was given.
+    const pin: unknown = grant.sharerPinnedAgentIdHashHex;
+    if (typeof pin !== 'string' || !HEX64_RE.test(pin)) {
+      throw new SaihmEndpointError(
+        0,
+        'bad_sharer',
+        "the sharer's agent ID (sharerPinnedAgentIdHashHex) must be 64 lowercase hex characters, 0-9 and a-f, with no spaces and no 0x",
+      );
+    }
+    const sharerPinned = fromHex(pin);
     let sharerRecord;
-    let sharerPinned;
     try {
-      const pin: unknown = grant.sharerPinnedAgentIdHashHex;
-      if (typeof pin !== 'string' || !HEX64_RE.test(pin)) throw new Error('pin');
-      sharerPinned = fromHex(pin);
       // null is a JavaScript caller's "no record", as absent is.
       sharerRecord = grant.sharerRecord == null ? undefined : decodeIdentityRecord(grant.sharerRecord);
     } catch {
       throw new SaihmEndpointError(
         0,
         'bad_sharer',
-        'sharer identity record or pinned agentIdHash is malformed',
+        "the sharer's identity record given with the agent ID (sharerRecord) is malformed; it is optional, so it can be left out",
       );
     }
     if (sharerRecord !== undefined) verifyIdentityRecord(sharerRecord, sharerPinned); // throws KeySubstitutionError on a pin mismatch
