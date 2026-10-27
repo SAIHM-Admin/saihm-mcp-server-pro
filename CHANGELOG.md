@@ -6,7 +6,7 @@ All notable changes to `@saihm/mcp-server-pro` are documented here. This project
 
 Sharing now works from any AI client: one command writes the identity record a colleague
 needs, `saihm_share` reads it from that file, and a colleague reads what you share with
-your agent ID alone. Recall is faster for every key file,
+just your agent ID and the memory's cellId. Recall is faster for every key file,
 wherever it is kept, and new sessions on a device reuse its sign-in. Fixes for erased
 memories, waiting joins, the sign-in limit and long endpoint addresses. No tool added or
 removed.

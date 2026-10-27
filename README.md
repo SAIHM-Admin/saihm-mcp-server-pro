@@ -446,7 +446,7 @@ paid plan keeps the same key and every memory.
   ./identities/work-agent.json until 17:00 UTC."* A share can
   be revoked or given an expiry, so the two stay separate. The side that shares needs the
   other's identity record, made as below; the side that reads needs only the sharer's
-  agent ID.
+  agent ID and the memory's cellId.
 
 ### Share with a colleague
 
