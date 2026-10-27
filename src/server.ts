@@ -410,8 +410,8 @@ const JOIN_EXISTING_IDENTITY_QUESTION: string = [
   '  "Do you already have a SAIHM identity - on another machine, or from an earlier session?"',
   '',
   'And: "Does this environment keep its home directory between sessions?" If not - a hosted or cloud',
-  'session that starts fresh - do not join here: join on a machine you keep, then bring the identity',
-  'here as below.',
+  'session that starts fresh - or if later jobs can reach it, as on a CI runner, do not join here:',
+  'join on your own computer, then bring the identity here as below.',
   '',
   'If they have one: do not join. On the machine that has it, run',
   '  npx -y @saihm/mcp-server-pro export-identity',
@@ -419,12 +419,19 @@ const JOIN_EXISTING_IDENTITY_QUESTION: string = [
   "environment's settings (environment variables or secrets). Then start a new session - a hosted",
   'environment reads its variables when a session starts - or, on your own machine, restart this',
   'server. Never paste either value into this chat or into a file in the repository.',
-  'If they have none and this home is kept: call saihm_join again with newIdentity: true.',
+  'If they have none and this home is kept and theirs alone: call saihm_join again with newIdentity: true.',
 ].join('\n');
 
 /**
- * The refusal to mint where the home directory is marked temporary. `temporaryHomeVariable` is one of
- * the fixed NAMES `ephemeralHomeSignal` checks - never a value anyone set.
+ * The refusal to mint where the home directory is marked temporary, or as a CI runner's that later jobs can reach.
+ * `temporaryHomeVariable` is one of the fixed NAMES `ephemeralHomeSignal` checks - never a value anyone set.
+ *
+ * ONE TEXT FOR EVERY MARKER (0.14.3 review 3), and true for each. A CI marker says only that this is a runner, not
+ * whether its home is discarded or kept: a self-hosted Jenkins, TeamCity, Bamboo or Azure agent keeps it for the next
+ * job. So the text says both, and offers `SAIHM_EPHEMERAL_HOME=0` only for a home that is kept AND the operator's
+ * alone: on a runner whose home later jobs can reach, a key minted there would be theirs to read, with the recall copy
+ * and the kept sign-in that `0` turns back on. A key for a CI job is made on the operator's own computer and given to
+ * the job as its own key file, the way the README's hosted-environments section says.
  *
  * THE ONLY WAY PAST IT IS THE OPERATOR'S. An override taken as a tool input would let the agent being
  * refused clear the gate with a boolean it chose itself, and a hasty or prompted one would.
@@ -434,16 +441,18 @@ const JOIN_EXISTING_IDENTITY_QUESTION: string = [
 function ephemeralJoinRefusal(temporaryHomeVariable: string): string {
   return [
     `Not joining here: ${temporaryHomeVariable} is set, which marks this environment's home directory as`,
-    'temporary. A memory key created here is lost when the session ends, and the free activation is',
-    'one per person, so it would be spent on a key nobody can keep. Tell the operator:',
+    "temporary, or as a CI runner's home that later jobs can reach. A key created here would be lost",
+    'when the session ends, or left where those jobs could read it, and the free activation is one',
+    'per person. Tell the operator:',
     '',
     '  - Already have a SAIHM identity? Run `npx -y @saihm/mcp-server-pro export-identity` where it',
     "    lives, set SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE in this environment's settings",
     '    (never in this chat or a file in the repository), and start a new session.',
-    '  - New to SAIHM? Join on a machine you keep (`npx -y @saihm/mcp-server-pro free-join`), then',
-    '    run export-identity there and set its two values here, as above.',
-    '  - If this environment really does keep its home directory between sessions, set',
-    "    SAIHM_EPHEMERAL_HOME=0 in its settings and start a new session.",
+    '  - New to SAIHM? Join on your own computer (`npx -y @saihm/mcp-server-pro free-join`), then',
+    '    bring that identity here as above. For a CI job, you can instead give the job its own key',
+    '    file, as a secret file named by SAIHM_MASTER_SECRET_FILE.',
+    "  - Set SAIHM_EPHEMERAL_HOME=0 in this environment's settings only if its home directory is",
+    '    kept and only you use it, then start a new session.',
   ].join('\n');
 }
 
@@ -2111,7 +2120,7 @@ if (selfJoinEnabled()) {
     {
       title: 'Join SAIHM (activate free memory)',
       description:
-        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory, so the first call answers with a question instead: whether they already have a SAIHM identity (from another machine or an earlier session). Put it to them once; if they do, do not join: they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, do not join there either: they join on a machine they keep, then bring that identity in the same way. Once they confirm they want a new one here, call again with newIdentity: true. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, the join finishes by itself and the memory tools work; there is no need to call saihm_join again. No payment.',
+        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory, so the first call answers with a question instead: whether they already have a SAIHM identity (from another machine or an earlier session). Put it to them once; if they do, do not join: they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, or in a CI job, do not join there either: they join on their own computer, then bring that identity in the same way. Once they confirm they want a new one here, call again with newIdentity: true. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, the join finishes by itself and the memory tools work; there is no need to call saihm_join again. No payment.',
       inputSchema: {
         newIdentity: optionalInput(z.boolean()).describe(
           'true once the user confirms they have no SAIHM identity to bring here and want a new, empty memory',

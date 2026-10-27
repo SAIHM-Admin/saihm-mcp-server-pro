@@ -553,8 +553,10 @@ the job's secrets.
   read them. Add `SAIHM_EPHEMERAL_HOME=1` there if its home directory does not
   persist. Hosts that only connect to remote MCP servers cannot run this package.
 
-Where it can tell that the home directory is temporary, a join refuses to create a key
-that would be lost with it.
+Where it can tell that the home directory is temporary, or is a CI runner's home that later
+jobs can reach, a join refuses to create a key there: join on your own computer and bring
+your identity in. Set `SAIHM_EPHEMERAL_HOME=0` only where the home is kept and only you use
+it.
 
 ## See it run
 

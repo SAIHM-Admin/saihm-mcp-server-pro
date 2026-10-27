@@ -39,8 +39,9 @@ join shows. Keep the key file all the same: a later join on this machine uses it
 answers with a question for you: whether you already have a SAIHM identity, on another
 machine or from an earlier session, and whether this environment keeps its home directory.
 Only a call after that question creates the key, even when the assistant says at once that
-you want a new one. A join that would refuse anyway (a temporary home, a `SAIHM_HOME` with
-the shape of a key, a paid `SAIHM_TIER` with no identity here) says so before asking.
+you want a new one. A join that would refuse anyway (a temporary home or a CI runner's, a
+`SAIHM_HOME` with the shape of a key, a paid `SAIHM_TIER` with no identity here) says so before
+asking.
 
 ## Client setup in detail
 
@@ -353,15 +354,18 @@ that only connect to remote MCP servers cannot run this package.
 
 ### Temporary home directories
 
-Where the home directory is temporary, the join refuses to create a key — where it
-can tell: in a session a host marks as hosted or CI (`CLAUDE_CODE_REMOTE`,
-`GITHUB_ACTIONS`, `CI`, or a CI runner's own marker, listed under `SAIHM_EPHEMERAL_HOME`
-in [Configuration](#configuration)), or
-wherever `SAIHM_EPHEMERAL_HOME` is set to anything but `0`/`false`/`no`/`off`. Nothing
-an agent passes to `saihm_join` overrides that; setting `SAIHM_EPHEMERAL_HOME=0` in
-the environment's settings does, and the `free-join` command reads it from its own
-environment, so a command-line setting overrides it there (a person still has to
-approve the sign-in). In a temporary home the client's local bookkeeping (the
+Where the home directory is temporary, or is a CI runner's home that later jobs can reach,
+the join refuses to create a key there — where it can tell: in a session a host marks as
+hosted or CI (`CLAUDE_CODE_REMOTE`, `GITHUB_ACTIONS`, `CI`, or a CI runner's own marker,
+listed under `SAIHM_EPHEMERAL_HOME` in [Configuration](#configuration)), or wherever
+`SAIHM_EPHEMERAL_HOME` is set to anything but `0`/`false`/`no`/`off`. A key there would be
+lost with the session, or left where later jobs could read it. Join on your own computer
+instead, and bring the identity in; a CI job can take its own key file, as a secret file
+named by `SAIHM_MASTER_SECRET_FILE`. Nothing an agent passes to `saihm_join` overrides the
+refusal; setting `SAIHM_EPHEMERAL_HOME=0` in the environment's settings does, and declares
+a home that is kept and that only you use, so set it only there. The `free-join` command
+reads it from its own environment, so a command-line setting overrides it there (a person
+still has to approve the sign-in). In a temporary home the client's local bookkeeping (the
 anti-rollback marks, and the recall cache if one is turned on) also starts empty each
 session.
 
@@ -465,7 +469,7 @@ the rest have working defaults.
 | `SAIHM_MASTER_SECRET_HEX` | see note | The master secret inline, ≥ 64 hex characters (≥ 32 bytes), high-entropy, client-held, never sent. Prefer the file form: anything inline lands in the config file itself. |
 | `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool — the one that answers *"Join SAIHM"*. **On by default**; set to `0` to remove it and expose only the canonical eight tools. |
 | `HTTPS_PROXY` / `NO_PROXY` | no | An HTTP proxy for reaching an `https://` endpoint, and the hosts to reach directly instead — `https_proxy`, or `HTTPS_PROXY` if that is unset (`HTTP_PROXY` is not used for https, as with npm and curl). Only an `http://` proxy URL is supported; any other fails with an error naming the setting rather than connecting directly. A network that inspects TLS presents its own certificate: get its CA certificate (PEM) from the network's administrator (never copy one from the connection itself), save it to a file and set `NODE_EXTRA_CA_CERTS` to that file's path in the server's environment; Node reads it at start. `NO_PROXY` (or `no_proxy`) takes `*`, host names, domain suffixes and ports. Loopback endpoints (`127.0.0.0/8`, `::1`, `localhost` and `*.localhost`) never use a proxy. Proxy credentials in the URL go to the proxy only and are never printed. |
-| `SAIHM_EPHEMERAL_HOME` | no | Says whether this environment's home directory is temporary, discarded when a session ends, or kept for later jobs, as on a CI runner. Set it (e.g. `1`) where it is: the join then refuses to create a key that would be lost, and SAIHM keeps no recall copy and no sign-in there by default. `0` declares the home kept and overrides a host's own signal. Unset, SAIHM recognizes it where the host says so: `CLAUDE_CODE_REMOTE`, `GITHUB_ACTIONS` or `CI`, and on the runners that set no `CI`, by their own marker: Jenkins (`JENKINS_URL` with `BUILD_ID`), Azure Pipelines (`TF_BUILD`), TeamCity (`TEAMCITY_VERSION`), AWS CodeBuild (`CODEBUILD_BUILD_ARN`), Google Cloud Build (`BUILDER_OUTPUT`) and Bamboo (`bamboo_planKey`). On any other runner, and wherever the home folder outlives the job, set it to `1`. |
+| `SAIHM_EPHEMERAL_HOME` | no | Says whether this environment's home directory is temporary, discarded when a session ends, or a CI runner's home that later jobs can reach. Set it (e.g. `1`) where it is: the join then refuses to create a key there (it would be lost, or left where those jobs could read it), and SAIHM keeps no recall copy and no sign-in there by default. `0` declares a home that is kept and that only you use, and overrides a host's own signal: set it only there, never on a runner whose home later jobs can reach. Unset, SAIHM recognizes it where the host says so: `CLAUDE_CODE_REMOTE`, `GITHUB_ACTIONS` or `CI`, and on the runners that set no `CI`, by their own marker: Jenkins (`JENKINS_URL` with `BUILD_ID`), Azure Pipelines (`TF_BUILD`), TeamCity (`TEAMCITY_VERSION`), AWS CodeBuild (`CODEBUILD_BUILD_ARN`), Google Cloud Build (`BUILDER_OUTPUT`) and Bamboo (`bamboo_planKey`). On any other runner, and wherever the home folder outlives the job, set it to `1`. |
 | `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600), where per-restart bookkeeping is kept, and where the erasure feed is written unless `SAIHM_ERASURE_FEED_DIR` overrides it. Defaults to `~/.saihm`. Give a full path: a JSON config does not expand `~`, so `~/.saihm` there is a relative path, and a relative path (or one that begins with a space) is refused at start. Versions before 0.13.0 used it, under the server's working directory: a key made there is still there, so move it into the full path you set. |
 | `SAIHM_AUTH_HEADER` | no | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended) — the client mints and refreshes its own token, so there is nothing to paste or re-paste. |
 | `SAIHM_SESSION_CACHE` | no | Keeps your sign-in between sessions on this device. **On by default** for the key file in `SAIHM_HOME` (the one a join creates), except where the home is temporary or kept for later jobs (see `SAIHM_EPHEMERAL_HOME`): after a sign-in, the token is kept in `$SAIHM_HOME/session.<first 16 characters of your agent ID>.json`, readable only by your user (mode 600), and a new session on this device uses it until it expires instead of signing in again. That makes one sign-in per device rather than one per session, so a team behind one office address signs in far less often. The file holds the sign-in token, which expires on its own, and the endpoint, agent ID, plan and payment method it was issued for. It holds no key, so it cannot make another sign-in. A session uses it only for that same endpoint, identity, plan and payment method, and only from a file of your user's that no one else can read; a token the service refuses is removed, and anything else is replaced at the next sign-in. `0` keeps the sign-in in memory only, one per session, as before 0.14.3. An identity token, an inline secret and a key file kept elsewhere sign in once per session either way. |

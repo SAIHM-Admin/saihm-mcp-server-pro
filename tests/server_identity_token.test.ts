@@ -366,7 +366,7 @@ test('0.14.3: newIdentity: true on the first call is answered with the question 
         const asked = await d.call('saihm_join', { newIdentity: true });
         assert.equal(asked.isError, false);
         assert.match(asked.text, /^Not joining yet\. A join creates a NEW, EMPTY memory, so first ask the operator:/);
-        assert.match(asked.text, /If they have none and this home is kept: call saihm_join again with newIdentity: true\.$/);
+        assert.match(asked.text, /If they have none and this home is kept and theirs alone: call saihm_join again with newIdentity: true\.$/);
         assert.ok(!existsSync(join(home, KEY)), 'the first call mints nothing');
         assert.equal(m.joinStarts(), 0, 'and starts no approval');
         // Without newIdentity, still nothing.
@@ -407,7 +407,7 @@ test('saihm_join will not mint where the home is marked temporary, and only the 
           // A flag the agent supplies cannot clear it - unknown inputs are dropped, and the gate stands.
           const pushed = await d.call('saihm_join', { newIdentity: true, allowEphemeral: true });
           assert.match(pushed.text, /Not joining here/);
-          assert.match(pushed.text, /SAIHM_EPHEMERAL_HOME=0 in its settings/);
+          assert.match(pushed.text, /SAIHM_EPHEMERAL_HOME=0 in this environment's settings only if its home directory is\n {4}kept and only you use it/);
           assert.match(pushed.text, /never in this chat/);
           assert.ok(!existsSync(join(home, KEY)), `${variable}: nothing minted`);
           assert.equal(m.joinStarts(), 0);
@@ -443,6 +443,66 @@ test('saihm_join will not mint where the home is marked temporary, and only the 
       rmSync(home, { recursive: true, force: true });
     }
   }
+});
+
+/**
+ * The join's refusal where a marker says the home is temporary or a CI runner's (0.14.3 review 3), written out whole:
+ * one text, true for every marker, because a CI marker does not say whether the runner keeps its home for later jobs.
+ */
+const refusalFor = (variable: string): string =>
+  [
+    `Not joining here: ${variable} is set, which marks this environment's home directory as`,
+    "temporary, or as a CI runner's home that later jobs can reach. A key created here would be lost",
+    'when the session ends, or left where those jobs could read it, and the free activation is one',
+    'per person. Tell the operator:',
+    '',
+    '  - Already have a SAIHM identity? Run `npx -y @saihm/mcp-server-pro export-identity` where it',
+    "    lives, set SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE in this environment's settings",
+    '    (never in this chat or a file in the repository), and start a new session.',
+    '  - New to SAIHM? Join on your own computer (`npx -y @saihm/mcp-server-pro free-join`), then',
+    '    bring that identity here as above. For a CI job, you can instead give the job its own key',
+    '    file, as a secret file named by SAIHM_MASTER_SECRET_FILE.',
+    "  - Set SAIHM_EPHEMERAL_HOME=0 in this environment's settings only if its home directory is",
+    '    kept and only you use it, then start a new session.',
+  ].join('\n');
+
+test('the join refusal is the same true text for every marker and for a plain temporary home, on the tool and on free-join', async () => {
+  // Every marker SAIHM reads, a hosted session's and each CI runner's, and the operator's own declaration with no host
+  // marker at all: a plain temporary home.
+  const markers: [Record<string, string>, string][] = [
+    [{ CLAUDE_CODE_REMOTE: 'true' }, 'CLAUDE_CODE_REMOTE'],
+    [{ GITHUB_ACTIONS: 'true' }, 'GITHUB_ACTIONS'],
+    [{ CI: 'true' }, 'CI'],
+    [{ JENKINS_URL: 'https://jenkins.example/', BUILD_ID: '42' }, 'JENKINS_URL'],
+    [{ TF_BUILD: 'True' }, 'TF_BUILD'],
+    [{ TEAMCITY_VERSION: '2024.12' }, 'TEAMCITY_VERSION'],
+    [{ CODEBUILD_BUILD_ARN: 'arn:aws:codebuild:us-east-1:000000000000:build/demo:1' }, 'CODEBUILD_BUILD_ARN'],
+    [{ BUILDER_OUTPUT: '/builder/outputs' }, 'BUILDER_OUTPUT'],
+    [{ bamboo_planKey: 'DEMO-PLAN' }, 'bamboo_planKey'],
+    [{ SAIHM_EPHEMERAL_HOME: '1' }, 'SAIHM_EPHEMERAL_HOME'],
+  ];
+  await withMock({ grant: true }, async (m) => {
+    for (const [env, variable] of markers) {
+      const home = tempHome('r');
+      try {
+        const d = await startServer({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: m.base() + '/mcp', ...env });
+        try {
+          const r = await d.call('saihm_join', { newIdentity: true });
+          assert.equal(r.isError, false, r.text);
+          assert.equal(r.text, refusalFor(variable), variable);
+        } finally {
+          d.proc.kill();
+        }
+        const cli = await runCli(['free-join'], { SAIHM_HOME: home, SAIHM_ENDPOINT_URL: m.base() + '/mcp', ...env });
+        assert.equal(cli.code, 1, `${variable}: ${cli.stderr}`);
+        assert.ok(cli.stderr.includes(refusalFor(variable) + '\n'), `${variable}: ${cli.stderr}`);
+        assert.ok(!existsSync(join(home, KEY)), `${variable}: nothing minted`);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    }
+    assert.equal(m.joinStarts(), 0, 'no approval started anywhere');
+  });
 });
 
 test('a join that ACTIVATES a key already here is not gated', async () => {
@@ -501,7 +561,7 @@ test('free-join refuses in a temporary home; a flag cannot override it, the oper
         const no = await runCli(args, { SAIHM_HOME: home, SAIHM_ENDPOINT_URL: m.base() + '/mcp', CLAUDE_CODE_REMOTE: 'true' });
         assert.equal(no.code, 1, args.join(' '));
         assert.match(no.stderr, /Not joining here: CLAUDE_CODE_REMOTE is set/);
-        assert.match(no.stderr, /SAIHM_EPHEMERAL_HOME=0/);
+        assert.match(no.stderr, /SAIHM_EPHEMERAL_HOME=0 in this environment's settings only if/);
         assert.ok(!existsSync(join(home, KEY)));
         assert.equal(m.joinStarts(), 0);
       }

@@ -156,11 +156,12 @@ Three things to tell the user, in your own words:
    the install worked. Its first call asks whether they already have a SAIHM
    identity: a join creates a NEW, EMPTY memory, so pass `newIdentity: true` only
    once they confirm they want one. In a hosted or cloud session that starts fresh
-   each time, do not join there either: they join on a machine they keep, then
-   bring that identity in (point 3). Where it can tell that the home directory is
-   discarded when the session ends (the host marks a hosted or CI session, or
-   `SAIHM_EPHEMERAL_HOME` is set), it refuses to create a key; only the
-   environment's owner can override that.
+   each time, or in a CI job, do not join there either: they join on their own
+   computer, then bring that identity in (point 3). Where it can tell that the home
+   directory is discarded when the session ends, or is a CI runner's that later jobs
+   can reach (the host marks a hosted or CI session, or `SAIHM_EPHEMERAL_HOME` is
+   set), it refuses to create a key; only the environment's owner can override that,
+   and only for a home that is kept and theirs alone.
 2. **`~/.saihm/free-identity.key` is the only copy of their key.** Advise
    backing it up. If it is lost, no one — including SAIHM — can open their
    cells. That is the point of the design, and it is not recoverable.

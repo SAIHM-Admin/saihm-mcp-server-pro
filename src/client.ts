@@ -2622,10 +2622,10 @@ export function selfJoinWouldMint(): boolean {
 
 /**
  * Signals that this process runs where the home directory is DISCARDED when the session ends, or KEPT FOR LATER JOBS:
- * a hosted agent session or a CI runner. A key minted there dies with the machine, and minting one spends the
- * once-per-person free activation on it - so the join paths refuse to mint where one of these is set unless told the
- * home does persist. A recall copy or a kept sign-in left there would outlive the job, so neither is made by default
- * (bootFromEnv).
+ * a hosted agent session or a CI runner. A key minted there dies with the machine, or stays where later jobs can read
+ * it, and minting one spends the once-per-person free activation on it - so the join paths refuse to mint where one of
+ * these is set unless told the home is kept and the operator's alone. A recall copy or a kept sign-in left there would
+ * outlive the job, so neither is made by default (bootFromEnv).
  *
  * Each entry is a variable the host itself documents and sets. Most CI runners set `CI`; the common runners that set
  * no `CI` (0.14.3 review) are recognised by the marker npm's ci-info reads for each, set when present and not blank,
@@ -2633,7 +2633,8 @@ export function selfJoinWouldMint(): boolean {
  * Google Cloud Build and Bamboo. Detection is a convenience on top of the confirmation the join asks for anyway, never
  * the only guard: an unlisted host is treated as persistent, which is the behaviour every release before this one had
  * everywhere, and the docs tell the operator of any other runner, or of a home that outlives the job, to declare it.
- * `SAIHM_EPHEMERAL_HOME` overrides it both ways: `1` declares the home temporary, `0` declares it kept.
+ * `SAIHM_EPHEMERAL_HOME` overrides it both ways: `1` declares the home temporary or reachable by later jobs, `0` declares it
+ * kept and the operator's alone.
  */
 const EPHEMERAL_HOME_SIGNALS: ReadonlyArray<readonly [string, (v: string) => boolean]> = [
   ['CLAUDE_CODE_REMOTE', (v) => v.trim().toLowerCase() === 'true'],

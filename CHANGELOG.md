@@ -64,6 +64,11 @@ removed.
   answers with the question about an existing identity, even when the call says a new
   one is wanted, and only a call after it creates the key. A join that would refuse
   anyway says so before it asks.
+- **The join's refusal on a CI runner.** Where the home is temporary or a CI runner's that
+  later jobs can reach, the join's refusal now says both, sends a new user to join on
+  their own computer (a CI job can take its own key file), and offers
+  `SAIHM_EPHEMERAL_HOME=0` only for a home that is kept and that only you use. The join's
+  question, its description and the docs say the same.
 - **The upgrade command prints the two settings a paid plan needs,** `SAIHM_TIER` and
   `SAIHM_PAYMENT_METHOD`, as they go into a client's JSON `env` block and into a TOML
   configuration such as Codex's or Grok's, and how to check the plan once the client has
