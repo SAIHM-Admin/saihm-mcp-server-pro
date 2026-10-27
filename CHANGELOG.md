@@ -56,6 +56,10 @@ removed.
   sign-in holds no key and is used only for the same endpoint, identity, plan and payment
   method, and none is kept where the home is temporary or kept for later jobs, as for the
   recall copy. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0`.
+- **A shared memory is labelled in the structured result too.** A shared read's row in
+  `memories` now carries the sharer's agent ID as `sharer` and `owner: "another-agent"`,
+  and the text names that agent ID beside its label, so the memory is marked as another
+  agent's whichever part of the result an AI client passes to the model.
 - **"Join SAIHM" asks first.** The first join call that would create a new key now
   answers with the question about an existing identity, even when the call says a new
   one is wanted, and only a call after it creates the key. A join that would refuse

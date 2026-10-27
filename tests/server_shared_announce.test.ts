@@ -546,8 +546,13 @@ test('own memories AND announcements in one response: both blocks render, unconf
     structured.memories.map((m: { cellId: string }) => m.cellId),
     ['own1'],
   );
+  // An own row carries no `sharer` and no `owner` (0.14.3 review 3): those two say a row is another agent's.
+  assert.deepEqual(Object.keys(structured.memories[0]).sort(), ['cellId', 'commitment', 'plaintext', 'seq']);
   assert.equal(structured.shared.length, 1);
   assert.equal(structured.shared[0].cellId, 'granted');
+  // The pointer keeps its own provenance in both channels: the sharer on its text line and on its row, unverified.
+  assert.match(lines[3], new RegExp(` sharer=${'bb'.repeat(32)} `));
+  assert.deepEqual(structured.shared[0], { sharer: 'bb'.repeat(32), cellId: 'granted', scope: 'read', expiryEpoch: null, verified: false });
 });
 
 test('the text block renders at most 16 pointers and says how many it withheld', async () => {

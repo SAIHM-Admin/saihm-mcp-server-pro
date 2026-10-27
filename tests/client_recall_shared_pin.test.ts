@@ -159,6 +159,8 @@ test('by agent ID alone: a real grant opens, the same cell as with the record, i
     assert.equal(plain?.plaintext, 'shared note');
     assert.equal(plain?.seq, '1');
     assert.equal(plain?.commitmentHash, toHex(env.publicMeta.commitmentHash));
+    // Whose memory it is travels with it (0.14.3 review 3): the pin its signing key was checked against.
+    assert.equal(plain?.sharer, PIN_A);
     assert.deepEqual(plain, recorded, 'the same cell either way');
     assert.deepEqual(nulled, plain);
     // No new request: one shared read each, asking the endpoint the same thing.

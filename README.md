@@ -470,7 +470,8 @@ record is not the `export-identity` file: never send that one to anyone.
 To read what you share, your colleague's agent needs only your agent ID and the memory's
 cellId, which arrives with the share. Send them your agent ID yourself: the
 `identity-record` command prints it. SAIHM checks the memory against that agent ID before
-it opens it, and shows it as another agent's memory, never as one of theirs.
+it opens it, and labels it with your agent ID as another agent's memory, never as one of
+theirs, in the text and in the structured result alike, whichever their AI client reads.
 
 ## Hosted agent environments
 

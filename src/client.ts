@@ -1669,6 +1669,12 @@ export interface RecalledCell {
    * for comparing a copy with its `shareStates` entry.
    */
   grant?: string;
+  /**
+   * A shared read only (0.14.3): the sharer's agent ID (64 lowercase hex) the read was pinned to, which the memory's
+   * signing key was checked against. It travels with the memory so every copy of the result names whose memory it is.
+   * Absent on this identity's own memories.
+   */
+  sharer?: string;
 }
 
 /**
@@ -6954,7 +6960,7 @@ export class SaihmProClient {
    *     strong as the party this paragraph assumes hostile — state it that way rather than reading the
    *     `null` return as a cryptographic guarantee.
    */
-  async recallShared(grant: SharedReadGrant): Promise<RecalledCell | null> {
+  async recallShared(grant: SharedReadGrant): Promise<(RecalledCell & { sharer: string }) | null> {
     // 1) The pin, checked for its shape before anything else: 64 lowercase hex, the only form an agentIdHash takes, so a
     //    short or padded one is refused here rather than sent. A record, when given, is pinned now (defeats
     //    key-substitution) and supplies the sharer's ML-DSA key; without one the key comes with the cell, at step 3.
@@ -7086,6 +7092,8 @@ export class SaihmProClient {
         seq: env.seq.toString(10),
         commitmentHash: toHex(env.publicMeta.commitmentHash),
         ...(servingGrant !== undefined ? { grant: servingGrant } : {}),
+        // Whose memory this is: the pin the signing key was just checked against, carried on the result itself.
+        sharer: sharerHex,
       };
     } finally {
       dek.fill(0); // scrub the unwrapped DEK regardless of outcome

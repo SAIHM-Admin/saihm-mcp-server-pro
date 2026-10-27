@@ -43,7 +43,8 @@ import {
  * `saihm_recall`'s shared-read branch places a foreign agent's plaintext in a field literally named
  * `memories`. Structured output is unsanitised because sanitising it would destroy data, not because
  * the channel is inherently safe; what keeps a value from being read as this agent's own memory there
- * is a discriminator on the field, which that branch does not yet carry.
+ * is a discriminator on the row, which that branch carries since 0.14.3: the sharer's agent ID and
+ * `owner: "another-agent"`, beside the plaintext.
  */
 export const safeField = (s: string, max: number): string => {
   // A NON-STRING is fenced as the marker rather than dereferenced. The module header promises this

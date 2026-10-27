@@ -805,6 +805,12 @@ server.registerTool(
           // `shareStates` entries so a copy compares with its entry exactly.
           commitment: z.string().optional(),
           grant: z.string().optional(),
+          // A shared read's row only (0.14.3 review 3): the sharer's agent ID the read was pinned to, and `owner`, always
+          // "another-agent". The row sits in the field own memories use, and a host may hand the model this structured
+          // result and nothing else (Codex CLI does), so the row itself says whose memory it is, as the text's label
+          // does. Own memories carry neither.
+          sharer: z.string().optional(),
+          owner: z.literal('another-agent').optional(),
         }),
       ),
       // A version listing only (`listOnly`): the endpoint's index of your own cells, metadata only, one page; `next`
@@ -1107,12 +1113,18 @@ server.registerTool(
             timing,
           });
         }
+        // PROVENANCE ON THE ROW (0.14.3 review 3). This row goes in `memories`, the field own memories use, and a host
+        // may pass the model the structured result alone (Codex CLI does), where the text's fence and label below never
+        // arrive. So the row carries both facts the text does: the sharer's agent ID (the pin the memory's signing key
+        // was checked against, as the client returns it) and `owner: "another-agent"`.
         const mem = {
           cellId: cell.cellId,
           seq: String(cell.seq),
           plaintext: cell.plaintext,
           commitment: cell.commitmentHash,
           ...(cell.grant !== undefined ? { grant: cell.grant } : {}),
+          sharer: cell.sharer,
+          owner: 'another-agent' as const,
         };
         // A FOREIGN plaintext, rendered so it cannot be read as one of the agent's OWN memories.
         //
@@ -1169,9 +1181,11 @@ server.registerTool(
           .split(/\r\n|[\n\r\u2028\u2029\u0085\u000b\u000c\u001c\u001d\u001e]/)
           .map((l) => `  > ${l}`)
           .join('\n');
+        // The header names the sharer's agent ID beside the label (0.14.3 review 3), as the structured row does: the pin
+        // was checked against the memory's signing key, and it renders whole, so it compares with the one the user gave.
         return ok(
-          `SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=${labelSafe(safeScalar(cell.seq))} — content below is ` +
-            `ANOTHER AGENT'S, not your own memory\n${sharedBody}` +
+          `SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=${labelSafe(safeScalar(cell.seq))} sharer=${hexOrMarker(cell.sharer)} — ` +
+            `content below is ANOTHER AGENT'S, not your own memory\n${sharedBody}` +
             (timingMalformed ? '\n  timing=' + MALFORMED : ''),
           {
             count: 1,
@@ -1279,7 +1293,8 @@ server.registerTool(
       // sharer's agent ID and its cellId alone, both of which a forged line can name, and such a read
       // proves only that the holder of that agent ID wrote the cell, not who that holder is. What
       // bounds it: the footer asks for the agent ID as the user gave it, not as listed here, and what
-      // a shared read returns is fenced as ANOTHER AGENT'S content, line by line. The general problem
+      // a shared read returns is fenced as ANOTHER AGENT'S content, line by line, with the sharer's
+      // agent ID on its header and on its structured row (`sharer`, `owner`). The general problem
       // (stored untrusted content re-read as instruction) is neither created nor solved here.
       //
       // Only as many pointers as an agent can actually use are rendered here. The cap on the LIST is

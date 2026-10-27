@@ -475,7 +475,7 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
   'server.ts:`SAIHM Session\\n agent=${labelSafe(shortScalar(agentIdHash))':
     'the status line. Every span VERIFIED fenced by reading: agent/tier/custody are labelSafe(shortScalar|safeScalar), shards/sharing are numbers-or-marker, bfsi is a number or the marker, and R/M/epoch are labelSafe(safeScalar). Reported only because the predicate does not reduce `??` and numeric unions inside a template span',
   'server.ts:`SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=$':
-    'the shared-recall receipt. cellId and seq are labelSafe(safeScalar); the trailing `${sharedBody}` is the PAYLOAD - and note how it is bounded: `cell.plaintext` is split on EVERY line terminator and every line re-prefixed with `  > `, so an embedded newline yields another QUOTED line rather than a forged record at column zero',
+    'the shared-recall receipt. cellId and seq are labelSafe(safeScalar), and the sharer (0.14.3 review 3) is hexOrMarker; the trailing `${sharedBody}` is the PAYLOAD - and note how it is bounded: `cell.plaintext` is split on EVERY line terminator and every line re-prefixed with `  > `, so an embedded newline yields another QUOTED line rather than a forged record at column zero',
   'server.ts:c.plaintext':
     'the PAYLOAD, raw by design and documented as such at the site: it is the memory the agent asked ' +
     'for, not a label, and fencing it would corrupt the thing being recalled. The residual this ' +
@@ -3702,7 +3702,9 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
     },
     saihm_recall: {
       count: 'client-computed from the opened cells',
-      memories: 'UNBOUNDED BY DESIGN: the payload, plus caller-supplied labels',
+      memories:
+        'UNBOUNDED BY DESIGN: the payload, plus caller-supplied labels; on a shared read, also the sharer the caller pinned ' +
+        '(64 lowercase hex, checked before any request) and the fixed owner label',
       shared: 'BOUNDED IN THE CLIENT: per field, running total, and row count',
       sharedTruncated: 'client-computed',
       shareStates: 'BOUNDED IN THE CLIENT: hex ids, digit strings, a scope enum, cell ids within the advertised bound (at most 4,096 bytes), at most 4,096 entries',

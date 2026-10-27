@@ -537,7 +537,9 @@ the client starts fresh. `SAIHM_SHARE_MAP_STORE=off` keeps the position in memor
 that cannot be written.
 
 **Shared reads** (`saihm_recall` with the sharer and the cell) return the `commitment` of the version opened and, when
-the endpoint sends it, the `grant` that served it, so a copy matches its entry exactly.
+the endpoint sends it, the `grant` that served it, so a copy matches its entry exactly. The row also carries `sharer`, the
+agent ID the read was pinned to, and `owner: "another-agent"`, and the text names that agent ID beside its label, so the
+memory is marked as another agent's in both parts of the result.
 
 **Every share, page by page.** Where `saihm_status` offers `features.sharesPaged`, `saihm_recall` with
 `sharesOnly: true` (and only `after`) lists every memory shared with you, by sharer and then by cell, without reading
@@ -647,6 +649,7 @@ schema. A field is absent, or null where it is always present, when the endpoint
 | `snapshot`, `snapshots` | `saihm_recall` with `warmStart` | The snapshot restored, or `null`; the snapshots listed |
 | `deleted` | `saihm_forget` with `warmStart: "delete"` | `true` once the snapshot is destroyed |
 | `servedBy`, `asOf` | `saihm_recall` | Where the answer was served (`origin` or a region id) and the origin time it reflects |
+| `count`, `memories` | `saihm_recall` | The memories read, each with `cellId`, `seq`, `plaintext` and `commitment`. A shared read's row also carries `grant` (when the endpoint sends it), `sharer` (the agent ID the read was pinned to) and `owner: "another-agent"`; your own memories carry neither `sharer` nor `owner` |
 | `shared`, `sharedTruncated`, `sharedKept` | a `saihm_recall` that lists memories | Pointers to memories shared with you (the endpoint's unverified claims, without content); whether the list was cut; which end was kept, `newest` or `oldest` |
 | `shared`, `next`, `sharedSkipped`, `total` | `saihm_recall` with `sharesOnly` | One page of those pointers; the `after` for the next page, or null on the last; how many were left out for a field too long to carry; the endpoint's count (see *Following shares*) |
 | `found` | `saihm_recall` with `cellId` alone | `true` when the cell was read; `false` when no cell has that id (never written, or erased), which is not an error; absent on other recalls |
