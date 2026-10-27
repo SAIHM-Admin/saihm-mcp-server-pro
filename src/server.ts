@@ -440,17 +440,22 @@ const JOIN_EXISTING_IDENTITY_QUESTION: string = [
  * refused clear the gate with a boolean it chose itself, and a hasty or prompted one would.
  * `SAIHM_EPHEMERAL_HOME=0` lives in the environment's settings, which the agent does not write, so the
  * text addresses the operator.
+ *
+ * AS THE ENVIRONMENT'S OWNER, for whoever reads it (0.14.3 review 4): the tool's answer goes to an agent, which passes
+ * it on, and the free-join verb prints the same text to whoever ran it, the operator at a terminal or an agent in a
+ * shell. "Tell the operator" read wrong to the operator, and "this chat" to a terminal; "For this environment's
+ * owner" and "a chat" read right to each of them.
  */
 function ephemeralJoinRefusal(temporaryHomeVariable: string): string {
   return [
     `Not joining here: ${temporaryHomeVariable} is set, which marks this environment's home directory as`,
     "temporary, or as a CI runner's home that later jobs can reach. A key created here would be lost",
     'when the session ends, or left where those jobs could read it, and the free activation is one',
-    'per person. Tell the operator:',
+    "per person. For this environment's owner:",
     '',
     '  - Already have a SAIHM identity? Run `npx -y @saihm/mcp-server-pro export-identity` where it',
     "    lives, set SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE in this environment's settings",
-    '    (never in this chat or a file in the repository), and start a new session.',
+    '    (never in a chat or a file in a repository), and start a new session.',
     '  - New to SAIHM? Join on your own computer (`npx -y @saihm/mcp-server-pro free-join`), then',
     '    bring that identity here as above. For a CI job, you can instead give the job its own key',
     '    file, as a secret file named by SAIHM_MASTER_SECRET_FILE.',

@@ -408,7 +408,7 @@ test('saihm_join will not mint where the home is marked temporary, and only the 
           const pushed = await d.call('saihm_join', { newIdentity: true, allowEphemeral: true });
           assert.match(pushed.text, /Not joining here/);
           assert.match(pushed.text, /SAIHM_EPHEMERAL_HOME=0 in this environment's settings only if its home directory is\n {4}kept and only you use it/);
-          assert.match(pushed.text, /never in this chat/);
+          assert.match(pushed.text, /never in a chat or a file in a repository/);
           assert.ok(!existsSync(join(home, KEY)), `${variable}: nothing minted`);
           assert.equal(m.joinStarts(), 0);
         } finally {
@@ -454,11 +454,11 @@ const refusalFor = (variable: string): string =>
     `Not joining here: ${variable} is set, which marks this environment's home directory as`,
     "temporary, or as a CI runner's home that later jobs can reach. A key created here would be lost",
     'when the session ends, or left where those jobs could read it, and the free activation is one',
-    'per person. Tell the operator:',
+    "per person. For this environment's owner:",
     '',
     '  - Already have a SAIHM identity? Run `npx -y @saihm/mcp-server-pro export-identity` where it',
     "    lives, set SAIHM_IDENTITY and SAIHM_IDENTITY_PASSPHRASE in this environment's settings",
-    '    (never in this chat or a file in the repository), and start a new session.',
+    '    (never in a chat or a file in a repository), and start a new session.',
     '  - New to SAIHM? Join on your own computer (`npx -y @saihm/mcp-server-pro free-join`), then',
     '    bring that identity here as above. For a CI job, you can instead give the job its own key',
     '    file, as a secret file named by SAIHM_MASTER_SECRET_FILE.',
