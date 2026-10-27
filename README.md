@@ -647,9 +647,11 @@ promise that a copy was deleted somewhere.
   devices drop it at their next successful recall. A memory erased on this device and
   then saved again elsewhere may not show in a recall here. Backups of your device keep
   the copy as it was when they were made. From 0.14.3, a key file kept anywhere has the
-  copy, not only the standard one, except in a hosted agent session or on a CI runner,
-  where the home is temporary or kept for later jobs: there SAIHM keeps no copy unless you
-  name one.
+  copy, not only the standard one. Where the home is temporary or kept for later jobs,
+  SAIHM keeps no copy unless you name one: in a hosted agent session, on the CI runners it
+  recognizes (the [reference](./REFERENCE.md#configuration) lists them under
+  `SAIHM_EPHEMERAL_HOME`), and wherever `SAIHM_EPHEMERAL_HOME=1` is set. Set it on any
+  other runner, and wherever the home folder outlives the job.
 - **Everything encrypted at rest, if you prefer.** Set `SAIHM_RECALL_CACHE` to `0` in
   every AI client and app that runs SAIHM with your key on this device, in the same place
   as its `SAIHM_ENDPOINT_URL` setting and written the same way. Then quit all of them,

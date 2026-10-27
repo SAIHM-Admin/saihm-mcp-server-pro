@@ -27,6 +27,7 @@ const KEYS = [
   'SAIHM_SELF_JOIN', 'SAIHM_HOME', 'SAIHM_MASTER_SECRET_FILE', 'SAIHM_MASTER_SECRET_HEX', 'SAIHM_TIER',
   'SAIHM_PAYMENT_METHOD', 'SAIHM_IDENTITY', 'SAIHM_IDENTITY_PASSPHRASE', 'SAIHM_EPHEMERAL_HOME',
   'CLAUDE_CODE_REMOTE', 'GITHUB_ACTIONS', 'CI', 'SAIHM_ENDPOINT_URL',
+  'JENKINS_URL', 'BUILD_ID', 'TF_BUILD', 'TEAMCITY_VERSION', 'CODEBUILD_BUILD_ARN', 'BUILDER_OUTPUT', 'bamboo_planKey',
 ] as const;
 
 function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
@@ -245,6 +246,23 @@ test('temporary-home signals: blanks and explicit noes do not count; any other d
     [{ SAIHM_EPHEMERAL_HOME: '0', CI: 'true', CLAUDE_CODE_REMOTE: 'true' }, null],
     [{ SAIHM_EPHEMERAL_HOME: 'off', GITHUB_ACTIONS: 'true' }, null],
     [{ SAIHM_EPHEMERAL_HOME: 'False', CI: '1' }, null],
+    // The runners that set no CI (0.14.3 review 2), by the markers npm's ci-info reads: set when present and not blank.
+    [{ JENKINS_URL: 'https://jenkins.example/', BUILD_ID: '42' }, 'JENKINS_URL'],
+    [{ JENKINS_URL: 'https://jenkins.example/' }, null],
+    [{ BUILD_ID: '42' }, null],
+    [{ JENKINS_URL: '', BUILD_ID: '42' }, null],
+    [{ JENKINS_URL: 'https://jenkins.example/', BUILD_ID: '' }, null],
+    [{ TF_BUILD: 'True' }, 'TF_BUILD'],
+    [{ TF_BUILD: '' }, null],
+    [{ TEAMCITY_VERSION: '2024.12' }, 'TEAMCITY_VERSION'],
+    [{ TEAMCITY_VERSION: '' }, null],
+    [{ CODEBUILD_BUILD_ARN: 'arn:aws:codebuild:us-east-1:123456789012:build/p:0' }, 'CODEBUILD_BUILD_ARN'],
+    [{ CODEBUILD_BUILD_ARN: '' }, null],
+    [{ BUILDER_OUTPUT: '/builder/outputs' }, 'BUILDER_OUTPUT'],
+    [{ BUILDER_OUTPUT: '' }, null],
+    [{ bamboo_planKey: 'PROJ-PLAN' }, 'bamboo_planKey'],
+    [{ bamboo_planKey: '' }, null],
+    [{ SAIHM_EPHEMERAL_HOME: '0', TF_BUILD: 'True', bamboo_planKey: 'PROJ-PLAN' }, null],
   ];
   for (const [env, want] of cases) assert.equal(withEnv(env, () => ephemeralHomeSignal()), want, JSON.stringify(env));
 });

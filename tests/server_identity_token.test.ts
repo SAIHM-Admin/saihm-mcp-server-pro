@@ -393,6 +393,8 @@ test('saihm_join will not mint where the home is marked temporary, and only the 
     [{ GITHUB_ACTIONS: 'true' }, 'GITHUB_ACTIONS'],
     [{ CI: '1' }, 'CI'],
     [{ SAIHM_EPHEMERAL_HOME: 'yes' }, 'SAIHM_EPHEMERAL_HOME'],
+    // A runner that sets no CI (0.14.3 review 2), by its own marker.
+    [{ TF_BUILD: 'True' }, 'TF_BUILD'],
   ] as const) {
     const home = tempHome('i');
     try {
@@ -422,6 +424,8 @@ test('saihm_join will not mint where the home is marked temporary, and only the 
     { CI: 'true', SAIHM_EPHEMERAL_HOME: '0' },
     { CLAUDE_CODE_REMOTE: 'true', SAIHM_EPHEMERAL_HOME: 'false' },
     { CLAUDE_CODE_REMOTE: '', CI: '' },
+    // Jenkins is recognised by its two variables together; one alone is no marker.
+    { JENKINS_URL: 'https://jenkins.example/' },
   ]) {
     const home = tempHome('j');
     try {

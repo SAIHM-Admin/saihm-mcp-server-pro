@@ -65,7 +65,7 @@
         },
         {
           "name": "SAIHM_EPHEMERAL_HOME",
-          "description": "Set it (e.g. 1) where the home directory is discarded at session end: the join then refuses to create a key. 0 declares the home kept and overrides the host's own signal. Unset: detected where the host says so.",
+          "description": "Set it (e.g. 1) where the home directory is discarded at session end or kept for later jobs, as on a CI runner: the join then refuses to create a key, and SAIHM keeps no recall copy and no sign-in there. 0 declares the home kept and overrides the host's own signal. Unset: detected where the host or CI runner says so (the REFERENCE lists the markers).",
           "isRequired": false,
           "format": "string"
         },

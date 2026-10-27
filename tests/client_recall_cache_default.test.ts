@@ -38,6 +38,8 @@ const KEYS = [
   'CI',
   'GITHUB_ACTIONS',
   'CLAUDE_CODE_REMOTE',
+  // The runners that set no CI (0.14.3 review 2), by the markers npm's ci-info reads.
+  'JENKINS_URL', 'BUILD_ID', 'TF_BUILD', 'TEAMCITY_VERSION', 'CODEBUILD_BUILD_ARN', 'BUILDER_OUTPUT', 'bamboo_planKey',
   'SAIHM_SESSION_CACHE',
 ] as const;
 
@@ -108,6 +110,13 @@ test('0.14.3 review: no default copy where the home is temporary or kept for lat
       { CLAUDE_CODE_REMOTE: 'true' },
       { SAIHM_EPHEMERAL_HOME: '1' },
       { SAIHM_EPHEMERAL_HOME: 'yes' },
+      // The runners that set no CI (0.14.3 review 2), each by its own marker, with values as each runner sets them.
+      { JENKINS_URL: 'https://jenkins.example/', BUILD_ID: '42' },
+      { TF_BUILD: 'True' },
+      { TEAMCITY_VERSION: '2024.12' },
+      { CODEBUILD_BUILD_ARN: 'arn:aws:codebuild:us-east-1:123456789012:build/p:0' },
+      { BUILDER_OUTPUT: '/builder/outputs' },
+      { bamboo_planKey: 'PROJ-PLAN' },
     ];
     for (const signal of signals) {
       for (const keyEnv of [{}, { SAIHM_MASTER_SECRET_FILE: keyPath }, { SAIHM_MASTER_SECRET_FILE: keyFile }]) {
@@ -124,7 +133,19 @@ test('0.14.3 review: no default copy where the home is temporary or kept for lat
       });
     }
     // SAIHM_EPHEMERAL_HOME=0 declares the home kept, over the host's own signal; and with no signal, the default stands.
-    for (const kept of [{ CI: 'true', SAIHM_EPHEMERAL_HOME: '0' }, { GITHUB_ACTIONS: 'true', SAIHM_EPHEMERAL_HOME: 'false' }, { CI: 'false' }, { CI: '0' }, {}]) {
+    for (const kept of [
+      { CI: 'true', SAIHM_EPHEMERAL_HOME: '0' },
+      { GITHUB_ACTIONS: 'true', SAIHM_EPHEMERAL_HOME: 'false' },
+      { CI: 'false' },
+      { CI: '0' },
+      {},
+      // Controls for the runner markers: Jenkins needs both of its variables, a blank marker is no marker, and
+      // SAIHM_EPHEMERAL_HOME=0 declares any of them kept.
+      { JENKINS_URL: 'https://jenkins.example/' },
+      { BUILD_ID: '42' },
+      { TF_BUILD: '' },
+      { TEAMCITY_VERSION: '2024.12', SAIHM_EPHEMERAL_HOME: '0' },
+    ]) {
       withEnv({ SAIHM_HOME: home, ...kept }, () => {
         const c = SaihmProClient.bootFromEnv();
         assert.equal(cachePathOf(c), join(home, `recall.${c.agentIdHash.slice(0, 16)}.json`), `${JSON.stringify(kept)}: the default copy`);

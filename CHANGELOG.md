@@ -44,15 +44,17 @@ removed.
   new or has changed, so it is faster and uses fewer reads. The copy stays on your
   device, in `~/.saihm` (or `SAIHM_HOME`), readable only by your user account. To keep
   no copy, set `SAIHM_RECALL_CACHE` to `0`, as before. An identity token or an inline
-  secret keeps no copy unless you set one up, and neither does any identity in a hosted
-  agent session or on a CI runner, where the home is temporary or kept for later jobs.
+  secret keeps no copy unless you set one up, and neither does any identity where the
+  home is temporary or kept for later jobs: in a hosted agent session, on the CI runners
+  SAIHM recognizes (the REFERENCE lists them), and wherever `SAIHM_EPHEMERAL_HOME=1` is
+  set, as it should be on any other runner.
 - **One sign-in per device, not per session (a new default).** With the key file in
   `~/.saihm` (or `SAIHM_HOME`), a session keeps its sign-in there, readable only by your
   user account, and a new session on the same device uses it until it expires instead of
   signing in again, so a team behind one office address signs in far less often. The kept
   sign-in holds no key and is used only for the same endpoint, identity, plan and payment
-  method, and none is kept in a hosted agent session or on a CI runner. To keep it in
-  memory only, set `SAIHM_SESSION_CACHE` to `0`.
+  method, and none is kept where the home is temporary or kept for later jobs, as for the
+  recall copy. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0`.
 - **"Join SAIHM" asks first.** The first join call that would create a new key now
   answers with the question about an existing identity, even when the call says a new
   one is wanted, and only a call after it creates the key. A join that would refuse
