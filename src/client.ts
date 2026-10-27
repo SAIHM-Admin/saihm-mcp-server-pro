@@ -1686,7 +1686,7 @@ export interface RecalledCell {
  * verifying the share signature with the signing key of a sharer agentIdHash the caller pinned
  * OUT-OF-BAND (the key from the sharer's record, or from the cell's own envelope, checked against the
  * pin). Since 0.14.3 an announcement names all that such a read takes, its `sharer` and its `cellId`,
- * so the out-of-band rule is the caller's to keep: pin the agent ID the user or the sharer gave, never
+ * so the out-of-band rule is the caller's to keep: pin the agent ID the user gave, never
  * this `sharer`, which the endpoint chose. A read pinned to it proves only that the holder of that
  * agentIdHash wrote the cell, not who the holder is. Never present these as held memories and never
  * auto-resolve them: acting on them unprompted would let the endpoint choose which fetches this client
@@ -6113,8 +6113,8 @@ export class SaihmProClient {
    * `announcements` is `[]` — never absent — when the endpoint announced none, which is also what an
    * endpoint with shared discovery switched off returns and what every endpoint predating the feature
    * returns. UNAUTHENTICATED POINTERS, NOT MEMORIES: read {@link SharedAnnouncement} before surfacing
-   * them. To actually read one, obtain the sharer's agent ID out-of-band (from the user or the sharer,
-   * never from the announcement) and call {@link recallShared} — that path, and only that path,
+   * them. To actually read one, obtain the sharer's agent ID out-of-band (from the user, never from
+   * the announcement) and call {@link recallShared} — that path, and only that path,
    * authenticates the grant.
    */
   async recallWithShared(query?: string): Promise<RecallWithShared> {
@@ -6934,7 +6934,7 @@ export class SaihmProClient {
    *
    * The pin authenticates the KEY, not the PERSON: it proves the holder of that agentIdHash wrote the
    * cell, never who that holder is. That is the out-of-band step, and it is why the pin must come from
-   * the user or the sharer, never from a {@link SharedAnnouncement}, whose `sharer` the endpoint chose.
+   * the user, never from a {@link SharedAnnouncement}, whose `sharer` the endpoint chose.
    *
    * Trust model (the endpoint is blind + assumed hostile): it never holds the DEK, so it cannot forge
    * content — a tampered ciphertext fails the AEAD open, a substituted cell fails the id/attribution

@@ -773,7 +773,7 @@ server.registerTool(
         'Filter your OWN memories by keyword (empty = all). Ignored when reading one cell by cellId.',
       ),
       sharerPinnedAgentIdHashHex: optionalInput(z.string()).describe(
-          "Read a cell shared TO you: the SHARER's agent ID (agentIdHash, 64 lowercase hex), pinned out-of-band, as your user or the sharer gave it. When set, cellId is also required.",
+          "Read a cell shared TO you: the SHARER's agent ID (agentIdHash, 64 lowercase hex), pinned out-of-band, as your user gave it. When set, cellId is also required.",
         ),
       sharerRecord: optionalInput(
         z.object({

@@ -825,6 +825,10 @@ test('saihm_recall describes the shared read by agent ID: the cellId goes with i
     assert.doesNotMatch(recall.description, /sharerRecord/);
     const props = recall.inputSchema.properties;
     assert.match(props.sharerPinnedAgentIdHashHex!.description!, /When set, cellId is also required\.$/);
+    // The agent ID comes from the user alone (0.14.3 review 3), as the description and the pointer footers say: never
+    // from the sharer's side of anything the agent reads.
+    assert.match(props.sharerPinnedAgentIdHashHex!.description!, /pinned out-of-band, as your user gave it\. When set/);
+    assert.doesNotMatch(props.sharerPinnedAgentIdHashHex!.description!, /or the sharer/);
     assert.doesNotMatch(props.sharerPinnedAgentIdHashHex!.description!, /sharerRecord/);
     assert.match(props.sharerRecord!.description!, /^Optional, and not needed:/);
   } finally {
