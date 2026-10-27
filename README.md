@@ -486,7 +486,9 @@ covers proxies and the finer points. A CI job is one such environment: give it i
 key file as a secret file, named by `SAIHM_MASTER_SECRET_FILE`, or set the two values as
 the job's secrets. On a runner SAIHM does not recognize (the
 [reference](./REFERENCE.md#configuration) lists the ones it does), also set
-`SAIHM_EPHEMERAL_HOME=1`, so that no copy of your memories and no sign-in stays on it.
+`SAIHM_EPHEMERAL_HOME=1`, so that SAIHM keeps no copy of your memories and no sign-in on
+it. A copy or sign-in already written on the runner stays until you delete it: the
+`recall.` and `session.` files in `~/.saihm` (or your `SAIHM_HOME`).
 
 - **Claude Code on the web** — add both values under the environment's *Environment
   variables*. Anyone who uses that environment can read them, so use a dedicated
@@ -553,7 +555,9 @@ the job's secrets. On a runner SAIHM does not recognize (the
   the values in the host's own secrets or environment settings, scoped to you alone, in
   an environment only you use: the agent, and every command it runs, may be able to
   read them. Add `SAIHM_EPHEMERAL_HOME=1` there if its home directory does not
-  persist. Hosts that only connect to remote MCP servers cannot run this package.
+  persist. A copy or sign-in already written on that host stays until you delete it:
+  the `recall.` and `session.` files in `~/.saihm` (or your `SAIHM_HOME`). Hosts that
+  only connect to remote MCP servers cannot run this package.
 
 Where it can tell that the home directory is temporary, or is a CI runner's home that later
 jobs can reach, a join refuses to create a key there: join on your own computer and bring
@@ -658,7 +662,9 @@ promise that a copy was deleted somewhere.
   SAIHM keeps no copy unless you name one: in a hosted agent session, on the CI runners it
   recognizes (the [reference](./REFERENCE.md#configuration) lists them under
   `SAIHM_EPHEMERAL_HOME`), and wherever `SAIHM_EPHEMERAL_HOME=1` is set. Set it on any
-  other runner, and wherever the home folder outlives the job.
+  other runner, and wherever the home folder outlives the job. A copy or sign-in already
+  written there stays until you delete it: the `recall.` and `session.` files in
+  `~/.saihm` (or your `SAIHM_HOME`).
 - **One sign-in per device.** With the standard key file, the one a join creates, a session
   keeps its short-lived sign-in in a file beside the key, readable only by your user
   account, and the next session on this device uses it until it expires. It holds no key

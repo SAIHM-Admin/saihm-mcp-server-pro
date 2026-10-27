@@ -65,7 +65,7 @@
         },
         {
           "name": "SAIHM_EPHEMERAL_HOME",
-          "description": "Set it (e.g. 1) where the home directory is discarded at session end, or is a CI runner's home that later jobs can reach: the join then refuses to create a key, and SAIHM keeps no recall copy and no sign-in there. 0 declares a home that is kept and that only you use, and overrides the host's own signal. Unset: detected where the host or CI runner says so (the REFERENCE lists the markers).",
+          "description": "Set it (e.g. 1) where the home directory is discarded at session end, or is a CI runner's home that later jobs can reach: the join then refuses to create a key, and SAIHM keeps no recall copy and no sign-in there. A copy or sign-in already written there stays until you delete it: the recall.* and session.* files in SAIHM_HOME (~/.saihm by default). 0 declares a home that is kept and that only you use, and overrides the host's own signal. Unset: detected where the host or CI runner says so (the REFERENCE lists the markers).",
           "isRequired": false,
           "format": "string"
         },

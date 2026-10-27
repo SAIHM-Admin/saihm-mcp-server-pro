@@ -49,7 +49,9 @@ removed.
   no copy unless you set one up, and neither does any identity where the
   home is temporary or kept for later jobs: in a hosted agent session, on the CI runners
   SAIHM recognizes (the REFERENCE lists them), and wherever `SAIHM_EPHEMERAL_HOME=1` is
-  set, as it should be on any other runner.
+  set, as it should be on any other runner. A copy or sign-in already written there
+  stays until you delete it: the `recall.` and `session.` files in `~/.saihm` (or
+  `SAIHM_HOME`).
 - **One sign-in per device, not per session (a new default).** With the standard key
   file, the one a join creates in `~/.saihm` (or `SAIHM_HOME`), a session keeps its
   sign-in there, readable only by your
