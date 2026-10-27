@@ -252,9 +252,14 @@ const REQUIRED: Record<string, unknown> = {
 /**
  * Required unless warmStart: optional in the schemas only so a warm-start call can leave them out. Off warm start a blank
  * content or id is still a value, stored or erased as it always was, so this sweep gives them a value like the required
- * fields and varies the rest.
+ * fields and varies the rest. Likewise saihm_share's inline recipient (0.14.3), optional only so a share can name the
+ * recipient's record file instead: this sweep gives the inline pair a value and varies the file with the rest.
  */
-const REQUIRED_UNLESS_WARM_START: Record<string, string> = { saihm_remember: 'content', saihm_forget: 'id' };
+const REQUIRED_UNLESS_WARM_START: Record<string, string[]> = {
+  saihm_remember: ['content'],
+  saihm_forget: ['id'],
+  saihm_share: ['recipientRecord', 'recipientPinnedAgentIdHashHex'],
+};
 
 const blankFor = (schema: { type?: string; properties?: Record<string, unknown> }): unknown =>
   schema.type === 'object' ? Object.fromEntries(Object.keys(schema.properties ?? {}).map((k) => [k, ''])) : schema.type === 'boolean' ? '' : '';
@@ -279,7 +284,7 @@ test('every optional field of every tool reads null and blank values as absent, 
     for (const t of tools) {
       const props = t.inputSchema.properties ?? {};
       const unlessWarmStart = REQUIRED_UNLESS_WARM_START[t.name];
-      const required = [...(t.inputSchema.required ?? []), ...(unlessWarmStart !== undefined ? [unlessWarmStart] : [])];
+      const required = [...(t.inputSchema.required ?? []), ...(unlessWarmStart ?? [])];
       const optional = Object.keys(props).filter((k) => !required.includes(k));
       const base = Object.fromEntries(required.map((k) => [k, REQUIRED[k]]));
       for (const k of required) assert.notEqual(REQUIRED[k], undefined, `${t.name}.${k} needs a value in REQUIRED`);
@@ -405,7 +410,8 @@ test('the schemas a host is shown are the plain ones: every optional field has i
       saihm_recall: [],
       saihm_forget: [],
       saihm_status: [],
-      saihm_share: ['cellId', 'recipientPinnedAgentIdHashHex', 'recipientRecord'],
+      // 0.14.3: the recipient is named by its record file or by the inline pair, so only the cell is required.
+      saihm_share: ['cellId'],
       saihm_revoke_share: ['cellId', 'recipientHex'],
       saihm_governance_propose: ['scope'],
       saihm_governance_vote: ['approve', 'proposalId'],
@@ -444,6 +450,10 @@ test('the schemas a host is shown are the plain ones: every optional field has i
       'saihm_forget.warmStart': 'string:|delete',
       'saihm_forget.snapshotId': 'string:^$|^[0-9a-f]{64}$',
       'saihm_forget.token': 'string:^$|^[a-z0-9]{16,32}$',
+      // 0.14.3: the record file, and the inline pair it stands in for, now optional (required in the tool unless the file).
+      'saihm_share.recipientRecordFile': 'string',
+      'saihm_share.recipientRecord': 'object',
+      'saihm_share.recipientPinnedAgentIdHashHex': 'string',
       'saihm_share.scope': 'string:|read|write|readwrite',
       'saihm_share.expiryEpoch': 'string:^$|^[0-9]+$',
       'saihm_governance_propose.paramKey': 'string',
@@ -512,7 +522,7 @@ test('a strict host: the advertised schema of every tool lets it leave each opti
     const violations: string[] = [];
     for (const t of tools) {
       const unlessWarmStart = REQUIRED_UNLESS_WARM_START[t.name];
-      const required = [...(t.inputSchema.required ?? []), ...(unlessWarmStart !== undefined ? [unlessWarmStart] : [])];
+      const required = [...(t.inputSchema.required ?? []), ...(unlessWarmStart ?? [])];
       const base = Object.fromEntries(required.map((k) => [k, REQUIRED[k]]));
       const strict = strictArguments(t.inputSchema as never, base);
       const why = strictViolation(t.inputSchema as never, strict);

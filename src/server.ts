@@ -56,6 +56,7 @@ import {
   failText,
 } from './render_fence.js';
 import { acceptAbsentToolArguments, isBlankInput, optionalChoice, optionalInput, optionalPattern } from './tool-input.js';
+import { readRecordFile } from './record-file.js';
 import {
   COVERS_THROUGH_PATTERN,
   SNAPSHOT_ID_PATTERN,
@@ -1704,24 +1705,66 @@ server.registerTool(
   },
 );
 
+/**
+ * Who a share goes to (0.14.3): from the record file `identity-record` writes, read and checked here, or from the record
+ * and pin given inline, as before. The file supplies both the record and the agent ID it is checked against; a pin
+ * given beside it is the out-of-band check and must name the same agent ID. Given both a file and an inline record,
+ * which one was meant is not guessed. Every refusal is a fixed sentence: nothing of the file is ever shown.
+ */
+function shareRecipient(
+  file: string | undefined,
+  record: { mldsaPubKey: string; mlkemPubKey: string; mlkemPubKeySelfSig: string } | undefined,
+  pin: string | undefined,
+): { record: { mldsaPubKey: string; mlkemPubKey: string; mlkemPubKeySelfSig: string }; pin: string } {
+  if (file !== undefined) {
+    if (record !== undefined) {
+      throw new SaihmEndpointError(
+        0,
+        'invalid_input',
+        'Nothing was shared: give the recipient once, as recipientRecordFile or as recipientRecord, not both.',
+      );
+    }
+    const f = readRecordFile(file);
+    if (pin !== undefined && pin.toLowerCase() !== f.agentIdHash) {
+      throw new SaihmEndpointError(
+        0,
+        'recipient_mismatch',
+        'Nothing was shared: the agent ID in recipientRecordFile is not recipientPinnedAgentIdHashHex. Check the agent ID with your colleague another way.',
+      );
+    }
+    return { record: f.identityRecord, pin: f.agentIdHash };
+  }
+  if (record === undefined || pin === undefined) {
+    throw new SaihmEndpointError(
+      0,
+      'recipient_required',
+      'Nothing was shared: name the recipient with recipientRecordFile (the full path of their identity record file), or with recipientRecord and recipientPinnedAgentIdHashHex together.',
+    );
+  }
+  return { record, pin };
+}
+
 server.registerTool(
   'saihm_share',
   {
     title: 'Share',
     description:
-      "Grant one other agent access to a single memory cell, named by cellId. Identify the recipient by their recipientPinnedAgentIdHashHex, pinned out-of-band, and their recipientRecord. Set scope to 'read', 'write' or 'readwrite'. Only that one cell is exposed, and sharing re-wraps its key rather than copying the memory.",
+      "Grant one other agent access to a single memory cell, named by cellId. Identify the recipient by the identity record file their identity-record command wrote: pass its full path as recipientRecordFile, and the server reads the record and agent ID from it (no need to open the file). Or pass their recipientRecord with their recipientPinnedAgentIdHashHex, pinned out-of-band. With the file, a recipientPinnedAgentIdHashHex you also pass must match the agent ID in it. Set scope to 'read', 'write' or 'readwrite'. Only that one cell is exposed, and sharing re-wraps its key rather than copying the memory.",
     inputSchema: {
       cellId: z.string().describe('The cell to share'),
-      recipientRecord: z
-        .object({
+      recipientRecordFile: optionalInput(z.string()).describe(
+        "The full path of the grantee's identity record file, the JSON that identity-record writes. The server reads recipientRecord and the agent ID from it. Instead of recipientRecord, not with it",
+      ),
+      recipientRecord: optionalInput(
+        z.object({
           mldsaPubKey: z.string(),
           mlkemPubKey: z.string(),
           mlkemPubKeySelfSig: z.string(),
-        })
-        .describe("The grantee's published identity record (hex fields)"),
-      recipientPinnedAgentIdHashHex: z
-        .string()
-        .describe("The grantee's agentIdHash (hex), pinned out-of-band"),
+        }),
+      ).describe("The grantee's published identity record (hex fields). Required unless recipientRecordFile is given"),
+      recipientPinnedAgentIdHashHex: optionalInput(z.string()).describe(
+        "The grantee's agentIdHash (hex), pinned out-of-band. Required with recipientRecord; with recipientRecordFile, optional, and it must match the file's agent ID",
+      ),
       scope: optionalChoice(['read', 'write', 'readwrite']).describe('Access scope (blank = read)'),
       expiryEpoch: optionalPattern(/^[0-9]+$/, 'expiryEpoch must be a decimal count of whole hours since the UNIX epoch').describe(
         'Optional expiry in whole HOURS since the UNIX epoch (decimal string), not seconds: floor(unix_ms / 3600000). Example: "498192" is 2026-11-01 00:00 UTC. Blank = no expiry',
@@ -1737,18 +1780,22 @@ server.registerTool(
   },
   async ({
     cellId,
+    recipientRecordFile,
     recipientRecord,
     recipientPinnedAgentIdHashHex,
     scope,
     expiryEpoch,
   }) => {
     try {
+      // The recipient is settled before anything else, and asks nothing of the endpoint: a file that is not a record,
+      // or a pin that is not the file's, is refused before a join is waited on or a cell is read.
+      const recipient = shareRecipient(recipientRecordFile, recipientRecord, recipientPinnedAgentIdHashHex);
       await settleJoin();
       const client = getClient();
       await client.share({
         cellId,
-        recipientRecord,
-        recipientPinnedAgentIdHashHex,
+        recipientRecord: recipient.record,
+        recipientPinnedAgentIdHashHex: recipient.pin,
         ...(scope ? { scope } : {}),
         ...(expiryEpoch ? { expiryEpoch: BigInt(expiryEpoch) } : {}),
       });
@@ -1760,7 +1807,7 @@ server.registerTool(
       // is nothing its echo could add that is not either already known or not to be trusted.
       return ok(
         `SHARED cell=${labelSafe(safeScalar(cellId))} sharer=${labelSafe(shortScalar(client.agentIdHash))} ` +
-          `recipient=${labelSafe(shortScalar(recipientPinnedAgentIdHashHex))}`,
+          `recipient=${labelSafe(shortScalar(recipient.pin))}`,
       );
     } catch (e) {
       return fail(e);
@@ -2710,8 +2757,9 @@ function runIdentityRecord(): void {
   const guidance = [
     'It holds only your public keys and agent ID, so it can be sent to anyone: nothing in it can read,',
     "change or erase your memory. A colleague's agent uses it to share a memory with you: saihm_share",
-    'takes identityRecord as recipientRecord and agentIdHash as recipientPinnedAgentIdHashHex. If the file',
-    'travels by a channel someone else could change, check the agent ID with your colleague another way.',
+    'takes the file\'s full path as recipientRecordFile (or identityRecord as recipientRecord and',
+    'agentIdHash as recipientPinnedAgentIdHashHex). If the file travels by a channel someone else could',
+    'change, check the agent ID with your colleague another way.',
     'This is not export-identity: never send that file to anyone.',
     '',
   ];

@@ -5,7 +5,7 @@ All notable changes to `@saihm/mcp-server-pro` are documented here. This project
 ## [0.14.3] — 2026-10-27
 
 Sharing now works from any AI client: one command writes the identity record a colleague
-needs. Recall is faster for every key file, wherever it is kept. Fixes for erased
+needs, and `saihm_share` reads it from that file. Recall is faster for every key file, wherever it is kept. Fixes for erased
 memories, waiting joins, the sign-in limit and long endpoint addresses. No tool added or
 removed.
 
@@ -16,6 +16,13 @@ removed.
   for a colleague whose agent shares memories with you or reads the ones you share. It
   holds no secret and asks the endpoint nothing. The README's "Share with a colleague"
   shows how.
+- **`saihm_share` reads the record file.** A new optional input, `recipientRecordFile`,
+  takes the full path of the file `identity-record` writes. SAIHM reads the record and the
+  agent ID from it on your machine, so the agent no longer copies about 13 KB of keys into
+  the call. A `recipientPinnedAgentIdHashHex` given too must match the file's agent ID. Only
+  a regular file of up to 64 KB holding exactly that record is read, its record is checked
+  before anything is shared, and a refusal never shows what is in the file. An inline
+  `recipientRecord` works as before.
 - **`CASE-STUDY.md`.** A worked case study of three agent roles doing a quarter of
   regulated work ships with the package, linked from the README's "Things to say".
 

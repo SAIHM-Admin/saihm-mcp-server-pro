@@ -125,7 +125,10 @@ test('identity-record with no file writes the record to stdout, and what it is t
     const doc = JSON.parse(r.stdout) as RecordDoc;
     assertRecordOf(doc, s.secretHex);
     assert.match(r.stderr, new RegExp(`SAIHM identity record above, for agent ID ${doc.agentIdHash}\\.`));
-    assert.match(r.stderr, /saihm_share\ntakes identityRecord as recipientRecord and agentIdHash as recipientPinnedAgentIdHashHex/);
+    assert.match(
+      r.stderr,
+      /saihm_share\ntakes the file's full path as recipientRecordFile \(or identityRecord as recipientRecord and\nagentIdHash as recipientPinnedAgentIdHashHex\)\./,
+    );
     assert.match(r.stderr, /This is not export-identity: never send that file to anyone\./);
     for (const secret of secretsOf(s.secretHex)) assert.ok(!(r.stdout + r.stderr).includes(secret), 'no secret is printed');
     // Positive control for the search: the secret is found where it is.

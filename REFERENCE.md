@@ -194,6 +194,12 @@ bootstrap tool that answers *"Join SAIHM"*: on by default, removed by
 `SAIHM_SELF_JOIN=0`. So a client lists nine tools by default, and eight with
 `SAIHM_SELF_JOIN=0`.
 
+**Sharing.** `saihm_share` takes the `cellId` of one memory and the recipient: either
+`recipientRecordFile`, the full path of the file `identity-record` writes, or
+`recipientRecord` with `recipientPinnedAgentIdHashHex`. It also takes an optional `scope`
+(`read`, `write` or `readwrite`; blank is `read`) and an optional `expiryEpoch` in whole hours
+since the UNIX epoch. See [Your identity record, for sharing](#your-identity-record-for-sharing).
+
 **"Forget" really means forget.** The key to that specific memory is destroyed, so
 the stored copy becomes permanently unreadable — by you, by SAIHM, by anyone
 holding a backup of it. This is how SAIHM answers a GDPR Article 17 erasure
@@ -236,8 +242,9 @@ does, never creates one, and asks the endpoint nothing.
 The record holds no secret: nothing in it can read, change or erase your memory, so it can
 be sent to anyone. A colleague's agent uses it in two ways:
 
-- to share a memory with you: `saihm_share` takes `identityRecord` as `recipientRecord` and
-  `agentIdHash` as `recipientPinnedAgentIdHashHex`;
+- to share a memory with you: `saihm_share` takes the file's full path as `recipientRecordFile`
+  and reads the record and your agent ID from it, or takes `identityRecord` as `recipientRecord`
+  and `agentIdHash` as `recipientPinnedAgentIdHashHex`;
 - to read a memory you shared with them: `saihm_recall` takes `identityRecord` as
   `sharerRecord` and `agentIdHash` as `sharerPinnedAgentIdHashHex`, with the `cellId`.
 
@@ -245,6 +252,17 @@ The agent ID is the pin: SAIHM refuses a record whose keys do not hash to it, so
 swapped in transit fails unless the agent ID was swapped with it. If the file travels by a
 channel someone else could change, check the agent ID with your colleague another way. The
 self-signature changes each time the command runs; any one of them verifies.
+
+With `recipientRecordFile`, the agent names the file and SAIHM reads it on your machine, so
+the agent does not copy the record's 13 KB of keys into the call. The file must be a regular
+file of at most 64 KB holding exactly the document the command writes, named by its full path
+(a relative path, or one starting with `~`, is not used), and its record must check out
+against its agent ID before anything is shared. A `recipientPinnedAgentIdHashHex` given as
+well is your out-of-band check: it must be the agent ID in the file. A refused share says why
+in a fixed sentence, with its code: `bad_recipient_record_file` for the file,
+`recipient_mismatch` for an agent ID that is not the file's, `recipient_required` when no
+recipient is named, and `invalid_input` for a file and an inline record together. It never
+shows the file's contents or its path.
 
 ## Hosted agent environments in detail
 
