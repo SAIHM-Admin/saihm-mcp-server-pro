@@ -37,7 +37,8 @@ join shows. Keep the key file all the same: a later join on this machine uses it
 
 **Your assistant asks first.** When a join would create a new key, the first *"Join SAIHM"*
 answers with a question for you: whether you already have a SAIHM identity, on another
-machine or from an earlier session, and whether this environment keeps its home directory.
+machine or from an earlier session, and whether this environment's home directory is kept
+between sessions and used only by you.
 Only a call after that question creates the key, even when the assistant says at once that
 you want a new one. A join that would refuse anyway (a temporary home or a CI runner's, a
 `SAIHM_HOME` with the shape of a key, a paid `SAIHM_TIER` with no identity here) says so before
