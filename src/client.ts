@@ -2629,13 +2629,14 @@ export function selfJoinWouldMint(): boolean {
  * outlive the job, so neither is made by default (bootFromEnv).
  *
  * Each entry is a variable the host itself documents and sets. Most CI runners set `CI`; the common runners that set
- * no `CI` (0.14.3 review) are recognised by the marker npm's ci-info reads for each, set when present and not blank,
- * as ci-info reads it: Jenkins (`JENKINS_URL`, with `BUILD_ID` beside it), Azure Pipelines, TeamCity, AWS CodeBuild,
- * Google Cloud Build and Bamboo. Detection is a convenience on top of the confirmation the join asks for anyway, never
- * the only guard: an unlisted host is treated as persistent, which is the behaviour every release before this one had
- * everywhere, and the docs tell the operator of any other runner, or of a home that outlives the job, to declare it.
- * `SAIHM_EPHEMERAL_HOME` overrides it both ways: `1` declares the home temporary or reachable by later jobs, `0` declares it
- * kept and the operator's alone.
+ * no `CI` (0.14.3 review) are recognised by the marker npm's ci-info reads for each, set when present and not blank:
+ * Jenkins (`JENKINS_URL`, with `BUILD_ID` beside it), Azure Pipelines, TeamCity, AWS CodeBuild, Google Cloud Build and
+ * Bamboo. One difference from ci-info, and a cautious one: ci-info reads no runner marker at all while `CI` is
+ * `false`, and this list still does, so `CI=false` on such a runner does not unmark its home. Detection is a
+ * convenience on top of the confirmation the join asks for anyway, never the only guard: an unlisted host is treated
+ * as persistent, which is the behaviour every release before this one had everywhere, and the docs tell the operator
+ * of any other runner, or of a home that outlives the job, to declare it. `SAIHM_EPHEMERAL_HOME` overrides it both
+ * ways: `1` declares the home temporary or reachable by later jobs, `0` declares it kept and the operator's alone.
  */
 const EPHEMERAL_HOME_SIGNALS: ReadonlyArray<readonly [string, (v: string) => boolean]> = [
   ['CLAUDE_CODE_REMOTE', (v) => v.trim().toLowerCase() === 'true'],
