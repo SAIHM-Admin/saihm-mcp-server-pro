@@ -404,14 +404,17 @@ function tierJoinAnswer(): { text: string; ready: boolean } | null {
  * minted on the first call, so an operator whose memory lived on another machine - the common case in
  * a hosted agent's fresh session - was handed a second, empty one before anyone asked. The question
  * costs a new user one exchange; not asking cost an existing user their memory in that environment.
+ *
+ * The home question asks both things the go-ahead in the last line needs (0.14.3 review 4): a home that is kept, and
+ * theirs alone. Asking only whether it is kept let a runner's home that later jobs can reach pass as an answer.
  */
 const JOIN_EXISTING_IDENTITY_QUESTION: string = [
   'Not joining yet. A join creates a NEW, EMPTY memory, so first ask the operator:',
   '  "Do you already have a SAIHM identity - on another machine, or from an earlier session?"',
   '',
-  'And: "Does this environment keep its home directory between sessions?" If not - a hosted or cloud',
-  'session that starts fresh - or if later jobs can reach it, as on a CI runner, do not join here:',
-  'join on your own computer, then bring the identity here as below.',
+  'And: "Is this environment\'s home directory kept between sessions, and used only by you?" If not - a',
+  'hosted or cloud session that starts fresh, or a CI runner whose home later jobs can reach - do not',
+  'join here: join on your own computer, then bring the identity here as below.',
   '',
   'If they have one: do not join. On the machine that has it, run',
   '  npx -y @saihm/mcp-server-pro export-identity',

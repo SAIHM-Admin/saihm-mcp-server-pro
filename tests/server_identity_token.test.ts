@@ -1179,7 +1179,12 @@ test('saihm_join with newIdentity false asks the question and creates nothing', 
       const d = await startServer({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: m.base() + '/mcp' });
       try {
         const r = await d.call('saihm_join', { newIdentity: false });
-        assert.match(r.text, /Does this environment keep its home directory between sessions\?/, r.text);
+        // Both things the go-ahead needs, in the one question (0.14.3 review 4): kept, and theirs alone.
+        assert.match(
+          r.text,
+          /"Is this environment's home directory kept between sessions, and used only by you\?"/,
+          r.text,
+        );
         assert.ok(!existsSync(join(home, 'free-identity.key')), 'no key');
         assert.equal(m.joinStarts(), 0, 'no device flow');
       } finally {
