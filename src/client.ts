@@ -148,6 +148,7 @@ import {
   type WarmStartSnapshot,
 } from './warm-start.js';
 import { FileFeedStore, feedStatePath } from './feed-state-file.js';
+import { SessionTokenFile } from './session-token-file.js';
 import { readShareStates, shareStatesPath, writeShareStates } from './share-states-file.js';
 import { ChangeFeedWriter, DESTRUCTION_ANCHOR, isoTime } from './change-feed.js';
 import { MALFORMED, safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
@@ -2287,6 +2288,13 @@ export interface SaihmProClientOpts {
    */
   persistRecallCache?: boolean;
   /**
+   * Keep this identity's sign-in in {@link defaultSessionTokenPath} (0.14.3), so a later session on this device uses
+   * it while it is good instead of signing in again. Off unless asked for, like `persistSeqState`: a directly
+   * constructed client writes nothing. `bootFromEnv` turns it on for the default key file, unless
+   * `SAIHM_SESSION_CACHE=0`. Ignored with a static `authHeader`, which signs in to nothing.
+   */
+  persistSessionToken?: boolean;
+  /**
    * The proof-of-entitlement rail (`"stripe"`, `"stablecoin"`, …) used when SELF-ONBOARDING (i.e.
    * no static `authHeader`). Sent in the `/api/onboard` request alongside the ML-DSA-signed nonce.
    * Required for self-onboarding; ignored when a static `authHeader` is supplied.
@@ -2605,6 +2613,16 @@ export function defaultSeqStatePath(agentIdHashHex: string): string {
  */
 export function defaultRecallCachePath(agentIdHashHex: string): string {
   return pathJoin(dirname(defaultIdentityPath()), `recall.${agentIdHashHex.slice(0, 16)}.json`);
+}
+
+/**
+ * Where a sign-in is kept between sessions (0.14.3): beside the default key file, the sequence marks and the recall
+ * copy, named by the identity's hash like them, so two identities sharing a home never use each other's. Only the
+ * default key file's identity keeps one (see `bootFromEnv`): that key mints any number of these tokens, so the file
+ * gives nothing that the key beside it does not.
+ */
+export function defaultSessionTokenPath(agentIdHashHex: string): string {
+  return pathJoin(dirname(defaultIdentityPath()), `session.${agentIdHashHex.slice(0, 16)}.json`);
 }
 
 /** A file's first line, read no further than the longest line the feed writes (1 KiB, its newline included). */
@@ -4318,10 +4336,14 @@ export class SaihmProClient {
   private saidRecallIsUncached = false;
   private readonly requestTimeoutMs: number;
   private tier: string | undefined;
-  // Self-onboard token cache (single-flight via authInFlight; never written to disk).
+  // Self-onboard token cache (single-flight via authInFlight). Written to disk only as the kept sign-in below.
   private cachedJwt: string | undefined;
   private cachedJwtRefreshAtMs = 0;
   private authInFlight: Promise<string> | null = null;
+  /** The sign-in kept between sessions on this device (0.14.3), when on; see {@link SessionTokenFile}. */
+  private sessionTokens: SessionTokenFile | undefined;
+  /** After the endpoint refused a token, the next sign-in is a fresh one: no kept sign-in is used until one is made. */
+  private keptSignInRefused = false;
   /** FREE-tier upgrade-nag callback (advisory; paid never fires it). */
   private readonly onQuotaNag: ((nag: QuotaNag) => void) | undefined;
   /** `${callType}:${threshold}` keys already nagged, so each nag fires at most once per client. */
@@ -4412,6 +4434,15 @@ export class SaihmProClient {
         );
       }
       this.paymentMethod = opts.paymentMethod;
+      // Bound to what the token is for: a file kept for another endpoint, identity, plan or payment method is not used.
+      if (opts.persistSessionToken === true) {
+        this.sessionTokens = new SessionTokenFile(defaultSessionTokenPath(this.agentIdHashHex), () => ({
+          endpoint: this.endpoint,
+          agentIdHash: this.agentIdHashHex,
+          tier: this.tier,
+          paymentMethod: this.paymentMethod,
+        }));
+      }
     }
   }
 
@@ -4494,6 +4525,10 @@ export class SaihmProClient {
     else if (!recallCacheOff && id.keyFile && dirCanBeWritten(dirname(defaultIdentityPath()))) opts.persistRecallCache = true;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
+    // THE SERVER OPTS IN to keeping its sign-in between sessions (0.14.3), for the DEFAULT key file only: the token file
+    // then sits beside the key that can mint any number of them. A key file elsewhere (a removable or encrypted volume,
+    // a mounted secret), an identity token and an inline secret sign in once per session, as before.
+    if (process.env.SAIHM_SESSION_CACHE !== '0' && id.defaultKey) opts.persistSessionToken = true;
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
     // SAIHM_PAYMENT_METHOD + SAIHM_TIER (paste-once). Set => used verbatim, no self-onboarding.
     try {
@@ -4573,11 +4608,54 @@ export class SaihmProClient {
       return 'Bearer ' + this.cachedJwt;
     }
     if (!this.authInFlight) {
-      this.authInFlight = this.onboard().finally(() => {
+      this.authInFlight = this.signIn().finally(() => {
         this.authInFlight = null;
       });
     }
     return 'Bearer ' + (await this.authInFlight);
+  }
+
+  /**
+   * A token for the next request: the one an earlier session on this device kept, while it is good for more than the
+   * refresh margin (0.14.3), else a fresh sign-in, which is then kept for the next session. A kept token is used only
+   * as {@link SessionTokenFile} reads one; whether it is still good is read from the token's own expiry.
+   */
+  private async signIn(): Promise<string> {
+    const kept = this.keptSignInRefused ? undefined : this.sessionTokens?.read();
+    if (kept !== undefined) {
+      const expMs = jwtExpMs(kept);
+      if (expMs !== undefined && Date.now() < expMs - JWT_REFRESH_SKEW_MS) {
+        this.holdToken(kept, expMs);
+        return kept;
+      }
+    }
+    const jwt = await this.onboard();
+    this.keptSignInRefused = false;
+    // Only a token whose expiry can be read: the next session could not tell whether any other is still good.
+    if (jwtExpMs(jwt) !== undefined) this.sessionTokens?.keep(jwt);
+    return jwt;
+  }
+
+  /**
+   * The endpoint refused the token in `header` (a 401): drop it here and from the file that kept it, if it still holds
+   * that token, and make the next sign-in a fresh one.
+   */
+  private tokenRefused(header: string): void {
+    this.cachedJwt = undefined;
+    if (this.sessionTokens === undefined) return;
+    this.keptSignInRefused = true;
+    if (header.startsWith('Bearer ')) this.sessionTokens.drop(header.slice('Bearer '.length));
+  }
+
+  /**
+   * Hold `jwt` in memory until shortly before `expMs`. The skew is clamped to at most half the remaining life, so a
+   * short-lived token still yields a positive cache window (otherwise every call would sign in again).
+   */
+  private holdToken(jwt: string, expMs: number): void {
+    this.cachedJwt = jwt;
+    const now = Date.now();
+    const skew = Math.min(JWT_REFRESH_SKEW_MS, Math.max(0, Math.floor((expMs - now) / 2)));
+    this.cachedJwtRefreshAtMs = expMs - skew;
   }
 
   /**
@@ -4635,17 +4713,9 @@ export class SaihmProClient {
         'onboard did not return a JWT',
       );
     }
-    this.cachedJwt = out.jwt;
     // Schedule proactive refresh BEFORE expiry. Honor the token's own `exp`; for an opaque token assume
-    // a short conservative TTL. Clamp the skew to at most half the remaining life so a short-lived token
-    // still yields a positive cache window (otherwise we would re-onboard on every single call).
-    const now = Date.now();
-    const expMs = jwtExpMs(out.jwt) ?? now + OPAQUE_TOKEN_TTL_MS;
-    const skew = Math.min(
-      JWT_REFRESH_SKEW_MS,
-      Math.max(0, Math.floor((expMs - now) / 2)),
-    );
-    this.cachedJwtRefreshAtMs = expMs - skew;
+    // a short conservative TTL.
+    this.holdToken(out.jwt, jwtExpMs(out.jwt) ?? Date.now() + OPAQUE_TOKEN_TTL_MS);
     return out.jwt;
   }
 
@@ -5170,11 +5240,13 @@ export class SaihmProClient {
         e instanceof SaihmEndpointError &&
         e.status === 401
       ) {
-        this.cachedJwt = undefined;
+        this.tokenRefused(header);
         const fresh = await this.currentAuthHeader();
         try {
           result = await this.doCall<T>(method, params, fresh);
         } catch (e2) {
+          // The fresh token refused too: it is not kept for the next session either.
+          if (e2 instanceof SaihmEndpointError && e2.status === 401) this.tokenRefused(fresh);
           this.maybeNagFromError(method, e2); // advisory; never swallows e2
           throw e2;
         }
@@ -7186,9 +7258,10 @@ export class SaihmProClient {
         clearTimeout(timer);
       }
     };
-    const first = await send(await this.currentAuthHeader());
+    const header = await this.currentAuthHeader();
+    const first = await send(header);
     if (first.status !== 401 || this.staticAuthHeader) return first;
-    this.cachedJwt = undefined;
+    this.tokenRefused(header);
     return send(await this.currentAuthHeader());
   }
 
@@ -7287,11 +7360,12 @@ export class SaihmProClient {
           const send = async (auth: string): Promise<Response> => keepAliveFetch(url.toString(), {
             method: 'POST', headers: { 'content-type': 'application/json', authorization: auth }, body: JSON.stringify(body), signal: r.signal,
           });
-          let res = await send(await this.currentAuthHeader());
+          const header = await this.currentAuthHeader();
+          let res = await send(header);
           if (res.status === 401 && !this.staticAuthHeader && Date.now() - this.lastFeedRenewAt >= FEED_RENEW_INTERVAL_MS) {
             await readBodyCapped(res, 65_536, 'events_poll').catch(() => '');
             this.lastFeedRenewAt = Date.now();
-            this.cachedJwt = undefined;
+            this.tokenRefused(header);
             res = await send(await this.currentAuthHeader());
           }
           const text = await readBodyCapped(res, 1_048_576, 'events_poll');

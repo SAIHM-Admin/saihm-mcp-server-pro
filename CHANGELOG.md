@@ -5,7 +5,8 @@ All notable changes to `@saihm/mcp-server-pro` are documented here. This project
 ## [0.14.3] — 2026-10-27
 
 Sharing now works from any AI client: one command writes the identity record a colleague
-needs, and `saihm_share` reads it from that file. Recall is faster for every key file, wherever it is kept. Fixes for erased
+needs, and `saihm_share` reads it from that file. Recall is faster for every key file,
+wherever it is kept, and new sessions on a device reuse its sign-in. Fixes for erased
 memories, waiting joins, the sign-in limit and long endpoint addresses. No tool added or
 removed.
 
@@ -35,6 +36,12 @@ removed.
   device, in `~/.saihm` (or `SAIHM_HOME`), readable only by your user account. To keep
   no copy, set `SAIHM_RECALL_CACHE` to `0`, as before. An identity token or an inline
   secret keeps no copy unless you set one up.
+- **One sign-in per device, not per session (a new default).** With the key file in
+  `~/.saihm` (or `SAIHM_HOME`), a session keeps its sign-in there, readable only by your
+  user account, and a new session on the same device uses it until it expires instead of
+  signing in again, so a team behind one office address signs in far less often. The kept
+  sign-in holds no key and is used only for the same endpoint, identity, plan and payment
+  method. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0`.
 - **"Join SAIHM" asks first.** The first join call that would create a new key now
   answers with the question about an existing identity, even when the call says a new
   one is wanted, and only a call after it creates the key. A join that would refuse

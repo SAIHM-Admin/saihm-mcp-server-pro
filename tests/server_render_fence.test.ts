@@ -425,6 +425,9 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // 0 - the record file reader (0.14.3) renders nothing: it returns a record or throws a fixed refusal that names neither
   // the path nor the content, and the share tool renders that.
   'record-file.ts': 0,
+  // 0 - the kept sign-in (0.14.3) renders nothing: every failure in it is silent and costs one sign-in, and the token
+  // it holds is never printed.
+  'session-token-file.ts': 0,
   // 0 - the warm-start module renders nothing: it seals, opens, checks answers and handles the payload files, and throws
   // refusals whose text names no value; the tools render what it returns.
   'warm-start.ts': 0,
@@ -1497,6 +1500,9 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     // 0.14.3, the record file saihm_share reads: the largest file read. An identity record is about 13 KB; this leaves
     // room for any indentation and refuses anything else unread.
     'record-file.ts': { MAX_RECORD_FILE_BYTES: 65536 },
+    // 0.14.3, the sign-in kept between sessions: the longest token kept or used, the largest file read (anything larger
+    // is not one this package wrote), and how long a keep or a drop waits for the lock before giving up.
+    'session-token-file.ts': { MAX_SESSION_TOKEN_CHARS: 8192, MAX_SESSION_FILE_BYTES: 16384, LOCK_WAIT_MS: 1000 },
     // Warm start's format and bounds: how old a leftover payload file must be before it is removed, the key envelope's
     // layout byte and size, the snapshot key, nonce, GCM nonce and tag sizes, the part sizes this client accepts from
     // the endpoint, and the longest key envelope the endpoint stores.
@@ -2389,6 +2395,8 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     'warm-start.ts': {},
     // {} - the record file reader calls no fence: its refusals are fixed sentences that carry no value, by design.
     'record-file.ts': {},
+    // {} - the kept sign-in calls no fence: it renders nothing.
+    'session-token-file.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
   // module under `src/` with a wrong-budget call site stayed green, and `index.ts` was missing
@@ -2620,6 +2628,13 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // 0.14.3, the record file saihm_share reads, opened READ-ONLY and without blocking (counted because every open is).
     // It writes nothing, and reaches no seq/cell cache.
     'record-file.ts:readRecordFile': 1,
+    // 0.14.3, the sign-in kept between sessions, `$SAIHM_HOME/session.<id>.json`, none touching the seq/cell cache. `keep`:
+    // the temporary file (writeFileSync `wx`, mode 600), the rename over the kept file, and the unlink of its own
+    // temporary file when the rename fails. `drop`: the unlink of the kept file while it still holds a refused token.
+    // `read` opens it READ-ONLY, without following a link or blocking (counted because every open is), bound as `fd`.
+    'session-token-file.ts:keep': 3,
+    'session-token-file.ts:drop': 1,
+    'session-token-file.ts:fd': 1,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
@@ -3089,8 +3104,9 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // contain. Declared so that a cache-reaching call added to it cannot arrive unnoticed.
     // `change-feed.ts: 0` - like the erasure feed, it writes its own artifacts (censused in `FS_WRITES`) and reaches no
     // `persist()`.
-    // `record-file.ts: 0` - it reads one file and reaches no `persist()`.
-    { 'change-feed.ts': 0, 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0, 'tool-input.ts': 0, 'warm-start.ts': 0 },
+    // `record-file.ts: 0` - it reads one file and reaches no `persist()`. `session-token-file.ts: 0` - it writes its own
+    // file (censused in `FS_WRITES`) and reaches no `persist()`.
+    { 'change-feed.ts': 0, 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'session-token-file.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0, 'tool-input.ts': 0, 'warm-start.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -3232,8 +3248,10 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // `warm-start.ts: 1` - a restored payload is written to a temporary file and renamed over `latest-<token>.bin`, and
     // the arm unlinks its own temporary file when the rename fails. Its behavioural test (`warm_start.test.ts`) checks
     // that a failed restore leaves no file, and the warm-start folder's sweep removes any temporary file a crash leaves.
-    // `record-file.ts: 0` - it writes no file.
-    { 'change-feed.ts': 0, 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1, 'tool-input.ts': 0, 'warm-start.ts': 1 },
+    // `record-file.ts: 0` - it writes no file. `session-token-file.ts: 1` - the kept sign-in is written to a temporary
+    // file of mode 600 and renamed over the old one under the lock, and the arm unlinks its own temporary file when the
+    // rename fails.
+    { 'change-feed.ts': 0, 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'session-token-file.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1, 'tool-input.ts': 0, 'warm-start.ts': 1 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
   assert.equal(rotations, 1, 'the rotation exemption names exactly one rename');
@@ -4251,6 +4269,8 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'warm-start.ts': {},
     // {} - the record file reader reads no variable; it is handed the path the share names and shows nothing of it.
     'record-file.ts': {},
+    // {} - the kept sign-in reads no variable itself; its path comes from the default key file's folder.
+    'session-token-file.ts': {},
     'server.ts': {
       // An env read into a local, the same shape as the `client.ts` allowance above. It is here
       // because `persistCheckoutUrl` now honours `SAIHM_HOME` as a fallback for `SAIHM_STATE_DIR`:
@@ -4387,7 +4407,10 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // record-file.ts: 1 (0.14.3) - the record file reader counts a parsed document's own keys to refuse one with a field
   // too many or too few. It compares names against a fixed list and returns a boolean; no key or value it reads
   // reaches a renderer, and every refusal it makes is a fixed sentence.
-  const ANON: Record<string, number> = { 'change-feed.ts': 1, 'client.ts': 7, 'record-file.ts': 1, 'share-events.ts': 4, 'tool-input.ts': 1 };
+  // session-token-file.ts: 1 (0.14.3) - the kept sign-in counts a parsed file's own keys to refuse one with a field too
+  // many or too few. It compares names against a fixed list; the one value it returns is the token, which reaches no
+  // renderer.
+  const ANON: Record<string, number> = { 'change-feed.ts': 1, 'client.ts': 7, 'record-file.ts': 1, 'session-token-file.ts': 1, 'share-events.ts': 4, 'tool-input.ts': 1 };
   // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
   // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
   // measured green, which is this round's whole lesson landing on the fix for this round's finding.
