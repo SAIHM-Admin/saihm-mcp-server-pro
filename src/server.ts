@@ -2889,7 +2889,7 @@ async function runUpgrade(): Promise<void> {
       '    "SAIHM_PAYMENT_METHOD": "stripe"',
       '',
       '  In a TOML config (Codex, Grok), env = { ... } stays on one line: add the two inside it,',
-      '  after a comma, so that it reads like this:',
+      "  after a comma. The README's env line, which holds only the endpoint, then reads:",
       '',
       paidTierTomlLine(target),
       '',
@@ -2905,7 +2905,9 @@ async function runUpgrade(): Promise<void> {
  * A TOML client's whole `env = { ... }` line (Codex, Grok) with the two settings in it, for a monthly plan `upgrade`
  * accepted, in the form the README gives: ONE line, because TOML 1.0 ends an inline table at its line, so the two
  * pasted on a line of their own inside the braces do not parse (0.14.3 review 2). Written out per plan, like
- * {@link paidTierEnvLine}, so nothing anyone typed is rendered inside the quotes.
+ * {@link paidTierEnvLine}, so nothing anyone typed is rendered inside the quotes. Each plan's line is exactly the
+ * README's line for Codex and Grok, which holds only the endpoint, with the two added: what the sentence above it
+ * says (0.14.3 review 3). The last arm is never printed: `requestUpgradeUrl` refuses any other plan first.
  */
 function paidTierTomlLine(tier: string): string {
   switch (tier) {

@@ -24,7 +24,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 
@@ -1068,6 +1068,13 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       // In TOML too (Codex, Grok), where the JSON lines are a parse error: the whole env line, as the README gives it,
       // since an inline table ends at its line (0.14.3 review 2) and the pair on a line of its own does not parse.
       assert.ok(stdout.includes('\n    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }\n'), stdout);
+      // The lead-in says exactly what that line is (0.14.3 review 3): the README's env line, holding only the endpoint,
+      // with the two added - so a reader whose line holds more adds the two to it, and copies nothing else.
+      assert.ok(stdout.includes("\n  after a comma. The README's env line, which holds only the endpoint, then reads:\n\n    env = { "), stdout);
+      const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+      const tomlLine = readme.split('\n').find((l) => l.startsWith('env = { SAIHM_ENDPOINT_URL'))!;
+      assert.equal(tomlLine, 'env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp" }', "the README's env line holds only the endpoint");
+      assert.ok(stdout.includes(`\n    ${tomlLine.slice(0, -2)}, SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }\n`), 'and the printed line is it, with the two added');
       assert.ok(!stdout.includes('\n    SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD'), 'never the pair on a line of its own');
       // What happens without the payment method, as measured: the server starts, and each memory call names it.
       assert.match(stdout, /A paid plan needs both: without SAIHM_PAYMENT_METHOD the server starts, but every memory\n  call fails and names it until it is set\./);
