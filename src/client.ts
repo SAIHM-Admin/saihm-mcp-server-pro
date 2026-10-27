@@ -2367,7 +2367,8 @@ export interface SaihmProClientOpts {
    * Keep this identity's sign-in in {@link defaultSessionTokenPath} (0.14.3), so a later session on this device uses
    * it while it is good instead of signing in again. Off unless asked for, like `persistSeqState`: a directly
    * constructed client writes nothing. `bootFromEnv` turns it on for the default key file, unless
-   * `SAIHM_SESSION_CACHE=0`. Ignored with a static `authHeader`, which signs in to nothing.
+   * `SAIHM_SESSION_CACHE=0`, under which it removes the sign-in this identity kept earlier instead. Ignored with a
+   * static `authHeader`, which signs in to nothing.
    */
   persistSessionToken?: boolean;
   /**
@@ -4625,10 +4626,25 @@ export class SaihmProClient {
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
     // SAIHM_PAYMENT_METHOD + SAIHM_TIER (paste-once). Set => used verbatim, no self-onboarding.
     try {
-      return new SaihmProClient(endpoint, auth, id.master, opts);
+      const client = new SaihmProClient(endpoint, auth, id.master, opts);
+      // SAIHM_SESSION_CACHE=0 LEAVES NO SIGN-IN ON DISK (0.14.3 review 3): a sign-in an earlier session kept for this
+      // identity stayed until it expired, though the setting says memory only. It is removed now, as the identity
+      // loads - that one file, and only while it holds this package's sign-in for this agent ID; never the key.
+      if (process.env.SAIHM_SESSION_CACHE === '0') client.discardKeptSignIn();
+      return client;
     } finally {
       id.master.fill(0); // scrub the decoded master secret; the identity holds only derived material
     }
+  }
+
+  /** Remove the sign-in this identity kept on this device, if one is there (see {@link SessionTokenFile.discard}). */
+  private discardKeptSignIn(): void {
+    new SessionTokenFile(defaultSessionTokenPath(this.agentIdHashHex), () => ({
+      endpoint: this.endpoint,
+      agentIdHash: this.agentIdHashHex,
+      tier: this.tier,
+      paymentMethod: this.paymentMethod,
+    })).discard();
   }
 
   /**

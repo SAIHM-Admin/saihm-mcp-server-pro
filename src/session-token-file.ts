@@ -5,7 +5,8 @@
  *
  * Kept for the default key only, which is why it may sit here: that key can mint any number of these tokens, so reading
  * this file gives nothing that reading the key beside it does not. The token lives as long as the endpoint says (an hour
- * on the hosted service). SAIHM_SESSION_CACHE=0 keeps it in memory only, as before 0.14.3.
+ * on the hosted service). SAIHM_SESSION_CACHE=0 keeps it in memory only, as before 0.14.3, and removes the file this
+ * identity kept earlier when the identity loads (see `discard`), so the setting leaves no sign-in on disk.
  *
  * NOTHING HERE TRUSTS THE FILE. It is used only when it is a regular file of this user's, with one name, that no other
  * user can read or write (0600), no larger than a sign-in could make it, holding exactly what this package writes, for
@@ -56,29 +57,43 @@ export class SessionTokenFile {
     return !POSIX_MODES || (st.uid === this.uid && (st.mode & 0o077) === 0);
   }
 
+  /**
+   * A file `discard` may examine: a regular file of this user's, small. Its mode and any other name it has do not
+   * matter there: a sign-in another user could read is the first one to remove, and unlinking removes only this name.
+   */
+  private removable(st: Stats): boolean {
+    if (!st.isFile() || st.size > MAX_SESSION_FILE_BYTES) return false;
+    return !POSIX_MODES || st.uid === this.uid;
+  }
+
+  /** The file parsed as JSON, when `fits` holds for it before and after it is opened; else undefined. Throws. */
+  private parsed(fits: (st: Stats) => boolean): unknown {
+    // Examined before it is opened, so a pipe or a device is never opened; opened without following a link and
+    // without blocking; examined again once open, since the name may have been replaced in between.
+    if (POSIX_MODES && !fits(lstatSync(this.path))) return undefined;
+    const fd = openSync(this.path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+    const buf = Buffer.alloc(MAX_SESSION_FILE_BYTES + 1);
+    let text: string | undefined;
+    try {
+      if (!fits(fstatSync(fd))) return undefined;
+      let total = 0;
+      while (total < buf.length) {
+        const n = readSync(fd, buf, total, buf.length - total, null);
+        if (n === 0) break;
+        total += n;
+      }
+      if (total <= MAX_SESSION_FILE_BYTES) text = buf.subarray(0, total).toString('utf8');
+    } finally {
+      buf.fill(0);
+      closeSync(fd);
+    }
+    return text === undefined ? undefined : JSON.parse(text);
+  }
+
   /** The token kept for this binding, or undefined. Never throws. */
   read(): string | undefined {
     try {
-      // Examined before it is opened, so a pipe or a device is never opened; opened without following a link and
-      // without blocking; examined again once open, since the name may have been replaced in between.
-      if (POSIX_MODES && !this.acceptable(lstatSync(this.path))) return undefined;
-      const fd = openSync(this.path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
-      const buf = Buffer.alloc(MAX_SESSION_FILE_BYTES + 1);
-      let text: string | undefined;
-      try {
-        if (!this.acceptable(fstatSync(fd))) return undefined;
-        let total = 0;
-        while (total < buf.length) {
-          const n = readSync(fd, buf, total, buf.length - total, null);
-          if (n === 0) break;
-          total += n;
-        }
-        if (total <= MAX_SESSION_FILE_BYTES) text = buf.subarray(0, total).toString('utf8');
-      } finally {
-        buf.fill(0);
-        closeSync(fd);
-      }
-      return text === undefined ? undefined : this.tokenOf(JSON.parse(text));
+      return this.tokenOf(this.parsed((st) => this.acceptable(st)));
     } catch {
       return undefined;
     }
@@ -131,6 +146,37 @@ export class SessionTokenFile {
     } catch {
       /* a held lock, a full disk or a folder that cannot be written: this session keeps its sign-in in memory */
     }
+  }
+
+  /**
+   * Remove the file when it holds a sign-in this package kept for this binding's agent ID, for any endpoint, plan or
+   * payment method (SAIHM_SESSION_CACHE=0, 0.14.3): a regular file of this user's, no larger than a sign-in could make
+   * it, holding this package's document for that agent ID. Anything else at this name - another document, a link, a
+   * folder - is left as it is, and no other file is touched, the key beside it included. With no file there, nothing
+   * is created, not even the lock. Returns whether it removed the file. Never throws.
+   */
+  discard(): boolean {
+    try {
+      lstatSync(this.path);
+    } catch {
+      return false;
+    }
+    let removed = false;
+    try {
+      withFileLock(`${this.path}.lock`, LOCK_WAIT_MS, () => {
+        // Read under the writers' lock, so a sign-in another session keeps at this moment is either the one examined
+        // here or one written after the removal, never one swapped in between the check and the removal.
+        const d = this.parsed((st) => this.removable(st));
+        if (typeof d !== 'object' || d === null || Array.isArray(d)) return;
+        const doc = d as Record<string, unknown>;
+        if (doc.kind !== KIND || doc.version !== 1 || doc.agentIdHash !== this.binding().agentIdHash) return;
+        unlinkSync(this.path);
+        removed = true;
+      });
+    } catch {
+      /* a held lock, an unreadable file or a folder that cannot be written: the file stays, and this setting never uses it */
+    }
+    return removed;
   }
 
   /** Remove the file while it still holds `token`: one another session has since replaced it with is kept. */

@@ -261,7 +261,7 @@ test('a second session on this device uses the first one\'s sign-in, kept in SAI
   }
 });
 
-test('SAIHM_SESSION_CACHE=0 keeps the sign-in in memory only: nothing is written, nothing kept is read', async () => {
+test('SAIHM_SESSION_CACHE=0 keeps the sign-in in memory only: nothing is written, nothing kept is read, and the one kept earlier is deleted', async () => {
   const m = startMock();
   await listen(m);
   const d = device();
@@ -270,17 +270,27 @@ test('SAIHM_SESSION_CACHE=0 keeps the sign-in in memory only: nothing is written
     await oneSession(d, d.env(m, { SAIHM_SESSION_CACHE: '0' }));
     assert.equal(m.signIns(), 2, 'one sign-in per session, as before');
     assert.equal(existsSync(d.keptPath), false, 'no file');
-    // A good kept sign-in is not read either, nor changed.
+    // A good kept sign-in is not read either, and the session deletes it (0.14.3 review 3): that file and nothing else.
     await oneSession(d, d.env(m));
     assert.equal(m.signIns(), 3);
-    const kept = keptToken(d.keptPath);
-    assert.equal(kept, m.issued[2]);
+    assert.equal(keptToken(d.keptPath), m.issued[2]);
+    const key = readFileSync(join(d.home, 'free-identity.key'));
+    const otherKept = join(d.home, `session.${'cd'.repeat(8)}.json`);
+    const otherDoc = JSON.stringify({ kind: 'saihm-session-token', version: 1, endpoint: m.url(), agentIdHash: 'cd'.repeat(32), tier: 'FREE', paymentMethod: null, token: 'a.b.c' });
+    writeFileSync(otherKept, otherDoc, { mode: 0o600 });
+    const before = readdirSync(d.home).sort();
     await oneSession(d, d.env(m, { SAIHM_SESSION_CACHE: '0' }));
     assert.equal(m.signIns(), 4, 'switched off, the kept sign-in is not used');
-    assert.equal(keptToken(d.keptPath), kept, 'and not replaced');
-    // Positive control: switched back on, it is used.
+    assert.equal(existsSync(d.keptPath), false, 'and it is deleted');
+    assert.deepEqual(readdirSync(d.home).sort(), before.filter((n) => join(d.home, n) !== d.keptPath), 'nothing else in the home changed');
+    assert.deepEqual(readFileSync(join(d.home, 'free-identity.key')), key, 'the key is untouched');
+    assert.equal(readFileSync(otherKept, 'utf8'), otherDoc, "another identity's kept sign-in is untouched");
+    // Positive control: switched back on, a session keeps a sign-in again, and the next one uses it.
     await oneSession(d, d.env(m));
-    assert.equal(m.signIns(), 4);
+    assert.equal(m.signIns(), 5);
+    assert.equal(keptToken(d.keptPath), m.issued[4]);
+    await oneSession(d, d.env(m));
+    assert.equal(m.signIns(), 5);
     assertNoTokenShown(d, m);
   } finally {
     await close(m);

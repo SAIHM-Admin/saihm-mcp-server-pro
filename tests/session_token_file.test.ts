@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -198,6 +198,67 @@ test('drop removes the file only while it holds the refused token; nothing here 
     rmSync(`${path}.lock`);
     f.keep(t);
     assert.equal(f.read(), t);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('discard (SAIHM_SESSION_CACHE=0) removes only a sign-in kept for this agent ID: never another document, a link, a folder or the key beside it', () => {
+  const { dir, path } = scratch();
+  try {
+    const keyPath = join(dir, 'free-identity.key');
+    const keyHex = randomBytes(32).toString('hex');
+    writeFileSync(keyPath, keyHex, { mode: 0o600 });
+    const f = fileFor(path);
+    // Nothing there: nothing removed, and nothing created, not even the lock.
+    assert.equal(f.discard(), false);
+    assert.deepEqual(readdirSync(dir), ['free-identity.key']);
+    // A sign-in kept for this agent ID under another endpoint, plan and payment method is still this identity's.
+    fileFor(path, { endpoint: 'https://other.example/mcp', tier: 'FREE', paymentMethod: undefined }).keep(jwt());
+    assert.equal(f.discard(), true);
+    assert.deepEqual(readdirSync(dir), ['free-identity.key'], 'removed, and no lock or temporary file is left');
+    // One that other users can read is this package's sign-in all the same: the first one to remove.
+    if (POSIX) {
+      f.keep(jwt());
+      chmodSync(path, 0o644);
+      assert.equal(f.discard(), true, 'mode 644');
+      assert.throws(() => lstatSync(path), /ENOENT/);
+    }
+    // Left exactly as it is: anything at this name that is not this package's sign-in for this agent ID.
+    for (const [label, body] of [
+      ['another agent ID', JSON.stringify({ kind: 'saihm-session-token', version: 1, ...BINDING, agentIdHash: 'cd'.repeat(32), token: jwt() })],
+      ['another kind of document', JSON.stringify({ kind: 'other', version: 1, ...BINDING, token: jwt() })],
+      ['another version', JSON.stringify({ kind: 'saihm-session-token', version: 2, ...BINDING, token: jwt() })],
+      ['key-shaped text', keyHex],
+      ['a file larger than a sign-in', JSON.stringify({ kind: 'saihm-session-token', version: 1, ...BINDING, token: 'x'.repeat(MAX_SESSION_FILE_BYTES) })],
+    ] as const) {
+      writeFileSync(path, body, { mode: 0o600 });
+      assert.equal(f.discard(), false, label);
+      assert.equal(readFileSync(path, 'utf8'), body, `${label}: untouched`);
+    }
+    rmSync(path);
+    if (POSIX) {
+      // A link at this name, even to this agent ID's sign-in, and a link to the key: neither the link nor its target.
+      const target = join(dir, 'target.json');
+      fileFor(target).keep(jwt());
+      for (const to of [target, keyPath]) {
+        symlinkSync(to, path);
+        assert.equal(f.discard(), false, `a link to ${to}`);
+        assert.ok(lstatSync(path).isSymbolicLink());
+        assert.ok(statSync(to).isFile());
+        rmSync(path);
+      }
+      // Another user's file (only the superuser can make one), then a folder at this name.
+      f.keep(jwt());
+      assert.equal(fileFor(path, {}, (process.getuid?.() ?? 0) + 1).discard(), false, "another user's file");
+      assert.equal(f.discard(), true, "positive control: this user's file");
+      mkdirSync(path);
+      assert.equal(f.discard(), false, 'a folder');
+      assert.ok(statSync(path).isDirectory());
+      rmSync(path, { recursive: true });
+    }
+    // Through all of the above, the key beside it is what it was.
+    assert.equal(readFileSync(keyPath, 'utf8'), keyHex);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

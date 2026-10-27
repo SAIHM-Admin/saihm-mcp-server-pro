@@ -2631,9 +2631,13 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // 0.14.3, the sign-in kept between sessions, `$SAIHM_HOME/session.<id>.json`, none touching the seq/cell cache. `keep`:
     // the temporary file (writeFileSync `wx`, mode 600), the rename over the kept file, and the unlink of its own
     // temporary file when the rename fails. `drop`: the unlink of the kept file while it still holds a refused token.
-    // `read` opens it READ-ONLY, without following a link or blocking (counted because every open is), bound as `fd`.
+    // `discard` (SAIHM_SESSION_CACHE=0, 0.14.3 review 3): the unlink of this identity's kept file, under the writers'
+    // lock and only while it holds this package's sign-in for that agent ID; a failure is caught there and never
+    // rendered. `read` and `discard` open it READ-ONLY through `parsed`, without following a link or blocking (counted
+    // because every open is), bound as `fd`.
     'session-token-file.ts:keep': 3,
     'session-token-file.ts:drop': 1,
+    'session-token-file.ts:discard': 1,
     'session-token-file.ts:fd': 1,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at

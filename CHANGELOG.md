@@ -55,7 +55,8 @@ removed.
   signing in again, so a team behind one office address signs in far less often. The kept
   sign-in holds no key and is used only for the same endpoint, identity, plan and payment
   method, and none is kept where the home is temporary or kept for later jobs, as for the
-  recall copy. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0`.
+  recall copy. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0`: SAIHM then
+  deletes the sign-in kept earlier, the next time it loads your key.
 - **A shared memory is labelled in the structured result too.** A shared read's row in
   `memories` now carries the sharer's agent ID as `sharer` and `owner: "another-agent"`,
   and the text names that agent ID beside its label, so the memory is marked as another
