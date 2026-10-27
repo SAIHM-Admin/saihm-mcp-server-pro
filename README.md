@@ -484,7 +484,9 @@ to reach `saihm.net`, and npm for `npx`. The steps below follow each host's own
 documentation; the [reference](./REFERENCE.md#hosted-agent-environments-in-detail)
 covers proxies and the finer points. A CI job is one such environment: give it its own
 key file as a secret file, named by `SAIHM_MASTER_SECRET_FILE`, or set the two values as
-the job's secrets.
+the job's secrets. On a runner SAIHM does not recognize (the
+[reference](./REFERENCE.md#configuration) lists the ones it does), also set
+`SAIHM_EPHEMERAL_HOME=1`, so that no copy of your memories and no sign-in stays on it.
 
 - **Claude Code on the web** — add both values under the environment's *Environment
   variables*. Anyone who uses that environment can read them, so use a dedicated
