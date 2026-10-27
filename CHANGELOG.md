@@ -2,6 +2,73 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.3] — 2026-10-27
+
+Sharing now works from any AI client: one command writes the identity record a colleague
+needs. Recall is faster for every key file, wherever it is kept. Fixes for erased
+memories, waiting joins, the sign-in limit and long endpoint addresses. No tool added or
+removed.
+
+### Added
+
+- **`identity-record`.** `npx -y @saihm/mcp-server-pro identity-record [FILE]` writes
+  your public identity record, your agent ID and public keys, to a file or to stdout,
+  for a colleague whose agent shares memories with you or reads the ones you share. It
+  holds no secret and asks the endpoint nothing. The README's "Share with a colleague"
+  shows how.
+- **`CASE-STUDY.md`.** A worked case study of three agent roles doing a quarter of
+  regulated work ships with the package, linked from the README's "Things to say".
+
+### Changed
+
+- **Faster recall with any key file (a new default).** An identity that starts from the
+  key file `SAIHM_MASTER_SECRET_FILE` names, wherever that file is, now keeps the local
+  recall copy, as the standard key file already did. A recall then fetches only what is
+  new or has changed, so it is faster and uses fewer reads. The copy stays on your
+  device, in `~/.saihm` (or `SAIHM_HOME`), readable only by your user account. To keep
+  no copy, set `SAIHM_RECALL_CACHE` to `0`, as before. An identity token or an inline
+  secret keeps no copy unless you set one up.
+- **"Join SAIHM" asks first.** The first join call that would create a new key now
+  answers with the question about an existing identity, even when the call says a new
+  one is wanted, and only a call after it creates the key. A join that would refuse
+  anyway says so before it asks.
+- **The upgrade command prints the two settings a paid plan needs,** `SAIHM_TIER` and
+  `SAIHM_PAYMENT_METHOD`, as they go into a client's `env` block, and how to check the
+  plan once the client has restarted.
+- **`free-join` says at once that it is starting.** A first run that downloads the
+  package and then signs in showed nothing for a while, and could look hung.
+- **README.** "Things to say" has new starters for a team, each naming SAIHM, and points
+  to the SAIHM manual and the case study for more. Every "Join SAIHM" now comes after
+  the install step. Cline has its own section, with its settings file and restart steps.
+  New: a note on adding another AI client on the same computer, one table of the ways to
+  pay and which of them keep your key, and that once the free tier is used up you can
+  still list and erase your memories. The free sign-in page now offers Google or
+  Microsoft and gives the key as a file for `~/.saihm`, and the SHM section says a
+  correction saved once is recalled every time after.
+
+### Fixed
+
+- **An erased memory saved again in a new session.** A session whose first call saved a
+  new memory took an erasure of it, made in another session on this device after that
+  save, for one made before the session started, so an edit of it was stored and the
+  erased memory came back. The erasure feed's starting point is now taken when the
+  session starts. A write the service refuses for an erased memory, with its stale-write
+  refusal, says the memory was erased.
+- **A free join waiting for approval.** Its refusal put the paid-plan settings first. It
+  now says the join may still be waiting and how to finish it, then what a paid plan
+  needs.
+- **The sign-in limit.** Its message said "onboard failed" and gave the wait in seconds.
+  It now says SAIHM could not sign in, and gives a wait of a minute or more in minutes.
+- **A long `SAIHM_ENDPOINT_URL`.** A failed connection's advice, "Never disable
+  certificate checks" included, was cut off after a long endpoint address. Now the
+  address is what is shortened.
+- **A memory listed with no version number.** With the copy on, it was read again at
+  every recall, though the copy held that very version. It is now known from the copy.
+- **A key folder that cannot be written.** With the standard key in a `~/.saihm` that
+  could not be written, such as one mounted read-only, every recall failed. The local
+  copy is now kept only where it can be written; elsewhere recall fetches every memory,
+  as with the copy off.
+
 ## [0.14.2] — 2026-10-26
 
 Enterprise owners get a section on allowing SAIHM in GitHub Copilot, the local recall
@@ -2121,6 +2188,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.14.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.3
 [0.14.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.2
 [0.14.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.1
 [0.14.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.0
@@ -2155,4 +2223,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.3...HEAD
