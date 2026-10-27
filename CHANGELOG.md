@@ -43,8 +43,9 @@ removed.
   recall copy, as the standard key file already did. A recall then fetches only what is
   new or has changed, so it is faster and uses fewer reads. The copy stays on your
   device, in `~/.saihm` (or `SAIHM_HOME`), readable only by your user account. To keep
-  no copy, set `SAIHM_RECALL_CACHE` to `0`, as before. An identity token or an inline
-  secret keeps no copy unless you set one up, and neither does any identity where the
+  no copy, set `SAIHM_RECALL_CACHE` to `0` in every AI client and app that runs SAIHM
+  with your key on this device, as before. An identity token or an inline secret keeps
+  no copy unless you set one up, and neither does any identity where the
   home is temporary or kept for later jobs: in a hosted agent session, on the CI runners
   SAIHM recognizes (the REFERENCE lists them), and wherever `SAIHM_EPHEMERAL_HOME=1` is
   set, as it should be on any other runner.
@@ -55,8 +56,9 @@ removed.
   signing in again, so a team behind one office address signs in far less often. The kept
   sign-in holds no key and is used only for the same endpoint, identity, plan and payment
   method, and none is kept where the home is temporary or kept for later jobs, as for the
-  recall copy. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0`: SAIHM then
-  deletes the sign-in kept earlier, the next time it loads your key.
+  recall copy. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0` in every AI
+  client and app that runs SAIHM with your key on this device: SAIHM then deletes the
+  sign-in kept earlier, the next time it loads your key.
 - **A shared memory is labelled in the structured result too.** A shared read's row in
   `memories` now carries the sharer's agent ID as `sharer` and `owner: "another-agent"`,
   and the text names that agent ID beside its label, so the memory is marked as another

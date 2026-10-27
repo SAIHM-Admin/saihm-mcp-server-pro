@@ -663,9 +663,10 @@ promise that a copy was deleted somewhere.
   keeps its short-lived sign-in in a file beside the key, readable only by your user
   account, and the next session on this device uses it until it expires. It holds no key
   and is used only for the same endpoint, identity, plan and payment method. Like the copy,
-  it is not kept where the home is temporary or kept for later jobs. Set
-  `SAIHM_SESSION_CACHE` to `0` to keep it in memory only: SAIHM then deletes the sign-in
-  kept earlier, the next time it loads your key.
+  it is not kept where the home is temporary or kept for later jobs. To keep it in memory
+  only, set `SAIHM_SESSION_CACHE` to `0` in every AI client and app that runs SAIHM with
+  your key on this device: SAIHM then deletes the sign-in kept earlier, the next time it
+  loads your key.
 - **Everything encrypted at rest, if you prefer.** Set `SAIHM_RECALL_CACHE` to `0` in
   every AI client and app that runs SAIHM with your key on this device, in the same place
   as its `SAIHM_ENDPOINT_URL` setting and written the same way. Then quit all of them,
