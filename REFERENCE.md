@@ -196,6 +196,8 @@ bootstrap tool that answers *"Join SAIHM"*: on by default, removed by
 `recipientRecord` with `recipientPinnedAgentIdHashHex`. It also takes an optional `scope`
 (`read`, `write` or `readwrite`; blank is `read`) and an optional `expiryEpoch` in whole hours
 since the UNIX epoch. See [Your identity record, for sharing](#your-identity-record-for-sharing).
+To read a memory shared with you, `saihm_recall` takes the sharer's agent ID as
+`sharerPinnedAgentIdHashHex` and the memory's `cellId`; no record is needed.
 
 **"Forget" really means forget.** The key to that specific memory is destroyed, so
 the stored copy becomes permanently unreadable — by you, by SAIHM, by anyone
@@ -237,13 +239,16 @@ It reads the identity a server started from this shell would use, as `export-ide
 does, never creates one, and asks the endpoint nothing.
 
 The record holds no secret: nothing in it can read, change or erase your memory, so it can
-be sent to anyone. A colleague's agent uses it in two ways:
+be sent to anyone. A colleague's agent uses it to share a memory with you: `saihm_share`
+takes the file's full path as `recipientRecordFile` and reads the record and your agent ID
+from it, or takes `identityRecord` as `recipientRecord` and `agentIdHash` as
+`recipientPinnedAgentIdHashHex`.
 
-- to share a memory with you: `saihm_share` takes the file's full path as `recipientRecordFile`
-  and reads the record and your agent ID from it, or takes `identityRecord` as `recipientRecord`
-  and `agentIdHash` as `recipientPinnedAgentIdHashHex`;
-- to read a memory you shared with them: `saihm_recall` takes `identityRecord` as
-  `sharerRecord` and `agentIdHash` as `sharerPinnedAgentIdHashHex`, with the `cellId`.
+To read a memory you shared with them, your colleague's agent needs only your agent ID:
+`saihm_recall` takes it as `sharerPinnedAgentIdHashHex`, with the `cellId`. SAIHM checks the
+key that comes with the memory against the agent ID before it uses it. A `sharerRecord`
+(the record's `identityRecord`) may be given too, and must then hold that same key. Send
+your agent ID yourself, or check it with your colleague another way, as for a record.
 
 The agent ID is the pin: it is the hash of the record's signing key, and that key signs
 the record's other key, so SAIHM refuses a record that does not belong to its agent ID,
@@ -422,7 +427,7 @@ a copy was deleted somewhere.
 | Integrity / authenticity | Every cell is ML-DSA-65-signed over its contents, including the sequence number. |
 | Anti-replay | The signed monotonic sequence is rejected by the endpoint if it does not strictly increase. |
 | Tenant isolation | Your `agentIdHash` (the JWT `sub`) namespaces your state; a write whose signed identity differs from the JWT is rejected. |
-| Authenticated sharing | Grantee public keys are pinned out-of-band and verified before any secret is bound to them; on the recipient side, `recallShared` pins the sharer's key and verifies the cell signature before returning any plaintext. |
+| Authenticated sharing | Grantee public keys are pinned out-of-band and verified before any secret is bound to them; on the recipient side, `recallShared` pins the sharer's agent ID, checks that the sharer's key hashes to it before using that key, and verifies the share and cell signatures before returning any plaintext. |
 | Erasure | Destroying the endpoint-side wrapped DEK crypto-shreds the cell. |
 | Local recall cache | When the recall cache is on, every memory saved or read on this device and, after the first recall, all of your memories are also kept unencrypted in a mode-600 file in `SAIHM_HOME` (`~/.saihm` by default), one file shared by every process on the device that uses that key with the cache on. `forget` removes the memory from it, and `SAIHM_RECALL_CACHE` below says how to go without one. |
 | Kept sign-in | With the key file in `SAIHM_HOME`, the short-lived sign-in token is kept in a mode-600 file beside the key, for the next session on this device. It holds no key, is used only for the endpoint, identity, plan and payment method it was issued for, and expires on its own. `SAIHM_SESSION_CACHE=0` keeps it in memory only. |

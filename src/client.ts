@@ -172,6 +172,7 @@ import {
   resolveFeedRoot,
 } from './erasure-feed.js';
 import type {
+  BlindEnvelope,
   ClientIdentity,
   WireEnvelope,
   WireShareEnvelope,
@@ -1578,6 +1579,64 @@ function ownField(o: unknown, k: string): unknown {
 }
 
 /**
+ * A shared read's content envelope, decoded and checked: written under the pinned agentIdHash, for the cell asked for,
+ * carrying the pinned sharer's signing key, and verified (its signature and commitment). `recordKey` is the key of a
+ * sharer record already verified against the pin; without one, the envelope's key must itself hash to the pin. The key
+ * check comes BEFORE the signature check, so the key is bound to the pin before anything uses it, and a key that is
+ * not the pinned one is refused for that (`sharer_key_mismatch`) rather than as a signature that failed.
+ */
+function checkedSharedEnvelope(
+  contentWire: WireEnvelope,
+  cellId: string,
+  pin: Uint8Array,
+  recordKey: Uint8Array | undefined,
+): BlindEnvelope {
+  let env;
+  try {
+    env = decodeEnvelope(contentWire);
+  } catch {
+    throw new SaihmEndpointError(
+      502,
+      'malformed_envelope',
+      `endpoint returned a malformed content envelope for cell '${cellId}'`,
+    );
+  }
+  if (!ctEqual(env.agentIdHash, pin)) {
+    throw new SaihmEndpointError(
+      502,
+      'foreign_envelope',
+      'shared content envelope is not signed by the pinned sharer',
+    );
+  }
+  if (env.cellId !== cellId) {
+    throw new SaihmEndpointError(
+      502,
+      'cell_mismatch',
+      `endpoint returned cell '${env.cellId}' for requested '${cellId}'`,
+    );
+  }
+  const keyPinned =
+    recordKey !== undefined
+      ? ctEqual(env.mldsaPubKey, recordKey)
+      : ctEqual(createHash('sha256').update(env.mldsaPubKey).digest(), pin);
+  if (!keyPinned) {
+    throw new SaihmEndpointError(
+      502,
+      'sharer_key_mismatch',
+      'shared content envelope does not carry the pinned sharer key',
+    );
+  }
+  if (!verifyEnvelope(env)) {
+    throw new SaihmEndpointError(
+      502,
+      'unverified_envelope',
+      `shared content envelope for cell '${cellId}' failed verification`,
+    );
+  }
+  return env;
+}
+
+/**
  * The `staleShares` page of an endpoint response, structurally. Nothing in it is trusted; every grant is verified
  * before it is used. `after` is where the next page starts: the endpoint's cursor when it is a recipient id, or, when
  * the page lists more grants than this client handles in one page, the recipient of the last grant it handles, so
@@ -1618,10 +1677,14 @@ export interface RecalledCell {
  * A POINTER, NOT A CELL, and NOT A FACT. The announcement row carries no envelope and no signature —
  * nothing here is authenticated, and a hostile endpoint can fabricate one at will. It is a claim that
  * `sharer` granted `cellId`; only {@link SaihmProClient.recallShared} authenticates that claim, by
- * verifying the share signature against a sharer identity record the caller pinned OUT-OF-BAND. The
- * endpoint holds no identity records and must never vend one, so an announcement can never be resolved
- * from the announcement alone. Never present these as held memories and never auto-resolve them:
- * acting on them unprompted would let the endpoint choose which fetches this client performs.
+ * verifying the share signature with the signing key of a sharer agentIdHash the caller pinned
+ * OUT-OF-BAND (the key from the sharer's record, or from the cell's own envelope, checked against the
+ * pin). Since 0.14.3 an announcement names all that such a read takes, its `sharer` and its `cellId`,
+ * so the out-of-band rule is the caller's to keep: pin the agent ID the user or the sharer gave, never
+ * this `sharer`, which the endpoint chose. A read pinned to it proves only that the holder of that
+ * agentIdHash wrote the cell, not who the holder is. Never present these as held memories and never
+ * auto-resolve them: acting on them unprompted would let the endpoint choose which fetches this client
+ * performs, and whose content it reads.
  */
 export interface SharedAnnouncement {
   /** The SHARER's agentIdHash (hex), as claimed by the endpoint. Pin it out-of-band before trusting it. */
@@ -2231,10 +2294,17 @@ export interface ShareGrant {
 
 /** Inputs to read a cell that another agent shared TO this agent (see {@link SaihmProClient.recallShared}). */
 export interface SharedReadGrant {
-  /** The SHARER's agentIdHash (hex), pinned OUT-OF-BAND — the namespace the cell was shared from. */
+  /**
+   * The SHARER's agentIdHash (64 lowercase hex), pinned OUT-OF-BAND: their agent ID as they gave it to you, never one
+   * taken from a {@link SharedAnnouncement}. The namespace the cell was shared from, and the anchor every check binds to.
+   */
   sharerPinnedAgentIdHashHex: string;
-  /** The SHARER's identity record (hex), from the directory; verified against the pin (anti key-substitution). */
-  sharerRecord: WireIdentityRecord;
+  /**
+   * Optional (0.14.3): the SHARER's identity record (hex). Without it, the sharer's signing key is the one in the shared
+   * cell's own signed envelope, used only once it hashes to the pin. With it, the record is verified against the pin
+   * before any request (anti key-substitution) and must carry the same signing key as that envelope.
+   */
+  sharerRecord?: WireIdentityRecord;
   /** The shared cell id to read. */
   cellId: string;
 }
@@ -6026,8 +6096,9 @@ export class SaihmProClient {
    * `announcements` is `[]` — never absent — when the endpoint announced none, which is also what an
    * endpoint with shared discovery switched off returns and what every endpoint predating the feature
    * returns. UNAUTHENTICATED POINTERS, NOT MEMORIES: read {@link SharedAnnouncement} before surfacing
-   * them. To actually read one, obtain the sharer's identity record out-of-band and call
-   * {@link recallShared} — that path, and only that path, authenticates the grant.
+   * them. To actually read one, obtain the sharer's agent ID out-of-band (from the user or the sharer,
+   * never from the announcement) and call {@link recallShared} — that path, and only that path,
+   * authenticates the grant.
    */
   async recallWithShared(query?: string): Promise<RecallWithShared> {
     this.noticeIfRecallIsUncached();
@@ -6209,7 +6280,8 @@ export class SaihmProClient {
       // row carries NEITHER field and would otherwise be dropped on `!row.found`. It is metadata only:
       // a claim that `sharer` granted `cellId`, with no envelope and no signature to check it against.
       // It is deliberately NOT opened, NOT cached and NOT counted as a cell — resolving it requires a
-      // sharer identity record pinned out-of-band (see `recallShared`), which no announcement supplies.
+      // sharer agent ID pinned out-of-band (see `recallShared`), which an announcement can name but
+      // never vouch for.
       //
       // A malformed or repeated announcement is SKIPPED, never thrown on: these rows are unauthenticated
       // by construction, so letting one abort the response would hand a hostile endpoint a way to deny
@@ -6832,6 +6904,21 @@ export class SaihmProClient {
    * unwraps the content DEK with this agent's ML-KEM secret, and opens the content. Returns `null`
    * when no live grant exists (never shared, revoked, or expired) or the content was forgotten.
    *
+   * WHERE THE SHARER KEY COMES FROM (0.14.3). The pin is the sharer's agentIdHash, the SHA-256 of
+   * their ML-DSA public key, so any copy of that key is checkable against it and the source need not
+   * be trusted. With `sharerRecord`, the record is verified against the pin before any request, as
+   * before. Without it, the key is the one the sharer's own signed envelope carries (`contentWire`),
+   * which every shared read already returns: the envelope is decoded and checked FIRST (signed under
+   * the pinned agentIdHash, for the cell asked for, its key hashing to the pin, its signature valid),
+   * and only then is that key used to authenticate the share and unwrap the DEK. A different key with
+   * the same hash would be a second preimage. The record's other half (the ML-KEM key and its
+   * self-signature) is never used to READ; it matters only when sharing TO that agent. With both a
+   * record and an envelope, the two signing keys must be the same (`sharer_key_mismatch`).
+   *
+   * The pin authenticates the KEY, not the PERSON: it proves the holder of that agentIdHash wrote the
+   * cell, never who that holder is. That is the out-of-band step, and it is why the pin must come from
+   * the user or the sharer, never from a {@link SharedAnnouncement}, whose `sharer` the endpoint chose.
+   *
    * Trust model (the endpoint is blind + assumed hostile): it never holds the DEK, so it cannot forge
    * content — a tampered ciphertext fails the AEAD open, a substituted cell fails the id/attribution
    * checks, and an unauthenticated share fails `verifyShareSig`. `verifyEnvelope` additionally proves
@@ -6858,12 +6945,17 @@ export class SaihmProClient {
    *     `null` return as a cryptographic guarantee.
    */
   async recallShared(grant: SharedReadGrant): Promise<RecalledCell | null> {
-    // 1) Pin the sharer's identity (defeats directory key-substitution) → trusted sharer ML-DSA key.
+    // 1) The pin, checked for its shape before anything else: 64 lowercase hex, the only form an agentIdHash takes, so a
+    //    short or padded one is refused here rather than sent. A record, when given, is pinned now (defeats
+    //    key-substitution) and supplies the sharer's ML-DSA key; without one the key comes with the cell, at step 3.
     let sharerRecord;
     let sharerPinned;
     try {
-      sharerRecord = decodeIdentityRecord(grant.sharerRecord);
-      sharerPinned = fromHex(grant.sharerPinnedAgentIdHashHex);
+      const pin: unknown = grant.sharerPinnedAgentIdHashHex;
+      if (typeof pin !== 'string' || !HEX64_RE.test(pin)) throw new Error('pin');
+      sharerPinned = fromHex(pin);
+      // null is a JavaScript caller's "no record", as absent is.
+      sharerRecord = grant.sharerRecord == null ? undefined : decodeIdentityRecord(grant.sharerRecord);
     } catch {
       throw new SaihmEndpointError(
         0,
@@ -6871,7 +6963,8 @@ export class SaihmProClient {
         'sharer identity record or pinned agentIdHash is malformed',
       );
     }
-    verifyIdentityRecord(sharerRecord, sharerPinned); // throws KeySubstitutionError on a pin mismatch
+    if (sharerRecord !== undefined) verifyIdentityRecord(sharerRecord, sharerPinned); // throws KeySubstitutionError on a pin mismatch
+    const recordKey = sharerRecord?.mldsaPubKey;
     const sharerHex = toHex(sharerPinned);
 
     // 2) Fetch {share envelope, content ciphertext} for (sharer, cellId), keyed to THIS recipient.
@@ -6895,7 +6988,18 @@ export class SaihmProClient {
     const servingGrant = typeof res.grant === 'string' && /^[0-9a-f]{64}$/.test(res.grant) ? res.grant : undefined;
     if (!res.found || !res.wire || !res.contentWire) return null; // no live grant / content unavailable
 
-    // 3) Authenticate the grant + unwrap the content DEK with this agent's ML-KEM secret.
+    // 3) The sharer's signing key. With a record, the record's (pinned at step 1); the envelope is checked at step 5, as
+    //    before. Without one, the key the sharer's own envelope carries, and the envelope is checked NOW, in full, so
+    //    the key is bound to the pin before it is used for anything (see the note above on where the key comes from).
+    let env: BlindEnvelope | undefined;
+    let sharerKey: Uint8Array;
+    if (recordKey !== undefined) sharerKey = recordKey;
+    else {
+      env = checkedSharedEnvelope(res.contentWire, grant.cellId, sharerPinned, undefined);
+      sharerKey = env.mldsaPubKey;
+    }
+
+    // 4) Authenticate the grant + unwrap the content DEK with this agent's ML-KEM secret.
     let share;
     try {
       share = decodeShareEnvelope(res.wire);
@@ -6923,7 +7027,7 @@ export class SaihmProClient {
         `endpoint returned a share for the wrong sharer/cell`,
       );
     }
-    if (!verifyShareSig(share, sharerRecord.mldsaPubKey)) {
+    if (!verifyShareSig(share, sharerKey)) {
       throw new SaihmEndpointError(
         502,
         'bad_share_sig',
@@ -6935,7 +7039,7 @@ export class SaihmProClient {
       dek = unwrapSharedDek({
         share,
         recipientAgentIdHash: this.identity.agentIdHash,
-        sharerPinnedMldsaPubKey: sharerRecord.mldsaPubKey,
+        sharerPinnedMldsaPubKey: sharerKey,
         recipientMlkemSecretKey: this.identity.mlkemSecretKey,
       });
     } catch {
@@ -6947,39 +7051,10 @@ export class SaihmProClient {
       );
     }
 
-    // 4) Decode + verify the sharer-signed content envelope, then open with the unwrapped DEK.
+    // 5) The sharer-signed content envelope, decoded and verified (with a record: here, as before; without one: already,
+    //    at step 3), then opened with the unwrapped DEK.
     try {
-      let env;
-      try {
-        env = decodeEnvelope(res.contentWire);
-      } catch {
-        throw new SaihmEndpointError(
-          502,
-          'malformed_envelope',
-          `endpoint returned a malformed content envelope for cell '${grant.cellId}'`,
-        );
-      }
-      if (!ctEqual(env.agentIdHash, sharerPinned)) {
-        throw new SaihmEndpointError(
-          502,
-          'foreign_envelope',
-          'shared content envelope is not signed by the pinned sharer',
-        );
-      }
-      if (env.cellId !== grant.cellId) {
-        throw new SaihmEndpointError(
-          502,
-          'cell_mismatch',
-          `endpoint returned cell '${env.cellId}' for requested '${grant.cellId}'`,
-        );
-      }
-      if (!verifyEnvelope(env)) {
-        throw new SaihmEndpointError(
-          502,
-          'unverified_envelope',
-          `shared content envelope for cell '${grant.cellId}' failed verification`,
-        );
-      }
+      if (env === undefined) env = checkedSharedEnvelope(res.contentWire, grant.cellId, sharerPinned, recordKey);
       let plaintext;
       try {
         plaintext = fromUtf8(openCellWithDek(env, dek));
@@ -6992,7 +7067,8 @@ export class SaihmProClient {
           `shared cell '${grant.cellId}' could not be opened with the unwrapped DEK`,
         );
       }
-      // The sharer's signature was checked against the pinned record above: the feed may say so.
+      // The sharer's signatures were checked above with the key the pin binds, from the record or from the envelope: the
+      // feed may say so.
       this.shareFeed?.markSenderVerified(grant.sharerPinnedAgentIdHashHex, grant.cellId);
       return {
         cellId: env.cellId,

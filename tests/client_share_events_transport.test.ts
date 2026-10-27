@@ -59,8 +59,11 @@ test('a 401 from the events route renews the token once, then not again within t
   }
 });
 
-test('a shared read that fails to open marks the share stale; a verified read marks its sender verified', async () => {
-  const A = deriveIdentity(new Uint8Array(32).fill(91)), B_SEED = new Uint8Array(32).fill(92), B = deriveIdentity(B_SEED);
+// With the sharer's record, and by agent ID alone (0.14.3), where the key comes from the cell's own envelope: the feed
+// marks the same. Each run reads as its own recipient, so neither sees the other's map file.
+for (const [label, recipientSeed, withRecord] of [['', 92, true], [' (by agent ID alone)', 93, false]] as const) {
+test(`a shared read that fails to open marks the share stale; a verified read marks its sender verified${label}`, async () => {
+  const A = deriveIdentity(new Uint8Array(32).fill(91)), B_SEED = new Uint8Array(32).fill(recipientSeed), B = deriveIdentity(B_SEED);
   const seal = (seq: bigint, text: string) => sealCell({ plaintext: new TextEncoder().encode(text), kek: A.kek, mldsaSecretKey: A.mldsaSecretKey, mldsaPubKey: A.mldsaPubKey, agentIdHash: A.agentIdHash, cellId: 'doc', seq, tier: 'PRO' });
   const v1 = seal(1n, 'one'), v2 = seal(2n, 'two');
   const shareV1 = encodeShareEnvelope(shareCell({ envelope: v1, sharerKek: A.kek, sharerMldsaSecretKey: A.mldsaSecretKey, sharerAgentIdHash: A.agentIdHash, recipientRecord: B.identityRecord, recipientPinnedAgentIdHash: B.agentIdHash }));
@@ -94,7 +97,9 @@ test('a shared read that fails to open marks the share stale; a verified read ma
     const end = Date.now() + 8000;
     while (entry()?.grant !== grant && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
     assert.equal(entry()?.status, 'live');
-    const read = { sharerPinnedAgentIdHashHex: sharer, sharerRecord: encodeIdentityRecord(A.identityRecord), cellId: 'doc' };
+    const read = withRecord
+      ? { sharerPinnedAgentIdHashHex: sharer, sharerRecord: encodeIdentityRecord(A.identityRecord), cellId: 'doc' }
+      : { sharerPinnedAgentIdHashHex: sharer, cellId: 'doc' };
     await assert.rejects(client.recallShared(read), (e: unknown) => (e as { code?: string }).code === 'undecryptable');
     assert.deepEqual([entry()?.status, entry()?.senderVerified], ['stale', false]);
     // The file follows the map: wait until it shows the stale share, so no write is still pending.
@@ -116,6 +121,7 @@ test('a shared read that fails to open marks the share stale; a verified read ma
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+}
 
 test('the info route: a non-success answer is tried again within seconds; a route that does not exist parks the feed', async () => {
   for (const status of [503, 404]) {

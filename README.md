@@ -444,8 +444,9 @@ paid plan keeps the same key and every memory.
 - **Keep work and personal apart** — start fresh on the second machine and share
   across instead: *"Share my SAIHM notes on the launch with the agent in
   ./identities/work-agent.json until 17:00 UTC."* A share can
-  be revoked or given an expiry, so the two stay separate. Each side needs the other's
-  identity record, made as below.
+  be revoked or given an expiry, so the two stay separate. The side that shares needs the
+  other's identity record, made as below; the side that reads needs only the sharer's
+  agent ID.
 
 ### Share with a colleague
 
@@ -461,12 +462,15 @@ nothing in it can read, change or erase their memory. Put the file in your proje
 name it when you share, for example *"Share my SAIHM memory about the release runbook with
 the agent in ./identities/qa-agent.json, read-only, until Friday 17:00 UTC."* Your agent
 gives the file to SAIHM, which reads the record from it. A full path is surest: a relative
-one is read from the folder the SAIHM server runs in. To read what you share, their agent
-needs your identity record too, made the same way, and the memory's cellId, which arrives
-with the share. If the file reaches you by a channel someone else could change, check the
-agent ID with your colleague another way and give it to your agent with the share: SAIHM
-then refuses a file that names a different one. The record is not the `export-identity`
-file: never send that one to anyone.
+one is read from the folder the SAIHM server runs in. If the file reaches you by a channel
+someone else could change, check the agent ID with your colleague another way and give it
+to your agent with the share: SAIHM then refuses a file that names a different one. The
+record is not the `export-identity` file: never send that one to anyone.
+
+To read what you share, your colleague's agent needs only your agent ID and the memory's
+cellId, which arrives with the share. Send them your agent ID yourself: the
+`identity-record` command prints it. SAIHM checks the memory against that agent ID before
+it opens it, and shows it as another agent's memory, never as one of theirs.
 
 ## Hosted agent environments
 
@@ -713,13 +717,13 @@ await saihm.share({
 await saihm.revokeShare(cellId, recipientPinnedAgentIdHashHex);
 
 // Read a cell another agent shared TO you (the recipient side of `share`). Pin the
-// sharer's agentIdHash out-of-band; the library verifies the sharer's signature and
-// returns null when there is no live grant (e.g. revoked, or the sharer crypto-shredded it).
+// sharer's agentIdHash out-of-band; the library checks the key that comes with the cell
+// against it, verifies the sharer's signature and returns null when there is no live
+// grant (e.g. revoked, or the sharer crypto-shredded it).
 const shared = await saihm.recallShared({
-  sharerPinnedAgentIdHashHex, // the sharer's agentIdHash, pinned out-of-band
-  sharerRecord, // the sharer's published identity record (hex)
+  sharerPinnedAgentIdHashHex, // the sharer's agentIdHash, as they gave it to you
   cellId,
-});
+}); // optional: sharerRecord, the sharer's identity record (hex), which must match the pin
 console.log(shared?.plaintext);
 
 // Operator-observable metadata only (no plaintext).

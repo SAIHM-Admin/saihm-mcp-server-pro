@@ -5,7 +5,8 @@ All notable changes to `@saihm/mcp-server-pro` are documented here. This project
 ## [0.14.3] — 2026-10-27
 
 Sharing now works from any AI client: one command writes the identity record a colleague
-needs, and `saihm_share` reads it from that file. Recall is faster for every key file,
+needs, `saihm_share` reads it from that file, and a colleague reads what you share with
+your agent ID alone. Recall is faster for every key file,
 wherever it is kept, and new sessions on a device reuse its sign-in. Fixes for erased
 memories, waiting joins, the sign-in limit and long endpoint addresses. No tool added or
 removed.
@@ -14,9 +15,8 @@ removed.
 
 - **`identity-record`.** `npx -y @saihm/mcp-server-pro identity-record [FILE]` writes
   your public identity record, your agent ID and public keys, to a file or to stdout,
-  for a colleague whose agent shares memories with you or reads the ones you share. It
-  holds no secret and asks the endpoint nothing. The README's "Share with a colleague"
-  shows how.
+  for a colleague whose agent shares memories with you. It holds no secret and asks the
+  endpoint nothing. The README's "Share with a colleague" shows how.
 - **`saihm_share` reads the record file.** A new optional input, `recipientRecordFile`,
   takes the path of the file `identity-record` writes, best in full: a relative path is
   read from the server's working directory. SAIHM reads the record and the agent ID from
@@ -25,6 +25,14 @@ removed.
   match the file's agent ID. Only a regular file of up to 64 KB holding exactly that record
   is read, its record is checked before anything is shared, and a refusal never shows what
   is in the file. An inline `recipientRecord` works as before.
+- **Read a shared memory with the sharer's agent ID.** `saihm_recall` no longer needs the
+  sharer's identity record: pass their agent ID as `sharerPinnedAgentIdHashHex` with the
+  memory's `cellId`, and the agent no longer copies about 13 KB of keys into the call.
+  SAIHM checks the key that comes with the memory against that agent ID before it uses it.
+  A `sharerRecord` given too still works and must hold the same key (`sharer_key_mismatch`
+  otherwise), and an agent ID that is not 64 lowercase hex is refused before any request.
+  A recall's list of memories shared with you now asks for the sharer's agent ID as you
+  received it from them, not as listed.
 - **`CASE-STUDY.md`.** A worked case study of three agent roles doing a quarter of
   regulated work ships with the package, linked from the README's "Things to say".
 

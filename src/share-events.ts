@@ -591,7 +591,7 @@ export class ShareEventsFeed {
     return !this.capped && !this.pendingReconcile && !this.warm && this.since !== null;
   }
 
-  /** The client read the cell and checked the sharer's signature against a pinned record. */
+  /** The client read the cell and checked the sharer's signatures with the key its pinned agent ID binds. */
   markSenderVerified(sharer: string, cellId: string): void {
     const e = this.entries.get(keyOf(sharer, cellId));
     if (e && !e.senderVerified) { e.senderVerified = true; this.changed(); }

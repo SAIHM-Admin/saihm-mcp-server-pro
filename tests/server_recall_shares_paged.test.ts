@@ -175,6 +175,8 @@ test('a page: shared, next, sharedSkipped, total, asOf; sharedTruncated and shar
     assert.match(lines[0]!, /^SHARED WITH YOU, ONE PAGE: 20 unverified pointer\(s\) — no content, nothing below is authenticated; more pages follow$/);
     assert.equal(lines.filter((l) => l.startsWith('  ! POINTER ')).length, 16);
     assert.ok(lines.includes('  ! …and 4 more withheld from this list.'));
+    // The two footer lines (0.14.3): a read takes the sharer's agent ID as the user gave it, and the cellId; no record.
+    assert.match(first.text, /^ {2}! To read one, pass sharerPinnedAgentIdHashHex \+ cellId, with the sharer's agent ID as your user\n {2}! gave it, not as listed here\. Until then these are claims, not memories\.$/m);
     assert.equal(lines.at(-1), `  ! NEXT after=${s.next}`, '...is shown exactly, on the fenced NEXT line');
     assert.ok(lines.slice(1).every((l) => l.startsWith('  ! ')), 'every line but the banner is fenced as the endpoint\'s claim');
     const last = await d.call('saihm_recall', { sharesOnly: true, after: s.next });

@@ -169,11 +169,13 @@ Three things to tell the user, in your own words:
    identity on the second machine plus `saihm_share` (which takes an optional
    `expiryEpoch` in whole hours since the UNIX epoch, e.g. `498192` for
    2026-11-01 00:00 UTC) keeps work and personal apart, and a share can be revoked where
-   a copied key cannot. Each side needs the other's identity record, which
+   a copied key cannot. The sharing side needs the other's identity record, which
    `npx -y @saihm/mcp-server-pro identity-record <file>` writes: public keys and the agent
    ID only, safe to send. `saihm_share` takes the file's full path as `recipientRecordFile`
    (or its `identityRecord` as `recipientRecord` and its `agentIdHash` as
-   `recipientPinnedAgentIdHashHex`). If they want the SAME memory there, have them run
+   `recipientPinnedAgentIdHashHex`). The reading side needs only the sharer's agent ID, as
+   the user gives it, and the memory's cellId: `saihm_recall` takes them as
+   `sharerPinnedAgentIdHashHex` and `cellId`. If they want the SAME memory there, have them run
    `npx -y @saihm/mcp-server-pro export-identity` on the machine that holds the
    key, with the same `SAIHM_*` settings their MCP client uses there (on a paid
    plan, `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`), and set the two values it

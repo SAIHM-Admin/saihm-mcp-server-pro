@@ -362,16 +362,20 @@ test('a partly given shared read still fails loud, and a value of the wrong type
     SAIHM_SELF_JOIN: '0',
   });
   try {
-    const together = /provide sharerPinnedAgentIdHashHex, sharerRecord, and cellId together/;
+    const together = /provide sharerPinnedAgentIdHashHex and cellId together; sharerRecord is optional\./;
     for (const args of [
       { sharerPinnedAgentIdHashHex: '', sharerRecord: { mldsaPubKey: 'aa', mlkemPubKey: '', mlkemPubKeySelfSig: '' }, cellId: '' },
-      { sharerPinnedAgentIdHashHex: HEX('cd'), sharerRecord: { mldsaPubKey: '', mlkemPubKey: '', mlkemPubKeySelfSig: '' }, cellId: HEX('ab') },
       { sharerPinnedAgentIdHashHex: HEX('cd'), sharerRecord: null, cellId: '  ' },
     ]) {
       const r = await d.call('saihm_recall', args);
       assert.equal(r.isError, true, JSON.stringify(args));
       assert.match(r.text ?? '', together, JSON.stringify(args));
     }
+    // A blank record is absent, and since 0.14.3 a pin and a cellId need no record: this one is a shared read by agent
+    // ID, so it goes to the endpoint (unreachable here) instead of being refused as a partial one.
+    const byId = await d.call('saihm_recall', { sharerPinnedAgentIdHashHex: HEX('cd'), sharerRecord: { mldsaPubKey: '', mlkemPubKey: '', mlkemPubKeySelfSig: '' }, cellId: HEX('ab') });
+    assert.equal(byId.isError, true);
+    assert.doesNotMatch(byId.text ?? '', together);
     // Blank sharer fields are absent, so a cellId beside them is an own-cell read: it goes to the endpoint (unreachable
     // here) instead of being refused as a partial shared read.
     const own = await d.call('saihm_recall', { sharerPinnedAgentIdHashHex: null, sharerRecord: null, cellId: HEX('ab') });
