@@ -44,7 +44,8 @@ removed.
   new or has changed, so it is faster and uses fewer reads. The copy stays on your
   device, in `~/.saihm` (or `SAIHM_HOME`), readable only by your user account. To keep
   no copy, set `SAIHM_RECALL_CACHE` to `0` in every AI client and app that runs SAIHM
-  with your key on this device, as before. An identity token or an inline secret keeps
+  with your key on this device, as before, and delete the copy already written: the
+  README's "How it works" has the steps. An identity token or an inline secret keeps
   no copy unless you set one up, and neither does any identity where the
   home is temporary or kept for later jobs: in a hosted agent session, on the CI runners
   SAIHM recognizes (the REFERENCE lists them), and wherever `SAIHM_EPHEMERAL_HOME=1` is
