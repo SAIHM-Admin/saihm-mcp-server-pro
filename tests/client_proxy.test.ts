@@ -16,10 +16,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { proxyForTarget, SaihmProClient, untrustedCertificate, unusableProxy } from '../src/client.js';
+import { failText } from '../src/render_fence.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TSX = resolve(HERE, '../node_modules/.bin/tsx');
 const CLIENT = resolve(HERE, '../src/client.ts');
+const RENDER = resolve(HERE, '../src/render_fence.ts');
 
 const VARS = ['https_proxy', 'HTTPS_PROXY', 'http_proxy', 'HTTP_PROXY', 'no_proxy', 'NO_PROXY'] as const;
 function withEnv<T>(overrides: Partial<Record<(typeof VARS)[number], string>>, fn: () => T): T {
@@ -195,16 +197,23 @@ async function rig(certName: string, dir: string, deny: string | null = null, pr
  * Run client calls in a child (which trusts the throwaway CA when told to); return what it printed.
  * `onboard` makes it a self-onboarding client, so the first request is the onboard path's.
  */
-function callThrough(dir: string, env: Record<string, string>, opts: { calls?: number; onboard?: boolean } = {}): Promise<string> {
+function callThrough(
+  dir: string,
+  env: Record<string, string>,
+  opts: { calls?: number; onboard?: boolean; endpoint?: string; rendered?: boolean } = {},
+): Promise<string> {
   const script = join(dir, 'call.mts');
   const auth = opts.onboard ? 'undefined' : "'Bearer test-token'";
   const extra = opts.onboard ? ", paymentMethod: 'stripe'" : '';
+  // `rendered`: the error as a tool result shows it (the fence applied), rather than its whole message.
+  const shown = opts.rendered ? 'failText(e)' : 'String(e && e.message)';
   writeFileSync(
     script,
     `import { SaihmProClient } from ${JSON.stringify(CLIENT)};\n` +
-      `const c = new SaihmProClient('https://saihm.test/mcp', ${auth}, new Uint8Array(32).fill(7), { tier: 'PRO', requestTimeoutMs: 8000${extra} });\n` +
+      `import { failText } from ${JSON.stringify(RENDER)};\n` +
+      `const c = new SaihmProClient(${JSON.stringify(opts.endpoint ?? 'https://saihm.test/mcp')}, ${auth}, new Uint8Array(32).fill(7), { tier: 'PRO', requestTimeoutMs: 8000${extra} });\n` +
       `for (let i = 0; i < ${opts.calls ?? 1}; i++) {\n` +
-      `  try { await c.status(); console.log('CALL_OK'); } catch (e) { console.log('CALL_ERR ' + String(e && e.message)); }\n` +
+      `  try { await c.status(); console.log('CALL_OK'); } catch (e) { console.log('CALL_ERR ' + ${shown}); }\n` +
       `}\n` +
       `process.exit(0);\n`,
   );
@@ -958,6 +967,74 @@ test('a proxy that cannot be reached is named as the variable read: https_proxy 
     assert.match(upper.onboard, /could not be reached through the proxy in HTTPS_PROXY\./, upper.onboard);
     for (const m of [upper.call, upper.onboard]) assert.doesNotMatch(m, /https_proxy/, m);
   } finally {
+    for (const k of VARS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});
+
+test('0.14.3: a long SAIHM_ENDPOINT_URL never cuts the remedy: the untrusted-certificate warning stays whole', { skip: !haveOpenssl() && 'openssl not available' }, async () => {
+  // The endpoint used to share one fence with the reason and the remedy after it, so a long enough path cut "Never
+  // disable certificate checks" off the rendered error. It now opens the message as this package's own text, fenced
+  // apart: a long endpoint is cut there, visibly, and the remedy after it is whole.
+  const dir = mkdtempSync(join(tmpdir(), 'saihm-proxy-long-'));
+  const ok = await rig('saihm.test', dir);
+  try {
+    const endpoint = `https://saihm.test/${'tenant-path/'.repeat(30)}mcp`;
+    const shown = await callThrough(dir, { HTTPS_PROXY: `http://127.0.0.1:${ok.proxyPort}` }, { endpoint, rendered: true });
+    const remedy = "Never disable certificate checks; if TLS is inspected here, set NODE_EXTRA_CA_CERTS to a file of the network admin's CA certificate.";
+    assert.match(shown, /^CALL_ERR SAIHM error \[network\] \(status 0\): SAIHM endpoint saihm_status could not reach https:\/\/saihm\.test\/tenant-path\//, shown);
+    assert.ok(shown.trim().endsWith(`(UNABLE_TO_VERIFY_LEAF_SIGNATURE). ${remedy}`), shown);
+    assert.ok(shown.includes('\u2026 (UNABLE_TO_VERIFY_LEAF_SIGNATURE)'), 'the endpoint is cut, and the cut is marked');
+    // The message itself is whole, as library callers read it.
+    const whole = await callThrough(dir, { HTTPS_PROXY: `http://127.0.0.1:${ok.proxyPort}` }, { endpoint });
+    assert.ok(whole.includes(`could not reach ${endpoint} (UNABLE_TO_VERIFY_LEAF_SIGNATURE). ${remedy}`), whole);
+    assert.equal(ok.requests.length, 0);
+  } finally {
+    await ok.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('0.14.3: a long SAIHM_ENDPOINT_URL never cuts the remedy, with the recall copy off or on', async () => {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of VARS) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'saihm-long-endpoint-'));
+  try {
+    // Loopback, so never proxied; nothing listens on port 9.
+    const endpoint = `https://127.0.0.1:9/${'p'.repeat(400)}/mcp`;
+    const remedy = 'If hosted, allow that host in its network settings; to use a proxy, set HTTPS_PROXY and check NO_PROXY.';
+    const off = await new SaihmProClient(endpoint, 'Bearer t', new Uint8Array(32).fill(7), { tier: 'PRO' }).status().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    const offText = failText(off);
+    assert.ok(offText.endsWith(`\u2026 (ECONNREFUSED). ${remedy}`), offText);
+    assert.ok((off as Error).message.includes('p'.repeat(400)), 'the message itself names the endpoint whole');
+    // A copy that holds a memory, so the recall checks it against the service first (an empty copy is a full recall).
+    const copy = join(dir, 'copy.json');
+    writeFileSync(copy, JSON.stringify({ c1: { cellId: 'c1', plaintext: 'held', seq: '1', commitmentHash: 'ab'.repeat(32) } }), { mode: 0o600 });
+    const on = await new SaihmProClient(endpoint, 'Bearer t', new Uint8Array(32).fill(7), { tier: 'PRO', recallCachePath: copy })
+      .recall()
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    const onText = failText(on);
+    assert.match(onText, /^SAIHM error \[network\] \(status 0\): Recall stopped: this device's copy of your memories could not be checked/, onText);
+    assert.ok(onText.endsWith(`\u2026 (ECONNREFUSED). ${remedy}`), onText);
+    // Positive control: a short endpoint renders whole, with no cut marker, as before.
+    const short = await new SaihmProClient('https://127.0.0.1:9/mcp', 'Bearer t', new Uint8Array(32).fill(7), { tier: 'PRO' }).status().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    assert.equal(failText(short), `SAIHM error [network] (status 0): SAIHM endpoint saihm_status could not reach https://127.0.0.1:9/mcp (ECONNREFUSED). ${remedy}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
     for (const k of VARS) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];

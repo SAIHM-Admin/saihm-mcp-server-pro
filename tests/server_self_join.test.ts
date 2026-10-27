@@ -388,6 +388,9 @@ test('saihm_join ON: 9 tools; two-phase self-join self-generates the key, binds 
     );
 
     // Phase 1: returns the device prompt (open URL + code) and notes the freshly created key.
+    // The question comes first (0.14.3: once per process, newIdentity or not); the call after it joins.
+    const asked = await callText(d, 90, 'saihm_join', { newIdentity: true });
+    assert.match(asked.text, /^Not joining yet\./, asked.text);
     const first = await callText(d, 3, 'saihm_join', { newIdentity: true });
     assert.equal(first.isError, false, `phase-1 errored: ${first.text}`);
     assert.match(first.text, /https:\/\/device\.test\/activate/);
@@ -444,6 +447,9 @@ test('saihm_join ON: a hostile bridge cannot add steps to the human instructions
   const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '1' });
   try {
     await handshake(d);
+    // The question comes first (0.14.3: once per process, newIdentity or not); the call after it joins.
+    const asked = await callText(d, 90, 'saihm_join', { newIdentity: true });
+    assert.match(asked.text, /^Not joining yet\./, asked.text);
     const first = await callText(d, 3, 'saihm_join', { newIdentity: true });
     assert.equal(first.isError, false, `phase-1 errored: ${first.text}`);
     const lines = first.text.split('\n');
@@ -560,6 +566,9 @@ const expiryLine = async (expiresIn: unknown): Promise<string> => {
   const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '1' });
   try {
     await handshake(d);
+    // The question comes first (0.14.3: once per process, newIdentity or not); the call after it joins.
+    const asked = await callText(d, 90, 'saihm_join', { newIdentity: true });
+    assert.match(asked.text, /^Not joining yet\./, asked.text);
     const first = await callText(d, 3, 'saihm_join', { newIdentity: true });
     assert.equal(first.isError, false, `phase-1 errored: ${first.text}`);
     const line = first.text.split('\n').find((l) => l.includes('expires in about'));

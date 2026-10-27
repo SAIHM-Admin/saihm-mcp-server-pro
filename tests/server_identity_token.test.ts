@@ -355,6 +355,38 @@ test('saihm_join asks before minting: without newIdentity it returns the questio
   }
 });
 
+test('0.14.3: newIdentity: true on the first call is answered with the question too, and only a call after it mints', async () => {
+  // An agent passed newIdentity: true at once, without asking whether the user already had an identity (plugin
+  // customer test). The server now asks first in every case: a key is created only by a call after the question.
+  const home = tempHome('q2');
+  try {
+    await withMock({}, async (m) => {
+      const d = await startServer({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: m.base() + '/mcp', SAIHM_EPHEMERAL_HOME: '0' });
+      try {
+        const asked = await d.call('saihm_join', { newIdentity: true });
+        assert.equal(asked.isError, false);
+        assert.match(asked.text, /^Not joining yet\. A join creates a NEW, EMPTY memory, so first ask the operator:/);
+        assert.match(asked.text, /If they have none and this home is kept: call saihm_join again with newIdentity: true\.$/);
+        assert.ok(!existsSync(join(home, KEY)), 'the first call mints nothing');
+        assert.equal(m.joinStarts(), 0, 'and starts no approval');
+        // Without newIdentity, still nothing.
+        assert.match((await d.call('saihm_join', {})).text, /^Not joining yet\./);
+        assert.ok(!existsSync(join(home, KEY)));
+        // The call after the question, with newIdentity: true, joins.
+        const go = await d.call('saihm_join', { newIdentity: true });
+        assert.equal(go.isError, false, go.text);
+        assert.match(go.text, /ABCD-1234/);
+        assert.ok(existsSync(join(home, KEY)), 'a confirmed join mints the key');
+        assert.equal(m.joinStarts(), 1);
+      } finally {
+        d.proc.kill();
+      }
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('saihm_join will not mint where the home is marked temporary, and only the operator can say otherwise', async () => {
   for (const [env, variable] of [
     [{ CLAUDE_CODE_REMOTE: 'true' }, 'CLAUDE_CODE_REMOTE'],
@@ -396,6 +428,8 @@ test('saihm_join will not mint where the home is marked temporary, and only the 
       await withMock({}, async (m) => {
         const d = await startServer({ SAIHM_HOME: home, SAIHM_ENDPOINT_URL: m.base() + '/mcp', ...env });
         try {
+          // The question first (0.14.3: asked once per process, newIdentity or not), then the join.
+          assert.match((await d.call('saihm_join', { newIdentity: true })).text, /Do you already have a SAIHM identity/, JSON.stringify(env));
           assert.match((await d.call('saihm_join', { newIdentity: true })).text, /ABCD-1234/, JSON.stringify(env));
         } finally {
           d.proc.kill();
@@ -484,7 +518,8 @@ test('free-join refuses in a temporary home; a flag cannot override it, the oper
 
 test('a refused onboard names its reason and, for the two configuration reasons, what to set', async () => {
   for (const [reason, remedy] of [
-    ['no_free_entitlement', /Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for its plan/],
+    // 0.14.3 (O22): the waiting join first, then the paid plan's variables.
+    ['no_free_entitlement', /\(verification_failed: no_free_entitlement\) A free join may still be waiting for approval: open its link and enter its code, or say "Join SAIHM"\. Paid plan\? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for it\.$/],
     ['no_active_subscription', /Check that SAIHM_TIER names the plan this identity was bought on/],
   ] as const) {
     const home = tempHome('n');
@@ -929,8 +964,10 @@ test('a SAIHM_HOME with the shape of a key is never printed: boot refuses it by 
       // Since batch 7 boot itself refuses such a home, before anything is written under it (security R6 F1); the
       // memory tools named "the default key file (not there)" here before.
       assert.match(r.text, /^SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory, so nothing is written there\. Fix SAIHM_HOME, then start a new session\./, r.text);
+      // From 0.14.3 the join answers with this gate before its question, as with the temporary-home one: it answers
+      // whatever the user says, so asking first would only add a turn.
       const q = await d.call('saihm_join', {});
-      assert.match(q.text, /Does this environment keep its home directory between sessions\?/);
+      assert.match(q.text, /^SAIHM_HOME holds what looks like a key, passphrase or token rather than a directory, so no key is created there\./, q.text);
       for (const t of [r.text, q.text]) assert.ok(!t.includes(pass));
     } finally {
       d.proc.kill();

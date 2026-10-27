@@ -79,6 +79,12 @@ interface Hosted {
   rowsFault?: (kind: 'delta' | 'all', rows: unknown[]) => unknown[];
   /** Replaces the answer to a remember, before anything is stored. */
   rememberFault?: () => Answer | undefined;
+  /**
+   * The hosted change that keeps an erased id spent (0.14.3 assumes its shape): every later write to an id that was
+   * erased is refused with the existing stale refusal, 409 `{"error":"BLIND_STALE_SEQ"}`, whatever its sequence number.
+   * Off, a write past the erased memory's number is stored, as on the service before that change.
+   */
+  keepErasedSpent: boolean;
   /** Replaces the answer to a forget, before anything is erased. */
   forgetFault?: () => Answer | undefined;
   /** Awaited once a remember is stored and before its answer is sent. */
@@ -105,6 +111,8 @@ const commitmentOf = (w: WireEnvelope): string => createHash('sha256').update(Bu
 async function hosted(): Promise<Hosted> {
   const store = new Map<string, WireEnvelope>();
   const hwm = new Map<string, bigint>();
+  /** Ids erased while they held a memory (see `keepErasedSpent`). */
+  const spent = new Set<string>();
   let charged = 0;
   let calls = 0;
   let cap = Infinity;
@@ -131,6 +139,7 @@ async function hosted(): Promise<Hosted> {
       if (faulted) return faulted;
       const wire = params.wire as WireEnvelope;
       if (wire.publicMeta.commitmentHash.toLowerCase() !== commitmentOf(wire)) return { status: 400, body: { error: 'verify_failed' } };
+      if (h.keepErasedSpent && spent.has(wire.cellId)) return { status: 409, body: { error: 'BLIND_STALE_SEQ' } };
       const seq = BigInt(wire.seq);
       if (seq <= (hwm.get(wire.cellId) ?? 0n)) return { status: 409, body: { error: 'BLIND_STALE_SEQ', reason: 'seq <= high-water mark' } };
       hwm.set(wire.cellId, seq);
@@ -143,6 +152,7 @@ async function hosted(): Promise<Hosted> {
       const faulted = h.forgetFault?.();
       if (faulted) return faulted;
       const id = params.id as string;
+      if (store.has(id)) spent.add(id);
       store.delete(id);
       return { status: 200, body: { cellId: id, shardId: 's', complete: true, destructionAnchor: 'anchor-1', sharesPurged: 0, steps: [], epoch: '1' } };
     }
@@ -237,6 +247,7 @@ async function hosted(): Promise<Hosted> {
       cap = charged + n;
     },
     listing: 'on',
+    keepErasedSpent: false,
     pageSize: 1000,
     seqNull: new Set<string>(),
     unkeyed: new Set<string>(),
@@ -474,18 +485,30 @@ describe('PC-RECALL-VERSIONS: what a recall with the copy on reads', () => {
     }
   });
 
-  it('a cell listed with seq null is read at every recall, as the version it is (no mark to check it against)', async () => {
+  it('0.14.3: a cell listed with seq null at the commitment the copy holds is known at the copy\'s own number, not read again', async () => {
+    // It was read at every recall, and charged each time, though the commitment already names the very ciphertext the
+    // copy opened, whose seal binds its number.
     const h = await hosted();
     try {
       const { A, B, ids } = await twoComputers(h);
       for (const id of ids) h.seqNull.add(id);
       const same = await measured(h, () => A.recall());
-      assert.deepEqual(same.requests, ['list', `delta(0)+${ids.join(',')}`], 'seq null: never known, so read');
-      assert.equal(same.charged, 4, 'the listing page and each cell read');
+      assert.deepEqual(same.requests, ['list', 'delta(3)+'], 'seq null at the copy\'s commitment: known, so not read');
+      assert.equal(same.charged, 1, 'the listing page alone');
+      assert.deepEqual(same.value.map((c) => c.plaintext).sort(), ['memory 0 v1', 'memory 1 v1', 'memory 2 v1']);
       await B.remember('memory 2 v2, edited on B', { cellId: ids[2]! });
       const changed = await measured(h, () => A.recall());
-      assert.deepEqual(changed.requests, ['list', `delta(0)+${ids.join(',')}`]);
+      assert.deepEqual(changed.requests, ['list', `delta(2)+${ids[2]}`], 'another commitment: read, as with a number');
       assert.equal(text(changed.value, ids[2]!), 'memory 2 v2, edited on B');
+      // The mark it takes is the copy's number, so an edit built on the answer is checked as with a stated number:
+      // stored when nothing was written since...
+      assert.equal(await editFrom(A, same.value, ids[0]!, 'edited on A'), 'stored', 'no false refusal');
+      assert.equal(await truth(h, ids[0]!), 'memory 0 v1 + edited on A');
+      // ...and refused when another device wrote since, never stored over that version.
+      const seen = await A.recall();
+      await B.remember('memory 1 v2, edited on B after A recalled', { cellId: ids[1]! });
+      assert.equal(await editFrom(A, seen, ids[1]!, 'from before'), 'refused 409 BLIND_STALE_SEQ');
+      assert.equal(await truth(h, ids[1]!), 'memory 1 v2, edited on B after A recalled');
     } finally {
       await h.close();
     }
@@ -1009,7 +1032,7 @@ describe('PC-RECALL-VERSIONS: an edit built on an older version is refused with 
     });
   }
 
-  it('a cell listed with no sequence number, or a lower one than the copy holds, is read and marked from its own version', async () => {
+  it('a cell listed with a lower sequence number than the copy holds is read and marked from its own version; one with none is known at the copy\'s', async () => {
     const h = await hosted();
     try {
       const { pathA, ids } = await twoComputers(h);
@@ -1020,7 +1043,8 @@ describe('PC-RECALL-VERSIONS: an edit built on an older version is refused with 
       });
       const A2 = computer(h, pathA);
       const r = await measured(h, () => A2.recall());
-      assert.deepEqual(r.requests, ['list', `delta(1)+${ids[0]},${ids[1]}`], 'both are read, the other is known');
+      // 0.14.3: the cell with no number is known at the copy's number; the one with a lower number is read.
+      assert.deepEqual(r.requests, ['list', `delta(2)+${ids[1]}`], 'the lower number is read, the others are known');
       assert.equal(await editFrom(A2, r.value, ids[0]!, 'no change between'), 'stored', 'no false refusal (null seq)');
       assert.equal(await editFrom(A2, r.value, ids[1]!, 'no change between'), 'stored', 'no false refusal (lower seq)');
       const A3 = computer(h, pathA);
@@ -1128,6 +1152,61 @@ const markedComputer = (h: Hosted, marks: string, path?: string): SaihmProClient
  */
 describe('PC-RECALL-VERSIONS: an edit of a memory erased elsewhere says so, and never replaces what it has not seen', () => {
   for (const copy of ['on', 'off'] as const) {
+    it(`copy ${copy}: 0.14.3, the service keeping an erased id spent: an edit of a memory read here and erased elsewhere since is refused as erased`, async () => {
+      // The half only the service can close (the client's own records cannot see an erasure made on another device
+      // that this one was not told of): this device read the memory, so its edit goes at the next number, and the
+      // service stored it, saving the memory again. With the erased id kept spent, the service refuses it with the
+      // existing stale refusal, and the client says it was erased, as it does for every write refused that way.
+      for (const spentKept of [true, false]) {
+        const h = await hosted();
+        try {
+          h.keepErasedSpent = spentKept;
+          const path = copy === 'on' ? copyPath('A') : undefined;
+          const A = computer(h, path);
+          const id = newId();
+          await A.remember('runbook v1', { cellId: id });
+          assert.equal(text(await A.recall(), id), 'runbook v1', 'setup: A read it');
+          await eraseElsewhere(h, id);
+          const first = await measured(h, () => attempt(A, 'runbook v1 + added on A', id));
+          if (!spentKept) {
+            // CONTROL: the service before that change stores the edit, and the erased memory is back.
+            assert.equal(first.value, 'stored', 'control: a write past the erased number is stored');
+            assert.equal(await truth(h, id), 'runbook v1 + added on A', 'control: the memory is back');
+            continue;
+          }
+          assert.ok(first.value instanceof SaihmEndpointError, `the edit was ${String(first.value)}`);
+          assert.equal(failText(first.value), refusal(ERASED));
+          assert.deepEqual(first.requests, [`one:${id}`], 'one read after the refusal tells which text is true');
+          assert.equal(first.charged, 0, 'an erased memory is read without a charge');
+          if (path) assert.ok(!readFileSync(path, 'utf-8').includes('runbook v1'), "the erased memory's text has left the copy");
+          const again = await measured(h, () => attempt(A, 'runbook v1 + added on A', id));
+          assert.equal(failText(again.value), refusedHere(ERASED), 'the same edit again gets the same, true text');
+          assert.deepEqual([again.requests, again.charged], [[], 0], 'refused here: the read found it gone, so nothing is asked');
+          assert.equal(await truth(h, id), undefined, 'nothing was stored under it');
+          // A device that never read it is told the id was used, as before.
+          const C = computer(h, undefined);
+          const used = await attempt(C, 'a note for that id', id);
+          assert.equal(failText(used), refusal(ID_USED));
+          assert.equal(await truth(h, id), undefined);
+          // Saved as a new memory, it is kept.
+          assert.equal(await A.remember('runbook v1 + added on A').then(() => 'stored'), 'stored');
+          // The same refusal for a memory changed elsewhere, not erased, still says it changed: the read after it finds
+          // the newer version, so the stale text is the true one and nothing is recorded gone.
+          const z = newId();
+          await A.remember('rules v1', { cellId: z });
+          assert.equal(text(await A.recall(), z), 'rules v1', 'setup: A read it');
+          await computer(h, undefined).remember('rules v2, edited on B', { cellId: z });
+          const changed = await measured(h, () => attempt(A, 'rules v1 + added on A', z));
+          assert.equal(failText(changed.value), refusal(CHANGED_SINCE));
+          assert.deepEqual(changed.requests, [`one:${z}`]);
+          assert.equal(await truth(h, z), 'rules v2, edited on B', "B's version is kept");
+          assert.equal(await editFrom(A, await A.recall(), z, 'added on A'), 'stored', 'recalled, then edited: stored');
+        } finally {
+          await h.close();
+        }
+      }
+    });
+
     it(`copy ${copy}: edited and then erased elsewhere, the edit here says it was erased, at once and after a recall`, async () => {
       const h = await hosted();
       try {

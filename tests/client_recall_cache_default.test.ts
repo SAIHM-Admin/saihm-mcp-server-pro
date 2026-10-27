@@ -1,19 +1,21 @@
 /**
  * PC-RECALL-CACHE-DEFAULT — where the MCP server's boot path turns the recall cache on by itself.
  *
- * The cache holds plaintext at rest, so the default is deliberately narrow: ON only for an identity that
- * boots from the self-join key file in SAIHM_HOME (the installation that already keeps its key and its
- * sequence marks in that directory), OFF for an inline secret or a key file placed anywhere else, and
- * OFF everywhere when SAIHM_RECALL_CACHE=0 — an explicit SAIHM_RECALL_CACHE_PATH included. A client
- * constructed directly writes nothing unless it asks.
+ * The cache holds plaintext at rest. From 0.14.3 it is ON for an identity that boots from a key FILE: the
+ * self-join key file in SAIHM_HOME, or the file SAIHM_MASTER_SECRET_FILE names wherever it is (the copy
+ * then still lives in SAIHM_HOME, beside the sequence marks). It is OFF for an identity token or an inline
+ * secret, and OFF everywhere when SAIHM_RECALL_CACHE=0 — an explicit SAIHM_RECALL_CACHE_PATH included. A
+ * client constructed directly writes nothing unless it asks.
  */
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { SaihmProClient, defaultRecallCachePath, DEFAULT_ENDPOINT } from '../src/client.js';
+import { generatePassphrase, sealIdentityToken } from '../src/identity-token.js';
+import { deriveIdentity, fromHex, toHex } from '@saihm/client-pro';
 
 const KEYS = [
   'SAIHM_SELF_JOIN',
@@ -97,21 +99,82 @@ test('SAIHM_RECALL_CACHE=0 turns the default off', () => {
   }
 });
 
-test('a key file somewhere else, or an inline secret, leaves the cache off', () => {
+test('0.14.3: a key file somewhere else turns the cache on too, in SAIHM_HOME and not beside that key', () => {
   const home = mkdtempSync(join(tmpdir(), 'saihm-rc-default-'));
   const elsewhere = mkdtempSync(join(tmpdir(), 'saihm-rc-key-'));
   try {
     const keyFile = join(elsewhere, 'agent.key');
     writeFileSync(keyFile, randomBytes(32).toString('hex'), { mode: 0o600 });
     withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile }, () => {
-      assert.equal(cachePathOf(SaihmProClient.bootFromEnv()), undefined);
+      const c = SaihmProClient.bootFromEnv();
+      assert.equal(cachePathOf(c), join(home, `recall.${c.agentIdHash.slice(0, 16)}.json`));
     });
-    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: randomBytes(32).toString('hex') }, () => {
+    // The opt-out is unchanged.
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile, SAIHM_RECALL_CACHE: '0' }, () => {
       assert.equal(cachePathOf(SaihmProClient.bootFromEnv()), undefined);
     });
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test('0.14.3: a key file whose SAIHM_HOME cannot be written keeps no copy, so recall goes on working', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'permissions are not enforced here' }, () => {
+  // A copy that cannot be written fails the recall it belongs to. A key kept elsewhere is how a container mounts a
+  // secret beside a home nobody may write; the standard key in a home mounted read-only is the same case. Measured on
+  // 0.14.2: the standard key there failed every recall EACCES. The default now asks first whether the folder can be
+  // written, or made.
+  const base = mkdtempSync(join(tmpdir(), 'saihm-rc-ro-'));
+  const home = join(base, 'home');
+  const elsewhere = join(base, 'secrets');
+  mkdirSync(home, { mode: 0o700 });
+  mkdirSync(elsewhere, { mode: 0o700 });
+  try {
+    const keyFile = join(elsewhere, 'agent.key');
+    writeFileSync(keyFile, randomBytes(32).toString('hex'), { mode: 0o600 });
+    writeFileSync(join(home, 'free-identity.key'), randomBytes(32).toString('hex'), { mode: 0o600 });
+    chmodSync(home, 0o500);
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile }, () => {
+      assert.equal(cachePathOf(SaihmProClient.bootFromEnv()), undefined, 'a key kept elsewhere');
+    });
+    withEnv({ SAIHM_HOME: home }, () => {
+      assert.equal(cachePathOf(SaihmProClient.bootFromEnv()), undefined, 'the standard key');
+    });
+    // Positive controls: the same homes, writable, or not made yet under a writable folder, turn it on.
+    chmodSync(home, 0o700);
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile }, () => {
+      assert.ok(cachePathOf(SaihmProClient.bootFromEnv())?.startsWith(join(home, 'recall.')));
+    });
+    withEnv({ SAIHM_HOME: join(base, 'not-made-yet'), SAIHM_MASTER_SECRET_FILE: keyFile }, () => {
+      assert.ok(cachePathOf(SaihmProClient.bootFromEnv())?.startsWith(join(base, 'not-made-yet', 'recall.')));
+    });
+    // An explicit path is the operator's: it is used whatever the folder, as before.
+    chmodSync(home, 0o500);
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile, SAIHM_RECALL_CACHE_PATH: join(elsewhere, 'c.json') }, () => {
+      assert.equal(cachePathOf(SaihmProClient.bootFromEnv()), join(elsewhere, 'c.json'));
+    });
+  } finally {
+    chmodSync(home, 0o700);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('an inline secret, or an identity token, leaves the cache off', () => {
+  const home = mkdtempSync(join(tmpdir(), 'saihm-rc-default-'));
+  try {
+    const hex = randomBytes(32).toString('hex');
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: hex }, () => {
+      assert.equal(cachePathOf(SaihmProClient.bootFromEnv()), undefined);
+    });
+    const passphrase = generatePassphrase();
+    const token = sealIdentityToken({ secretHex: hex, tier: 'FREE', paymentMethod: undefined }, toHex(deriveIdentity(fromHex(hex)).agentIdHash), passphrase);
+    withEnv({ SAIHM_HOME: home, SAIHM_IDENTITY: token, SAIHM_IDENTITY_PASSPHRASE: passphrase }, () => {
+      const c = SaihmProClient.bootFromEnv();
+      assert.equal(c.agentIdHash, toHex(deriveIdentity(fromHex(hex)).agentIdHash), 'setup: the token opened');
+      assert.equal(cachePathOf(c), undefined);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -233,12 +296,14 @@ test('an identity with no cache is TOLD so, once, and only when it did not choos
   const home = mkdtempSync(join(tmpdir(), 'saihm-rc-notice-'));
   const elsewhere = mkdtempSync(join(tmpdir(), 'saihm-rc-notice-key-'));
   try {
+    const hex = randomBytes(32).toString('hex');
     const keyFile = join(elsewhere, 'agent.key');
-    writeFileSync(keyFile, randomBytes(32).toString('hex'), { mode: 0o600 });
+    writeFileSync(keyFile, hex, { mode: 0o600 });
 
-    // Off by default because the key came from elsewhere: the subscriber is paying a full fetch on every recall
-    // and had no way to know. Said once — a line per recall would be noise, and noise is ignored.
-    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile }, () => {
+    // Off by default because the key is inline (from 0.14.3 a key file anywhere turns the cache on): the subscriber
+    // is paying a full fetch on every recall and had no way to know. Said once — a line per recall would be noise,
+    // and noise is ignored.
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: hex }, () => {
       const c = SaihmProClient.bootFromEnv();
       const first = stderrDuring(() => { void c.recall().catch(() => undefined); });
       const second = stderrDuring(() => { void c.recall().catch(() => undefined); });
@@ -248,15 +313,19 @@ test('an identity with no cache is TOLD so, once, and only when it did not choos
       assert.equal(second, '', 'said twice');
     });
 
-    // Nothing to tell: a cache is configured.
-    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile, SAIHM_RECALL_CACHE_PATH: join(elsewhere, 'c.json') }, () => {
+    // Nothing to tell: a cache is configured, by its path or by the key file's default.
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: hex, SAIHM_RECALL_CACHE_PATH: join(elsewhere, 'c.json') }, () => {
+      const c = SaihmProClient.bootFromEnv();
+      assert.equal(stderrDuring(() => { void c.recall().catch(() => undefined); }), '');
+    });
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile }, () => {
       const c = SaihmProClient.bootFromEnv();
       assert.equal(stderrDuring(() => { void c.recall().catch(() => undefined); }), '');
     });
 
     // Turned off deliberately: someone who chose this does not need telling, and a notice they cannot act on
     // teaches them to ignore the next one.
-    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_FILE: keyFile, SAIHM_RECALL_CACHE: '0' }, () => {
+    withEnv({ SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: hex, SAIHM_RECALL_CACHE: '0' }, () => {
       const c = SaihmProClient.bootFromEnv();
       assert.equal(stderrDuring(() => { void c.recall().catch(() => undefined); }), '');
     });

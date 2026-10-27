@@ -54,8 +54,9 @@
  *                           at their listed version, cutting a recall from O(all cells) to O(new or
  *                           changed). Holds plaintext at rest. The MCP server's boot
  *                           path turns the cache ON by default at `dirname(defaultIdentityPath())/
- *                           recall.<id>.json` when this identity boots from that default key file;
- *                           set this to relocate it or to enable it for any other identity source.
+ *                           recall.<id>.json` when this identity boots from a key file (the default
+ *                           one, or SAIHM_MASTER_SECRET_FILE's; 0.14.3); set this to relocate it or to
+ *                           enable it for an identity token or an inline secret.
  *   SAIHM_RECALL_CACHE      `0` turns the recall cache off, default and explicit path alike.
  *
  * Concurrency: writes to DISTINCT cells are safe to run concurrently. Concurrent updates to the
@@ -73,7 +74,9 @@ import type { Duplex, Transform } from 'node:stream';
 import { Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import {
+  accessSync,
   closeSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -307,8 +310,21 @@ function retryAfterWait(res: { headers: { get(name: string): string | null } }):
   const ra = res.headers.get('retry-after')?.trim() ?? '';
   if (!/^[0-9]{1,5}$/.test(ra)) return 'a minute';
   const n = Number(ra);
-  return n === 0 ? 'a moment' : n === 1 ? '1 second' : `${n} seconds`;
+  if (n === 0) return 'a moment';
+  if (n < 60) return n === 1 ? '1 second' : `${n} seconds`;
+  // A wait of a minute or more in minutes, rounded up so the wait said is never shorter than the one asked for: "Wait
+  // 1800 seconds" made the reader do the sum (0.14.3).
+  const m = Math.ceil(n / 60);
+  return m === 1 ? '1 minute' : `${m} minutes`;
 }
+
+/**
+ * How the sign-in's own rate-limit refusal opens: the edge's limit, which sends no body. A user whose identity is
+ * active meets it too, at a session start or when the sign-in renews, so it says "sign in", not "onboard" (0.14.3).
+ * The server tells a join's limit from a memory call's by it. The mint in `onboardFetch` writes it out; a test holds
+ * the two equal.
+ */
+export const SIGN_IN_LIMITED = 'SAIHM could not sign in: too many sign-ins in a short time';
 
 /**
  * The fix for the two onboard refusals that a CONFIGURATION causes, appended to the error.
@@ -321,8 +337,11 @@ function retryAfterWait(res: { headers: { get(name: string): string | null } }):
  */
 function onboardRemedy(status: number, code: string | undefined, reason: string | undefined): string {
   if (status !== 401 || code !== 'verification_failed') return '';
+  // The join comes FIRST (0.14.3, O22): this is what an identity whose free join waits for approval meets, from any
+  // process but the one running the join (that one answers with the join's own steps), and the paid-plan variables
+  // first read as if a new identity were needed. A join run again reuses the key that is there.
   if (reason === 'no_free_entitlement')
-    return ' Paid identity? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for its plan. New free one? Finish Join SAIHM first.';
+    return ' A free join may still be waiting for approval: open its link and enter its code, or say "Join SAIHM". Paid plan? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for it.';
   if (reason === 'no_active_subscription')
     return ' Check that SAIHM_TIER names the plan this identity was bought on.';
   return '';
@@ -1774,7 +1793,8 @@ export function ownOpeningOf(e: SaihmEndpointError): string | undefined {
 
 /**
  * The message of the cause an error carries after this package's opening (see {@link ownOpeningOf}), or the error's
- * own message when it carries none. For a reader that tells causes apart by how their message begins.
+ * own message when it carries none. For a reader that tells causes apart by how their message begins. A cause whose
+ * own opening was folded into this one (see `withOpening`) is read after both: none that reader checks has one.
  */
 export function causeMessageOf(e: SaihmEndpointError): string {
   const opening = ownOpeningOf(e);
@@ -1793,6 +1813,23 @@ function withOpening(opening: string, cause: unknown, otherwise: string): SaihmE
   const why = cause instanceof Error ? String(cause.message) : otherwise;
   const sentence = /^[a-z]/.test(why) ? why.charAt(0).toUpperCase() + why.slice(1) : why;
   const err = new SaihmEndpointError(e?.status ?? 0, e?.code, `${opening} ${sentence}`);
+  // A cause that opens with this package's own text keeps it ours (0.14.3): the two openings are fenced as one, before
+  // the rest of the cause, so the endpoint a transport failure's opening names cannot cut the remedy after it.
+  const inner = e === undefined ? undefined : ownOpeningOf(e);
+  const own = inner !== undefined && sentence.startsWith(`${inner} `) ? `${opening} ${inner}` : opening;
+  Object.defineProperty(err, OWN_OPENING, { value: own, enumerable: false });
+  return err;
+}
+
+/**
+ * A call's transport failure: `opening` names the call and the endpoint, `rest` the reason and the remedy. The opening
+ * is marked as this package's own (see {@link OWN_OPENING}), so the renderer fences it apart from the rest: a long
+ * SAIHM_ENDPOINT_URL is cut inside the opening and never cuts the remedy, which before 0.14.3 it did (a certificate
+ * this machine does not trust lost "Never disable certificate checks" to a long path). Both parts are this package's
+ * text and the operator's own setting; nothing in either is the endpoint's.
+ */
+function transportFailure(opening: string, rest: string): SaihmEndpointError {
+  const err = new SaihmEndpointError(0, 'network', `${opening} ${rest}`);
   Object.defineProperty(err, OWN_OPENING, { value: opening, enumerable: false });
   return err;
 }
@@ -2246,7 +2283,7 @@ export interface SaihmProClientOpts {
   /**
    * Use {@link defaultRecallCachePath} when `recallCachePath` is not given. Off unless asked for, on
    * the same asymmetry as `persistSeqState`: a directly-constructed client writes nothing. `bootFromEnv`
-   * turns it on for an identity booted from the default key file, unless `SAIHM_RECALL_CACHE=0`.
+   * turns it on for an identity booted from a key file (from 0.14.3, any key file), unless `SAIHM_RECALL_CACHE=0`.
    */
   persistRecallCache?: boolean;
   /**
@@ -2561,9 +2598,10 @@ export function defaultSeqStatePath(agentIdHashHex: string): string {
  * Beside the default key file and the sequence marks, for the reasons given on
  * {@link defaultSeqStatePath}: the cache is identity-scoped, so it moves with the identity or not at
  * all, and it is named by the identity's hash so two identities sharing a home never read each
- * other's cells. The default only applies to an identity that boots from this same default key file
- * — see `bootFromEnv` — because that is the one installation where this process already keeps
- * secret material in this directory.
+ * other's cells. The default applies to an identity that boots from a key file, this default one or
+ * the one SAIHM_MASTER_SECRET_FILE names (0.14.3; before, only this one) — see `bootFromEnv`. For a key
+ * file kept elsewhere the copy is still here, in SAIHM_HOME, beside the sequence marks this process
+ * already keeps here for every identity.
  */
 export function defaultRecallCachePath(agentIdHashHex: string): string {
   return pathJoin(dirname(defaultIdentityPath()), `recall.${agentIdHashHex.slice(0, 16)}.json`);
@@ -2863,6 +2901,22 @@ export function ensureSelfJoinIdentityEnv(): { created: boolean; keyPath: string
   return { created, keyPath };
 }
 
+/**
+ * Whether files can be written in `dir`: it is a folder this process may write in, or it does not exist yet and the
+ * nearest folder above it that does is one (a recursive mkdir would make it). Read at boot, so it is a forecast: a
+ * folder made read-only later is met as before, by the write itself.
+ */
+function dirCanBeWritten(dir: string): boolean {
+  for (let d = dir; ; d = dirname(d)) {
+    try {
+      accessSync(d, fsConstants.W_OK | fsConstants.X_OK);
+      return statSync(d).isDirectory();
+    } catch (e) {
+      if (nodeErrorCode(e) !== 'ENOENT' || dirname(d) === d) return false;
+    }
+  }
+}
+
 /** The identity this process boots, as {@link resolveIdentityFromEnv} found it. */
 export interface ResolvedIdentity {
   /** The master secret. The CALLER owns it and must scrub it (`fill(0)`) when done. */
@@ -2871,8 +2925,13 @@ export interface ResolvedIdentity {
   /** Where `tier` came from, so an export can say whether it is a choice or a default. */
   tierFrom: 'SAIHM_TIER' | 'SAIHM_IDENTITY' | 'default' | 'none';
   paymentMethod: string | undefined;
-  /** Booted from the self-join default key file, which is what the recall-cache default keys on. */
+  /** Booted from the self-join default key file. */
   defaultKey: boolean;
+  /**
+   * Booted from a key FILE, the self-join default or the one `SAIHM_MASTER_SECRET_FILE` names: what the recall-cache
+   * default keys on from 0.14.3 (it keyed on `defaultKey` before). Not an identity token or an inline secret.
+   */
+  keyFile: boolean;
   /** Where it came from: a variable name, or a phrase naming the file. */
   source: string;
 }
@@ -3111,8 +3170,8 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
   // same function, so they cannot disagree, and an operator who points the variable AT the
   // self-join file is told the truth either way.
   const selfJoinIdentity = defaultIdentityPath();
-  // `defaultKey` rides on the same comparison: the recall-cache default below applies only to the
-  // self-join identity file, however this process was pointed at it.
+  // `defaultKey` rides on the same comparison, however this process was pointed at that file. The recall-cache
+  // default keys on `kind` (a key file of either kind) from 0.14.3.
   const secretSource: { label: string; kind: 'path' | 'env'; defaultKey: boolean } = imported
     ? { label: IDENTITY_ENV, kind: 'env', defaultKey: false }
     : secretFile
@@ -3170,6 +3229,7 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
           : 'none',
     paymentMethod: process.env.SAIHM_PAYMENT_METHOD || imported?.paymentMethod,
     defaultKey: secretSource.defaultKey,
+    keyFile: secretSource.kind === 'path',
     source: secretSource.label,
   };
 }
@@ -3754,7 +3814,8 @@ class SeqState {
     // `current + 1`. Weaken the read-path rollback guard and this line stops being safe -- the test
     // named for a replayed envelope below the mark is the one that says so. A third source, a cell a
     // recall answers from the copy, is marked only at the number the copy's own authenticated version
-    // carries and the listing states, and never when a mark above it is held (`knownAtListedVersion`).
+    // carries and the listing states (or leaves unstated, for that very version), and never when a mark above it is
+    // held (`knownAtListedVersion`).
     this.observedLive.add(cellId);
     if (this.hwm.admit(this.agentIdHashHex, cellId, seq)) {
       this.cellIds.add(cellId);
@@ -4418,14 +4479,19 @@ export class SaihmProClient {
     // THE SERVER OPTS IN here too, and only here. Same boundary as the line above: this is the
     // process that performs erasures, so this is the process whose consumer has something to watch.
     opts.ensureErasureFeedDir = true;
-    // THE SERVER OPTS IN to the recall cache too, but by default only for an identity booted from the
-    // default key file in SAIHM_HOME: that installation already keeps the key and its sequence marks in
-    // that directory. An inline secret, or a key file placed elsewhere, means the operator decided where
-    // state lives, so the cache stays off there unless SAIHM_RECALL_CACHE_PATH names a file.
-    // SAIHM_RECALL_CACHE=0 turns it off in every case, an explicit path included.
+    // THE SERVER OPTS IN to the recall cache too, by default for an identity booted from a key FILE: the
+    // self-join default in SAIHM_HOME, or the one SAIHM_MASTER_SECRET_FILE names (0.14.3, a privacy-default
+    // change: before, only the default file). The copy goes in SAIHM_HOME beside the sequence marks, wherever
+    // the key file is. An identity token or an inline secret is how hosted and CI environments carry an
+    // identity, often with a home that is not kept, so the cache stays off there unless
+    // SAIHM_RECALL_CACHE_PATH names a file. SAIHM_RECALL_CACHE=0 turns it off in every case, an explicit
+    // path included.
+    // ONLY WHERE THAT FOLDER CAN BE WRITTEN: a copy that cannot be written fails the recall it belongs to, and a
+    // key file kept elsewhere is how a container mounts a secret beside a home it does not let anyone write. There,
+    // 0.14.2 kept no copy and recalled; so does this. Measured: such a recall failed EACCES with the copy on.
     const recallCacheOff = process.env.SAIHM_RECALL_CACHE === '0';
     if (!recallCacheOff && optRecallCachePath) opts.recallCachePath = optRecallCachePath;
-    else if (!recallCacheOff && id.defaultKey) opts.persistRecallCache = true;
+    else if (!recallCacheOff && id.keyFile && dirCanBeWritten(dirname(defaultIdentityPath()))) opts.persistRecallCache = true;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
     // SAIHM_AUTH_HEADER is OPTIONAL. Unset => self-onboard from SAIHM_MASTER_SECRET_HEX +
@@ -4440,8 +4506,9 @@ export class SaihmProClient {
   /**
    * Say once, on the first recall, that this client is fetching every memory each time.
    *
-   * The cache is deliberately off for an identity whose key did not come from the default file — that operator
-   * decided where state lives, and this cache holds plaintext at rest, so it is not switched on for them. What was
+   * The cache is deliberately off for an identity whose key did not come from a key file (an identity token, or an
+   * inline secret: how hosted and CI environments carry one) — this cache holds plaintext at rest, so it is not
+   * switched on for them. What was
    * missing is that nobody was TOLD: the difference is a recall that fetches only what changed against one that
    * fetches everything, and a subscriber had no way to know which one they were paying for.
    *
@@ -4989,7 +5056,8 @@ export class SaihmProClient {
           throw new SaihmEndpointError(
             429,
             'rate_limited',
-            `SAIHM onboard failed: 429 ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}. Wait ${retryAfterWait(res)}, then try again.`,
+            // Opens with SIGN_IN_LIMITED, written out so the join path's mint sweep names it by its text.
+            `SAIHM could not sign in: too many sign-ins in a short time (429 ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}). Wait ${retryAfterWait(res)}, then try again.`,
           );
         throw new SaihmEndpointError(
           res.status,
@@ -5294,19 +5362,19 @@ export class SaihmProClient {
       }
       const reason = transportReason(e);
       // The endpoint was reached, but its answer cannot be used: no network advice.
+      // The endpoint is named in the OPENING (see `transportFailure`), so a long SAIHM_ENDPOINT_URL is cut there and
+      // never cuts the reason and the remedy after it. The message is the text it always was.
       if (UNUSABLE_ANSWER.has(reason))
-        throw new SaihmEndpointError(
-          0,
-          'network',
-          `SAIHM endpoint ${method} got an answer it cannot use from ${safeEndpoint(this.endpoint)} (${reason}). ` +
+        throw transportFailure(
+          `SAIHM endpoint ${method} got an answer it cannot use from ${safeEndpoint(this.endpoint)}`,
+          `(${reason}). ` +
             (reason === 'REDIRECT_CROSS_ORIGIN'
               ? 'It redirects to another host: set SAIHM_ENDPOINT_URL to the address your operator gives.'
               : 'Check SAIHM_ENDPOINT_URL; if it is right, tell the operator.'),
         );
-      throw new SaihmEndpointError(
-        0,
-        'network',
-        `SAIHM endpoint ${method} could not reach ${safeEndpoint(this.endpoint)} (${reason}). ` +
+      throw transportFailure(
+        `SAIHM endpoint ${method} could not reach ${safeEndpoint(this.endpoint)}`,
+        `(${reason}). ` +
           (untrustedCertificate(reason)
             ? 'Never disable certificate checks; if TLS is inspected here, set NODE_EXTRA_CA_CERTS to a file ' +
               "of the network admin's CA certificate."
@@ -5759,9 +5827,11 @@ export class SaihmProClient {
    * live version and was stored over another device's newer one, where with the copy off it is refused (measured).
    * It cannot refuse a valid edit: the listing's number is the one the endpoint's stale check compares (measured in
    * its source), so an edit at the next number is refused only if a write landed after the listing. A cell listed
-   * with no number, or a number other than the copy's (a version whose number was not yet recorded), or one whose mark
-   * here is higher (an endpoint rolled back below what this identity has seen), is asked for again: read and marked
-   * from its own version, where the read path's rollback check sees it. No pin check is needed: every path that pins
+   * with no number (a version whose number was not yet recorded) is known at the copy's number when its commitment is
+   * the copy's: the commitment pins the ciphertext, and the ciphertext's seal binds the number the copy read from it.
+   * A cell listed with a number other than the copy's, or one whose mark here is higher (an endpoint rolled back below
+   * what this identity has seen), is asked for again: read and marked from its own version, where the read path's
+   * rollback check sees it. No pin check is needed: every path that pins
    * a version here also puts that version in the copy (see `keepInCopy`), and the read path refuses a second envelope
    * at a pinned number, so the copy never holds another version at a number pinned here.
    */
@@ -5770,8 +5840,12 @@ export class SaihmProClient {
     for (const cell of this.recallCache.all()) {
       const v = listed.get(cell.cellId);
       if (v === undefined || v.commitment !== cell.commitmentHash) continue;
-      const seq = seqFromDecimal(v.seq);
-      if (seq === null || seq !== seqFromDecimal(cell.seq)) continue;
+      // A version listed with no number is the copy's own version at the copy's number (0.14.3): the commitment is the
+      // hash of its ciphertext, whose seal binds its number, and the copy took that number from the version it opened.
+      // It was read at every recall instead, and charged each time, though nothing could be learnt from the read.
+      const copySeq = seqFromDecimal(cell.seq);
+      const seq = v.seq === null ? copySeq : seqFromDecimal(v.seq);
+      if (seq === null || seq !== copySeq) continue;
       const mark = this.seq.current(cell.cellId);
       if (mark !== undefined && mark > seq) continue;
       out.push({ cellId: cell.cellId, seq, commitment: v.commitment });

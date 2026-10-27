@@ -292,7 +292,9 @@ async function joinText(extra: Record<string, string>): Promise<string> {
   try {
     await rpc(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } });
     proc.stdin!.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
-    const r = await rpc(2, 'tools/call', { name: 'saihm_join', arguments: { newIdentity: true } });
+    // The question comes first (0.14.3); the call after it joins.
+    await rpc(2, 'tools/call', { name: 'saihm_join', arguments: { newIdentity: true } });
+    const r = await rpc(3, 'tools/call', { name: 'saihm_join', arguments: { newIdentity: true } });
     return String(r.result.content[0].text);
   } finally {
     proc.kill();

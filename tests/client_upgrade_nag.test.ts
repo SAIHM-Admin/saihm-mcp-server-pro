@@ -1063,6 +1063,10 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
         timeout: 30_000,
       });
       assert.match(stdout, /https:\/\/checkout\.stripe\.test\/session\/PRO/);
+      // 0.14.3 (customer F8): the two lines a paid plan needs, as they go into a client's env block, and a check.
+      assert.ok(stdout.includes('\n    "SAIHM_TIER": "PRO",\n    "SAIHM_PAYMENT_METHOD": "stripe"\n'), stdout);
+      assert.match(stdout, /A paid plan needs both: without SAIHM_PAYMENT_METHOD the server does not start\./);
+      assert.match(stdout, /"Show my SAIHM status": it names your plan, and every memory on this key is still there\./);
       // The printed identity is the one derived from the SAME master secret the child booted from.
       const ref = new SaihmProClient(m.base + '/mcp', undefined, masterOf(70), { tier: 'FREE' });
       assert.ok(stdout.includes(ref.agentIdHash), 'CLI prints the derived agentIdHash');
@@ -1124,6 +1128,7 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       });
       assert.match(stdout, /https:\/\/checkout\.stripe\.test\/session\/PRO/);
       assert.equal(m.checkoutBodies()[0].tier, 'PRO');
+      assert.ok(stdout.includes('\n    "SAIHM_TIER": "PRO",\n'), 'the line names the default tier too');
     });
   });
 

@@ -447,7 +447,11 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // (`saihm_recall`), and the delete (`saihm_forget`). Each renders a snapshot id fenced in label position and numbers.
   // One more in 0.14.0, `ok` in `saihm_recall`: a page of the share listing (`sharesOnly`), its pointers fenced as the
   // default recall's are and its cursor fenced in label position on the NEXT line.
-  'server.ts': 52,
+  // Nine more in 0.14.3: `free-join`'s line that it is starting (`stdout`, fixed text), and `identity-record`'s eight -
+  // its refusals of a second argument, an option, a key-shaped file name, no identity and a file it could not write
+  // (`stderr`, fixed text and the Node error code), the record on `stdout` with what it is on `stderr`, and the summary
+  // naming the file written (`stdout`).
+  'server.ts': 61,
 };
 // Values rendered WITHOUT a fence, each with the reason it cannot carry the grammar. The bar for an
 // entry is a sentence explaining why a delimiter, a label or a newline cannot reach it - no count is
@@ -542,6 +546,10 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'the export summary. `agentIdHash` is derived locally from the exported key by `toHex` - ' +
     'lowercase hex and nothing else - and the tier beside it is a known plan name, `safeScalar`-fenced, ' +
     'or a fixed sentence saying it is not shown',
+  'server.ts:doc':
+    "`identity-record`'s document (0.14.3): `JSON.stringify` of fixed keys, a version number and four lowercase hex " +
+    "strings this client derived from its own key (`toHex`, `encodeIdentityRecord`) - the agent ID and the three public " +
+    'fields. Nothing a caller or the endpoint chose reaches it, and JSON escaping would bound a value besides',
   'server.ts:CLI_USAGE':
     'a static usage block: string literals plus PACKAGE_VERSION, which has its own entry above. No ' +
     'interpolation reaches it from outside the module',
@@ -554,7 +562,7 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'if a fourth occurrence appeared unfenced. Reported only because the predicate cannot see ' +
     'through a call boundary to the fence on the other side',
 };
-const SAFESCALAR_SITES_PIN = 37; // +1 (warm start): a listed snapshot's `created=` time; +1 (0.13.0 review): the version listing tests whether the next page's `after` renders EXACTLY, and says so instead when it would not; +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts; +1: `export-identity`'s tier in its summary; +1: `saihm_join`'s paid-plan answer; +2: the plan name meant, in the join's tier answer and in `export-identity`'s refusal of a tier slip; +2 (0.13.0): the own-cell read by id, its cellId and seq in label position as on every own-memory line; +3 (0.13.0): the version listing, each entry's cellId and seq and the next page's `after`, all endpoint claims
+const SAFESCALAR_SITES_PIN = 38; // +1 (0.14.3): `identity-record`'s file error, the Node error code; +1 (warm start): a listed snapshot's `created=` time; +1 (0.13.0 review): the version listing tests whether the next page's `after` renders EXACTLY, and says so instead when it would not; +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts; +1: `export-identity`'s tier in its summary; +1: `saihm_join`'s paid-plan answer; +2: the plan name meant, in the join's tier answer and in `export-identity`'s refusal of a tier slip; +2 (0.13.0): the own-cell read by id, its cellId and seq in label position as on every own-memory line; +3 (0.13.0): the version listing, each entry's cellId and seq and the next page's `after`, all endpoint claims
 const RENDER_HELPER_EXPORTS: string[] = [
   'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
   'MAX_JOIN_FIELD_CHARS', 'MAX_PATH_FIELD_CHARS', 'MAX_PATH_MESSAGE_CHARS', 'MAX_SCALAR_CHARS',
@@ -2316,7 +2324,9 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       // path, or a variable name) and the export file it wrote - both must round-trip whole.
       // NINE since that file is named by its own name where its path is withheld - `basename(file)`, in the exports
       // folder under SAIHM_HOME. The name must round-trip whole too: it is how the operator finds the file.
-      'safePathField:MAX_PATH_FIELD_CHARS': 9,
+      // TEN since `identity-record` (0.14.3) names the file it wrote: the operator's own path, which must round-trip so
+      // they can send that file.
+      'safePathField:MAX_PATH_FIELD_CHARS': 10,
       // TWO erasure residuals, not one. The first embeds the local cache path; the second embeds the
       // erasure-feed path, and it is a SEPARATE rendered line because the two say different things to
       // the operator - plaintext may remain HERE, versus the erasure happened and nothing downstream
@@ -2524,6 +2534,10 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // TWO, and neither writes the cache: the export directory (mkdir, 0700) and the one export file
     // (`wx`, 0600). Both sit inside a `markPathBearing` rethrow at the site, so a failure names its path whole.
     'server.ts:runExportIdentity': 2,
+    // ONE (0.14.3), and it is not the cache: `identity-record` writes the public identity record to the file the
+    // operator named (`wx`, never over one that exists). Its failure is caught at the site and rendered as fixed text
+    // with the Node error code alone, so no path-bearing error leaves it.
+    'server.ts:runIdentityRecord': 1,
     // ONE, and it is an UNLINK, not a write to the cache. `sweepStaleIdentityTemps` removes
     // orphaned `<identity>.tmp.*` files stranded by a hard kill between the atomic write and the
     // rename. It is listed here rather than wrapped because its failure never reaches the
@@ -5463,7 +5477,10 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // +4 (0.14.0), measured by listing the spans in both trees (120 before, 124 after; these four the only difference): a
   // share listing page's pointer cellId, seen by both arms (its template sits in a `+` chain); the page's joined lines
   // in the `ok(...)` chain (concatenation arm); and the page's `after=` cursor (template arm). None inside a delimiter.
-  const EXAMINED_SPANS_PIN = 124;
+  // +2 (0.14.3), measured: with these two replaced by literal text in a scratch copy and nothing else changed, the sweep
+  // examined 124 again. `identity-record`'s summary naming the file written (`safePathField`, a pure template) and its
+  // refusal naming the Node error code (`safeScalar`, after a colon). Neither inside a delimiter.
+  const EXAMINED_SPANS_PIN = 126;
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

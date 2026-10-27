@@ -57,7 +57,7 @@ interface CliRun {
 // redirected so no case can touch the operator's real ~/.saihm, and the endpoint points at a closed
 // port so any case that unexpectedly reaches the network fails fast instead of dialing something
 // real.
-function runCli(args: string[], timeoutMs = 15000): Promise<CliRun> {
+function runCli(args: string[], timeoutMs = 15000, extra: Record<string, string> = {}): Promise<CliRun> {
   const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-cli-'));
   return new Promise<CliRun>((res) => {
     const proc = spawn(TSX, [SERVER, ...args], {
@@ -66,6 +66,7 @@ function runCli(args: string[], timeoutMs = 15000): Promise<CliRun> {
         HOME: home,
         SAIHM_STATE_DIR: pathJoin(home, 'state'),
         SAIHM_ENDPOINT_URL: 'http://127.0.0.1:9/mcp',
+        ...extra,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: resolve(HERE, '..'),
@@ -103,6 +104,7 @@ test('dispatch: --help, -h and help all print usage to stdout and exit 0', async
     assert.equal(r.code, 0, `${flag} is a successful request for help, not an error`);
     assert.match(r.stdout, /Usage:/, `${flag} must print usage on stdout`);
     assert.match(r.stdout, /free-join/, `${flag} must advertise the free tier entry point`);
+    assert.match(r.stdout, /identity-record \[FILE\]\n +write your public identity record/, `${flag} must list identity-record (0.14.3)`);
     assert.equal(r.stderr, '', `${flag} is not a failure, so stderr stays empty`);
   }
 });
@@ -118,6 +120,17 @@ test('dispatch: --version reports the package version and exits 0', async () => 
       `${flag} must report the shipped version, so a bug report names the right build`,
     );
   }
+});
+
+test('dispatch: free-join says at once that it is starting, before it asks the endpoint anything (0.14.3)', async () => {
+  // A first start that spent a minute downloading, then a few seconds on the key and the sign-in, showed nothing at
+  // all and read as hung (customer F1). The line comes first; the closed endpoint then fails the join as before.
+  // The home is declared kept, and the CI signals blanked, so a runner's own CI variable does not refuse the join.
+  const r = await runCli(['free-join'], 30_000, { SAIHM_EPHEMERAL_HOME: '0', CI: '', GITHUB_ACTIONS: '', CLAUDE_CODE_REMOTE: '' });
+  assert.equal(r.timedOut, false);
+  assert.equal(r.code, 1, 'the closed endpoint fails the join');
+  assert.ok(r.stdout.startsWith('SAIHM: starting your free join. This takes a few seconds.\n'), JSON.stringify(r.stdout.slice(0, 120)));
+  assert.match(r.stderr, /SAIHM error \[/, 'and the failure follows on stderr');
 });
 
 // NON-VACUITY CONTROL, and the reason the fix discriminates on PRESENCE rather than on match.

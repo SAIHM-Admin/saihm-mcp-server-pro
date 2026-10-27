@@ -1105,9 +1105,10 @@ export function failCode(e: unknown): { code: string; status: number } {
  * `ownOpeningOf`, in `client.ts`) is fenced in two: the opening, and after it the cause at the budget an endpoint
  * message has alone. Under ONE budget the opening spent the room the cause needed, so a cause and its remedy that
  * render whole with the recall copy off were cut with it on (R14: "...SELF_SIGNED_CERT). Never…"). The cause gets no
- * more than it gets alone, so the endpoint's share of the line stays one budget; the opening is ours and shorter than
- * a budget, so its own fence never cuts it. The marker is what makes the opening ours: text that merely begins with
- * the same words is an endpoint message like any other.
+ * more than it gets alone, so the endpoint's share of the line stays one budget. The opening is ours: one that names
+ * the endpoint (a transport failure's, from 0.14.3) can be cut by a long SAIHM_ENDPOINT_URL, there and only there, so
+ * the reason and the remedy after it are never cut by it. The marker is what makes the opening ours: text that merely
+ * begins with the same words is an endpoint message like any other.
  */
 function endpointMessageText(e: SaihmEndpointError): string {
   const opening = ownOpeningOf(e);

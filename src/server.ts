@@ -74,7 +74,7 @@ import {
 } from './warm-start.js';
 
 import { z } from 'zod';
-import { deriveIdentity, toHex } from '@saihm/client-pro';
+import { deriveIdentity, encodeIdentityRecord, toHex } from '@saihm/client-pro';
 import {
   generatePassphrase,
   sealIdentityToken,
@@ -93,6 +93,7 @@ import {
   displayableKeyPath,
   SaihmEndpointError,
   causeMessageOf,
+  SIGN_IN_LIMITED,
   identityHomeName,
   keyShapedHomeRefusal,
   saihmHomeSetting,
@@ -244,7 +245,7 @@ function fail(thrown: unknown) {
     // Refused once for having no free memory yet: the rest of this join answers without asking the endpoint again.
     s.refused = true;
     text = joinPendingNotice(s);
-  } else if (s?.running && e instanceof SaihmEndpointError && e.code === 'rate_limited' && causeMessageOf(e).startsWith('SAIHM onboard failed:')) {
+  } else if (s?.running && e instanceof SaihmEndpointError && e.code === 'rate_limited' && causeMessageOf(e).startsWith(SIGN_IN_LIMITED)) {
     // A limit on the ONBOARD during the join (an identity not active yet): its steps first, then the wait. A limit on
     // a memory call means the identity is already active, and is reported as itself. Read from the CAUSE: a recall with
     // the copy on puts its own opening before a failure of the sign-in inside its version check.
@@ -1917,6 +1918,11 @@ interface JoinState {
   claimsAnswered: number;
 }
 let joinState: JoinState | null = null;
+/**
+ * Whether this process has answered a join with the existing-identity question (see `saihm_join`): a key is created
+ * only by a call made after that answer. Set, never cleared: the question is asked once per process.
+ */
+let joinQuestionAnswered = false;
 
 /** Wait (bounded) until the background flow produces a prompt, a result, or an error. */
 async function waitForJoinSignal(ms: number): Promise<void> {
@@ -2074,10 +2080,19 @@ if (selfJoinEnabled()) {
         if (selfJoinWouldMint()) {
           const temporary = ephemeralHomeSignal();
           if (temporary !== null) return ok(ephemeralJoinRefusal(temporary));
-          if (newIdentity !== true) return ok(JOIN_EXISTING_IDENTITY_QUESTION);
+          // The other gates come before the question too (0.14.3): like the one above they answer whatever the user
+          // says, so asking first would only add a turn before them.
           if (pathHoldsIdentitySecret(defaultIdentityPath())) return ok(keyShapedHomeRefusal('join'));
           const tierRefusal = mintTierRefusal();
           if (tierRefusal !== null) return ok(tierRefusal);
+          // TWO STEPS, kept here rather than left to the agent (0.14.3): the first call that would create a key answers
+          // with the question, newIdentity: true or not, and only a call after it creates one. An agent passed
+          // newIdentity: true at once, without asking, and a user with an identity elsewhere would have been given a
+          // second, empty memory. A process restart asks once more; nothing else changes.
+          if (newIdentity !== true || !joinQuestionAnswered) {
+            joinQuestionAnswered = true;
+            return ok(JOIN_EXISTING_IDENTITY_QUESTION);
+          }
         }
 
         // Fresh flow: ensure an identity, boot a FREE client, run the device flow in the background.
@@ -2358,6 +2373,9 @@ async function runFreeJoin(): Promise<void> {
       return;
     }
   }
+  // SAID AT ONCE (0.14.3, customer F1): the key, the sign-in challenge and the device code take a few seconds after a
+  // first start that may itself have spent a minute downloading, and a terminal that showed nothing read as hung.
+  process.stdout.write('SAIHM: starting your free join. This takes a few seconds.\n');
   if (selfJoinEnabled()) ensureSelfJoinIdentityEnv();
   const c = SaihmProClient.bootFromEnv();
   const r = await c.acquireFreeEntitlement({
@@ -2609,6 +2627,125 @@ function runExportIdentity(): void {
 }
 
 /**
+ * Write this identity's PUBLIC identity record (0.14.3): its agentIdHash, its two public keys and the self-signature
+ * over its ML-KEM key, as one JSON document, to FILE or to stdout. It is what a colleague's agent needs to share a
+ * memory with this identity (saihm_share's recipientRecord and recipientPinnedAgentIdHashHex) and to read one this
+ * identity shared (the sharer's record and agentIdHash). Sharing had no way to get it from Claude Code before.
+ *
+ * Nothing secret is written, printed or sent: the record is derived here, from the identity a server started from this
+ * shell boots (the same resolution as export-identity, which never creates one), and nothing is asked of the endpoint.
+ * The file is never overwritten, and its folder is not created: the reader names where it goes.
+ */
+function runIdentityRecord(): void {
+  const args = process.argv.slice(3);
+  if (args.length > 1) {
+    process.stderr.write('saihm: identity-record takes at most one argument: the file to write, or - for stdout.\n');
+    process.exitCode = 2;
+    return;
+  }
+  const target = args[0];
+  // AN OPTION is not a file name: `--help` would otherwise become a file called that.
+  if (target !== undefined && target !== '-' && target.startsWith('-')) {
+    process.stderr.write('saihm: identity-record takes no options: name the file to write, or - for stdout.\n');
+    process.exitCode = 2;
+    return;
+  }
+  // A FILE NAME WITH THE SHAPE OF A KEY, passphrase or token is refused, unshown, before anything is read: a secret
+  // pasted where the name goes would otherwise become a file name, and be printed beside the record.
+  if (target !== undefined && target !== '-' && displayableKeyPath(target) === null) {
+    process.stderr.write(
+      'saihm: no identity record written - that file name has the shape of a key, passphrase or token, so it is not used. Name another file.\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // WHAT BOOT WOULD READ, as export-identity decides it: with no identity there is no record, and none is created.
+  const configured =
+    identityTokenConfigured() ||
+    Boolean(process.env.SAIHM_MASTER_SECRET_FILE || process.env.SAIHM_MASTER_SECRET_HEX) ||
+    (selfJoinEnabled() && existsSync(defaultIdentityPath()));
+  if (!configured) {
+    process.stderr.write(
+      [
+        'saihm: no identity record - no SAIHM identity is configured here.',
+        'Run identity-record where your memory lives, with the same SAIHM_* values your MCP client gives',
+        'the server there, or join first. Under SAIHM_SELF_JOIN=0 the default key file is not read: point',
+        'SAIHM_MASTER_SECRET_FILE at it.',
+        '',
+      ].join('\n'),
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const id = resolveIdentityFromEnv();
+  let agentIdHash: string;
+  let doc: string;
+  try {
+    const ident = deriveIdentity(id.master);
+    agentIdHash = toHex(ident.agentIdHash);
+    const record = encodeIdentityRecord(ident.identityRecord);
+    // Only the three public fields, named: whatever else a record type may carry later is not written by accident.
+    doc =
+      JSON.stringify(
+        {
+          kind: 'saihm-identity-record',
+          version: 1,
+          agentIdHash,
+          identityRecord: {
+            mldsaPubKey: record.mldsaPubKey,
+            mlkemPubKey: record.mlkemPubKey,
+            mlkemPubKeySelfSig: record.mlkemPubKeySelfSig,
+          },
+        },
+        null,
+        2,
+      ) + '\n';
+    // The derived secret keys are scrubbed as the master is: none of them is needed once the record is encoded.
+    ident.mldsaSecretKey.fill(0);
+    ident.mlkemSecretKey.fill(0);
+    ident.kek.fill(0);
+  } finally {
+    id.master.fill(0);
+  }
+  const guidance = [
+    'It holds only your public keys and agent ID, so it can be sent to anyone: nothing in it can read,',
+    "change or erase your memory. A colleague's agent uses it to share a memory with you: saihm_share",
+    'takes identityRecord as recipientRecord and agentIdHash as recipientPinnedAgentIdHashHex. If the file',
+    'travels by a channel someone else could change, check the agent ID with your colleague another way.',
+    'This is not export-identity: never send that file to anyone.',
+    '',
+  ];
+  if (target === undefined || target === '-') {
+    // The document alone on stdout, so it can be redirected to a file; what it is, on stderr.
+    process.stdout.write(doc);
+    process.stderr.write(['', `SAIHM identity record above, for agent ID ${hexOrMarker(agentIdHash)}.`, ...guidance].join('\n'));
+    return;
+  }
+  try {
+    // `wx`: never over a file that is there, which may be anything, an earlier record of another identity included.
+    writeFileSync(target, doc, { mode: 0o644, flag: 'wx' });
+  } catch (e) {
+    const code = nodeErrorCode(e);
+    process.stderr.write(
+      code === 'EEXIST'
+        ? 'saihm: no identity record written - that file already exists. Name a new file, or remove it first.\n'
+        : `saihm: no identity record written - the file could not be written: ${safeScalar(code)}. Check that its folder exists and is yours.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(
+    [
+      '',
+      `SAIHM identity record written: ${safePathField(target, MAX_PATH_FIELD_CHARS)}`,
+      `  agent ID (agentIdHash): ${hexOrMarker(agentIdHash)}`,
+      '',
+      ...guidance,
+    ].join('\n'),
+  );
+}
+
+/**
  * Self-serve FREE -> paid upgrade: derive this identity from the env master secret and request a Stripe
  * hosted-checkout link to subscribe it to a monthly paid tier (default PRO; override via arg or
  * SAIHM_UPGRADE_TIER). Billing attaches to THIS same key, so every existing memory persists. Requires
@@ -2652,12 +2789,41 @@ async function runUpgrade(): Promise<void> {
       `  identity (agentIdHash): ${c.agentIdHash}`,
       '',
       '  Open the link above in a browser and pay. Copy it whole — everything after the "#" is part',
-      '  of the link, and a copy that loses it is refused as incomplete. After payment, set SAIHM_TIER and',
-      '  SAIHM_PAYMENT_METHOD for the paid tier and start the server normally (drop the',
-      '  "upgrade" argument) — it self-onboards paid and every prior memory is still there.',
+      '  of the link, and a copy that loses it is refused as incomplete.',
+      '',
+      // THE TWO LINES THEMSELVES (0.14.3, customer F8): a payment that went through left a client that would not
+      // start when only one of them was set, and the reader had to work out both from the names alone.
+      '  After payment, add these two lines to the "env" settings of SAIHM in each AI client that',
+      '  uses this key, then restart the client:',
+      '',
+      paidTierEnvLine(target),
+      '    "SAIHM_PAYMENT_METHOD": "stripe"',
+      '',
+      '  A paid plan needs both: without SAIHM_PAYMENT_METHOD the server does not start. Then say',
+      '  "Show my SAIHM status": it names your plan, and every memory on this key is still there.',
       '',
     ].join('\n'),
   );
+}
+
+/**
+ * The `SAIHM_TIER` line, as it goes into a client's `env` block, for a monthly plan `upgrade` accepted: written out per
+ * plan, so nothing anyone typed is rendered inside its quotes. `requestUpgradeUrl` refuses any other plan before this
+ * is reached; the last arm says so rather than naming a plan nobody chose.
+ */
+function paidTierEnvLine(tier: string): string {
+  switch (tier) {
+    case 'PRO':
+      return '    "SAIHM_TIER": "PRO",';
+    case 'PRO_FAST':
+      return '    "SAIHM_TIER": "PRO_FAST",';
+    case 'ENTERPRISE':
+      return '    "SAIHM_TIER": "ENTERPRISE",';
+    case 'ENTERPRISE_FAST':
+      return '    "SAIHM_TIER": "ENTERPRISE_FAST",';
+    default:
+      return '    "SAIHM_TIER": the name of the plan you paid for,';
+  }
 }
 
 // argv[2] absent means "run as an MCP server" — the package's primary job, and the default that must
@@ -2679,6 +2845,9 @@ const CLI_USAGE: string = [
   '  npx -y @saihm/mcp-server-pro upgrade [TIER]   move a free identity to a monthly paid tier',
   '  npx -y @saihm/mcp-server-pro export-identity  carry your identity to another machine or a',
   '                                                hosted agent environment',
+  '  npx -y @saihm/mcp-server-pro identity-record [FILE]',
+  '                                                write your public identity record, for a',
+  '                                                colleague who shares memories with you',
   '',
   'Environment:',
   '  free-join        nothing — it generates and stores your key for you',
@@ -2689,6 +2858,8 @@ const CLI_USAGE: string = [
   '  export-identity  the identity a server started from this shell boots - run it with the',
   '                   SAIHM_* values your MCP client sets; it writes SAIHM_IDENTITY and',
   '                   SAIHM_IDENTITY_PASSPHRASE to a file readable only by you',
+  '  identity-record  the same identity; it writes only public keys and the agent ID, to FILE',
+  '                   (never over one that exists) or, with no FILE or -, to stdout',
   '',
   'Options:',
   '  -h, --help     show this message',
@@ -2739,6 +2910,10 @@ async function main(): Promise<void> {
   }
   if (verb === 'export-identity') {
     runExportIdentity();
+    return;
+  }
+  if (verb === 'identity-record') {
+    runIdentityRecord();
     return;
   }
   if (verb === '-h' || verb === '--help' || verb === 'help') {

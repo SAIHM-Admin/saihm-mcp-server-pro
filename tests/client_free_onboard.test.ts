@@ -26,7 +26,7 @@ import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { fromHex } from '@saihm/client-pro';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { SaihmProClient, SaihmEndpointError, MAX_ERROR_CODE_CHARS } from '../src/client.js';
+import { SaihmProClient, SaihmEndpointError, MAX_ERROR_CODE_CHARS, SIGN_IN_LIMITED } from '../src/client.js';
 
 const masterOf = (n: number): Uint8Array => new Uint8Array(32).fill(n & 0xff);
 const sha256Hex = (hex: string): string =>
@@ -1194,8 +1194,9 @@ describe('FF18: no endpoint-chosen value reaches a message the JOIN STATE will r
         // endpoint chose reaches it, so there is nothing here for a fence to cut.
         'SAIHM onboard timed out after ',
         // A 429 with no body: the reason phrase, endpoint-chosen and sliced at `MAX_ERROR_CODE_CHARS` like the mint
-        // above, and the wait, which is 1 to 5 digits or a fixed "a minute". Driven below at two magnitudes.
-        'SAIHM onboard failed: 429 ',
+        // above, and the wait, a count of seconds or minutes from 1 to 5 digits, or fixed text. Driven below at two
+        // magnitudes. "sign in", not "onboard", from 0.14.3.
+        'SAIHM could not sign in: too many sign-ins in a short time (429 ',
         // `readBodyCapped`'s over-budget throw, and the entry this list gained when the walk stopped
         // following methods alone. It interpolates its `method` argument and its `max` argument. On
         // the join path the only caller is `onboardFetch`, which passes a string LITERAL for the
@@ -1235,6 +1236,8 @@ describe('a body-less 429 on the join path is rate_limited, its reason phrase bo
       assert.ok(e.message.includes('S'.repeat(MAX_ERROR_CODE_CHARS)), 'the reason phrase reached the message');
       assert.ok(!e.message.includes('S'.repeat(MAX_ERROR_CODE_CHARS + 1)), 'the reason phrase passed its slice');
       assert.ok(e.message.endsWith(`. Wait ${wait}, then try again.`), e.message.slice(-80));
+      // The opening the server tells a join's limit by (0.14.3): the mint writes it out, and it must stay this text.
+      assert.ok(e.message.startsWith(`${SIGN_IN_LIMITED} (429 `), e.message.slice(0, 80));
       assert.ok(!e.message.includes('9'.repeat(6)), 'a retry-after that is not 1 to 5 digits is not echoed');
     });
   }

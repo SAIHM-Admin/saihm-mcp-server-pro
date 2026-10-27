@@ -56,6 +56,12 @@ test('a 429 with no code is rate_limited, with the wait it asks for; a 429 with 
     [{ 'retry-after': '1234567' }, 'a minute'],
     [{ 'retry-after': '1' }, '1 second'],
     [{ 'retry-after': '0' }, 'a moment'],
+    // 0.14.3: a minute or more in minutes, rounded up, never shorter than the wait asked for.
+    [{ 'retry-after': '59' }, '59 seconds'],
+    [{ 'retry-after': '60' }, '1 minute'],
+    [{ 'retry-after': '61' }, '2 minutes'],
+    [{ 'retry-after': '1800' }, '30 minutes'],
+    [{ 'retry-after': '3599' }, '60 minutes'],
   ] as const) {
     const m = await listen((route, _b, res) => {
       if (route === 'GET /api/onboard/challenge') return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ nonce: '00'.repeat(32) }));
@@ -65,7 +71,8 @@ test('a 429 with no code is rate_limited, with the wait it asks for; a 429 with 
       const e = await statusError(m.base);
       assert.equal(e.status, 429);
       assert.equal(e.code, 'rate_limited');
-      assert.equal(e.message, `SAIHM onboard failed: 429 Too Many Requests. Wait ${wait}, then try again.`);
+      // 0.14.3: "sign in", not "onboard": an active identity meets this limit too.
+      assert.equal(e.message, `SAIHM could not sign in: too many sign-ins in a short time (429 Too Many Requests). Wait ${wait}, then try again.`);
     } finally {
       await new Promise<void>((r) => m.server.close(() => r()));
     }
@@ -160,6 +167,7 @@ test('while the join waits for approval, the memory tools give its steps and do 
   const home = mkdtempSync(join(tmpdir(), 'saihm-oberr-'));
   const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
   try {
+    assert.match((await d.call('saihm_join', {})).text, /^Not joining yet\./, 'the question first (0.14.3)');
     const started = await d.call('saihm_join', { newIdentity: true });
     assert.match(started.text, /WXYZ-9876/, started.text);
     const before = seen.filter((r) => r === 'POST /api/onboard' || r === 'POST /mcp').length;
@@ -250,6 +258,7 @@ test('before the join has its steps, and after it has failed, the memory tools s
   const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
   try {
     // No steps yet: the join answers after its own wait, and a memory tool asks for patience, without the endpoint.
+    assert.match((await d.call('saihm_join', {})).text, /^Not joining yet\./, 'the question first (0.14.3)');
     const first = await d.call('saihm_join', { newIdentity: true });
     assert.match(first.text, /Starting your free activation|Still getting your activation ready/, first.text);
     const early = await d.call('saihm_status', {});
@@ -293,6 +302,7 @@ test('a join retried after its first attempt failed asks the endpoint once about
   const home = mkdtempSync(join(tmpdir(), 'saihm-oberr-'));
   const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
   try {
+    assert.match((await d.call('saihm_join', {})).text, /^Not joining yet\./, 'the question first (0.14.3)');
     await d.call('saihm_join', { newIdentity: true });
     let second = '';
     for (let i = 0; i < 20 && !/RETR-3333/.test(second); i++) {
@@ -384,7 +394,7 @@ test('a recall with the copy on during a join: its sign-in limit and refusal ans
   const limited = await joinThenCalls(() => ({ status: 429, headers: { 'retry-after': '10' } }), 1, { tool: 'saihm_recall', copy: true });
   assert.match(limited.texts[0]!, /^SAIHM memory is not active yet: the join is waiting for approval\.\nTo activate/, limited.texts[0]);
   assert.match(limited.texts[0]!, /\nSAIHM error \[rate_limited\] \(status 429\): Recall stopped: this device's copy of your memories could not be checked/, limited.texts[0]);
-  assert.match(limited.texts[0]!, /SAIHM onboard failed: 429 Too Many Requests\. Wait 10 seconds, then try again\.$/, limited.texts[0]);
+  assert.match(limited.texts[0]!, /SAIHM could not sign in: too many sign-ins in a short time \(429 Too Many Requests\)\. Wait 10 seconds, then try again\.$/, limited.texts[0]);
   const refused = await joinThenCalls(() => ({ status: 401, body: { error: 'verification_failed', reason: 'no_free_entitlement' } }), 2, { tool: 'saihm_recall', copy: true });
   for (const t of refused.texts) assert.match(t, /^SAIHM memory is not active yet: the join is waiting for approval\.\nTo activate/, t);
   assert.equal(refused.onboards, 1, 'one onboard, then the join answers for itself');
@@ -426,6 +436,8 @@ async function earlierKeyJoin(
   if (opts.newKey !== true) writeFileSync(join(home, 'free-identity.key'), 'ef'.repeat(32), { mode: 0o600 });
   const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
   try {
+    // A new key is created only by a call after the question (0.14.3).
+    if (opts.newKey === true) assert.match((await d.call('saihm_join', {})).text, /^Not joining yet\./);
     await d.call('saihm_join', opts.newKey === true ? { newIdentity: true } : {});
     await run({ call: d.call, grant: () => void (granted = true), n });
   } finally {
@@ -515,6 +527,7 @@ test('the join finishes by itself: the first memory call after approval works wi
   const home = mkdtempSync(join(tmpdir(), 'saihm-oberr-'));
   const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
   try {
+    assert.match((await d.call('saihm_join', {})).text, /^Not joining yet\./, 'the question first (0.14.3)');
     const started = await d.call('saihm_join', { newIdentity: true });
     assert.match(started.text, /SELF-7777/, started.text);
     // The steps no longer ask for a second join.
@@ -561,6 +574,7 @@ test('a key from a failed first join that was granted after all: on the retried 
   const home = mkdtempSync(join(tmpdir(), 'saihm-oberr-'));
   const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
   try {
+    assert.match((await d.call('saihm_join', {})).text, /^Not joining yet\./, 'the question first (0.14.3)');
     await d.call('saihm_join', { newIdentity: true });
     let second = '';
     for (let i = 0; i < 20 && !/GRNT-6666/.test(second); i++) {
