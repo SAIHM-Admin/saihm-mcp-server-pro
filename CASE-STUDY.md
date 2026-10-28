@@ -1,22 +1,20 @@
-# Case study: a quarter of regulated work with three agent roles, SAIHM + SHM
+# Case study: an example of regulated work with three agent roles, SAIHM + SHM
 
-Every capability named here is one SAIHM or SHM documents publicly. The company is fictional. The staffing
-comparison is a worked scenario, and each removed role is matched to the capability that replaces it. SHM works with
-a paid SAIHM plan, and each agent identity that runs SHM needs one.
+The company is fictional. The staffing comparison is a worked scenario, SHM works with a paid SAIHM plan.
 
 ## The short version
 
 - **About twenty agents become three roles.** Memory carries the context, so you stop adding agents to hold it.
 - **Every turn costs less.** SHM brings forward only what the task needs, within a budget you set, and finds it on your
   own machine without spending model tokens.
-- **The savings outgrow the subscription.** In the worked month below, with assumptions you replace with yours, the
+- **The savings outgrow the subscription cost.** In the worked month below, with assumptions you replace with yours, the
   team saves about $37,700 in model tokens and supervision time. Set that against your plan on the pricing page.
 - **Nothing to rip out.** Keep your AI tools and your way of working. SAIHM works with the tools your team already uses,
   and you can start free.
 
-## The quarter
+## The example
 
-A regulated payments company runs 40 services, each in its own repository. In one quarter its engineering team must:
+A regulated payments company runs 40 services, each in its own repository. Its engineering team must:
 
 1. **Migrate** card settlement to a new ledger service across all 40 repositories, keeping every interface decision consistent.
 2. **Handle a production incident** in week 6, mid-migration, and deliver a postmortem a regulator can follow.
@@ -128,7 +126,7 @@ provider's caching discounts change both columns.
       each computer's local copy drops it at its next recall
 ```
 
-## The prompts that run the quarter (adapt the names and rules)
+## The prompts that run the example (adapt the names and rules)
 
 **Lead**
 - Recall my SAIHM decision records for the ledger migration and plan this week's work across the 40 repositories, with owners and open questions.
