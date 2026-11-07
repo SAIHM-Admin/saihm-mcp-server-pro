@@ -2,7 +2,7 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.14.4] — 2026-11-08
+## [0.14.4] — 2026-11-07
 
 A new prompt, *Configure SAIHM memory*, sets how SAIHM memory works for you by goal
 and saves the result as a profile your sessions can apply. The README adds Agent Skills
