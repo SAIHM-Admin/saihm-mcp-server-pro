@@ -298,7 +298,7 @@ allow SAIHM:
      ```
 
      VS Code's MCP server gallery installs SAIHM pinned to the current version and
-     without `-y`, for example `["npx", "@saihm/mcp-server-pro@0.14.3"]`. Copilot matches
+     without `-y`, for example `["npx", "@saihm/mcp-server-pro@0.14.4"]`. Copilot matches
      the command and each argument exactly, so list each form your users run.
    - In a list without command entries, add `{ "serverName": "saihm" }`, and have your
      users add SAIHM with this README's setup blocks, which give it that name. A copy

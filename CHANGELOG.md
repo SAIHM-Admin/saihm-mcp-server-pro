@@ -2,6 +2,42 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.4] — 2026-11-08
+
+A new prompt, *Configure SAIHM memory*, sets how SAIHM memory works for you by goal
+and saves the result as a profile your sessions apply. The README adds Agent Skills
+and the month each discount code is valid through. No tool added or removed.
+
+### Added
+
+- **The `saihm_configure` prompt.** *Configure SAIHM memory* has your agent offer a
+  menu of goals (cheapest tokens, recall accuracy, team sharing, strict compliance,
+  maximum rigor), save your choice as one memory whose first line starts with
+  `SAIHM-PROFILE`, read it back, and print the line each session shows for it. A
+  profile sets preferences only: sharing, erasing, installing a hook or skill, and
+  editing a settings or instruction file still need your yes in the session. The tool
+  list is unchanged: nine tools by default, eight with `SAIHM_SELF_JOIN=0`. The
+  REFERENCE lists both prompts.
+- **Sessions apply your profile.** The server's instructions now tell each session to
+  apply the preferences of a memory of yours that starts with `SAIHM-PROFILE`, and say
+  that a profile never approves sharing, erasing or installing anything.
+- **Agent Skills.** A new README section links the SAIHM skills, installed with
+  `npx skills add SAIHM-Admin/saihm-skills`. Their `saihm-configure` skill, like the
+  new prompt, saves a profile your sessions apply.
+
+### Changed
+
+- **Discount codes.** The README gives the month each code is valid through and says
+  there are 100,000 of each.
+- **American spelling.** The *Load SAIHM memory* prompt now asks the agent to summarize
+  what it recalled, and an identity-token error, the README, the REFERENCE and
+  `llms-install.md` use American spelling too.
+- **The manual.** The README links both the manual's page and its PDF.
+- **Troubleshooting.** The REFERENCE's row for a free join that may still be waiting
+  for approval names the code the error carries, `no_free_entitlement`.
+- **The README's introduction** describes SAIHM as an enterprise-class memory protocol
+  for AI agents that can prove what it remembers, shares and erases.
+
 ## [0.14.3] — 2026-10-27
 
 Sharing now works from any AI client: one command writes the identity record a colleague
@@ -2233,6 +2269,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.14.4]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.4
 [0.14.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.3
 [0.14.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.2
 [0.14.1]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.1
@@ -2268,4 +2305,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.3...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.4...HEAD
