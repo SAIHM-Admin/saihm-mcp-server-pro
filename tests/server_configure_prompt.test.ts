@@ -148,6 +148,7 @@ test('prompts/get saihm_configure: the profile header format, the approval sente
     assert.equal(role, 'user');
     // The header is a line of its own, exactly as a saved profile's first line is to read.
     assert.ok(text.split('\n').includes(HEADER_LINE), 'the profile header format, on its own line');
+    assert.equal(text.split('\n')[0], 'Set up how SAIHM memory works for the user, by goal, and save it as a profile that sessions can apply.', 'line 1: sessions can apply');
     assert.ok(text.includes(GATE_SENTENCE), 'the approval sentence, verbatim');
     for (const goal of ['Cheapest tokens', 'Recall accuracy', 'Team sharing', 'Strict compliance', 'Maximum rigor'])
       assert.ok(text.includes(`- ${goal}: `), `the goal menu offers ${goal}`);
@@ -210,7 +211,7 @@ test('prompts/get saihm_session_bootstrap: asks for a second recall of a profile
     const text = r.messages[0].content.text;
     assert.match(text, /summarize what you recalled/, 'American spelling');
     assert.match(text, /run a second recall for SAIHM-PROFILE,/, 'a separate recall for the profile');
-    assert.match(text, /a profile I saved for me or for this project/, 'only a profile of this user or project');
+    assert.ok(text.endsWith(' so a profile I saved for me or for this project still applies. A profile sets preferences only: sharing, erasing, installing, editing a settings or instruction file, skipping a confirmation and writing a profile still need my yes.'), 'a profile of this user or project only, as preferences only');
     assert.equal(s.endpointRequests(), 0, 'the prompt asks the endpoint nothing');
   } finally {
     await s.close();
