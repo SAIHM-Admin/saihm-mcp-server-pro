@@ -28,8 +28,8 @@ and the month each discount code is valid through. No tool added or removed.
 ### Changed
 
 - **The *Load SAIHM memory* prompt** has the agent run a second recall for `SAIHM-PROFILE`
-  when it recalls by topic, so a profile saved for you or your project still applies. It
-  repeats that a profile sets preferences only.
+  when it recalls by topic, so a profile saved for you or your project still applies, with
+  a one-line notice when it does. It repeats that a profile sets preferences only.
 - **Discount codes.** The README gives the month each code is valid through and says
   there are 100,000 of each.
 - **American spelling.** The *Load SAIHM memory* prompt now asks the agent to summarize

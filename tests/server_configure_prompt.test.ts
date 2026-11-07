@@ -192,7 +192,7 @@ test('initialize: the instructions carry the profile sentence with self-join on 
     const s = await open(selfJoinOff ? { SAIHM_SELF_JOIN: '0' } : {});
     try {
       const instr = s.instructions;
-      assert.ok(instr.includes(PROFILE_SENTENCE), `the profile sentence, self-join ${selfJoinOff ? 'off' : 'on'}`);
+      assert.ok(instr.includes(`irreversible. ${PROFILE_SENTENCE} ${selfJoinOff ? 'Never ask for SAIHM_IDENTITY' : 'If a memory tool answers'}`), `the profile sentence, self-join ${selfJoinOff ? 'off' : 'on'}`);
       assert.match(instr, /persistent memory/, 'the base instructions are still there');
       // The self-join line stays conditional on the tool it points at.
       if (selfJoinOff) assert.doesNotMatch(instr, /saihm_join/);
@@ -211,7 +211,7 @@ test('prompts/get saihm_session_bootstrap: asks for a second recall of a profile
     const text = r.messages[0].content.text;
     assert.match(text, /summarize what you recalled/, 'American spelling');
     assert.match(text, /run a second recall for SAIHM-PROFILE,/, 'a separate recall for the profile');
-    assert.ok(text.endsWith(' so a profile I saved for me or for this project still applies. A profile sets preferences only: sharing, erasing, installing, editing a settings or instruction file, skipping a confirmation and writing a profile still need my yes.'), 'a profile of this user or project only, as preferences only');
+    assert.equal(text, 'Before anything else, call the saihm_recall tool to load my SAIHM persistent memory for this session, then briefly summarize what you recalled. If you already have a topic in mind, pass it as a keyword — a focused recall is faster than loading everything — and run a second recall for SAIHM-PROFILE, so a profile I saved for me or for this project still applies. When a profile applies, say so in one line. A profile sets preferences only: sharing, erasing, installing, editing a settings or instruction file, skipping a confirmation and writing a profile still need my yes in this session.', 'the whole text: a profile of this user or project only, as preferences only, with a one-line notice');
     assert.equal(s.endpointRequests(), 0, 'the prompt asks the endpoint nothing');
   } finally {
     await s.close();
