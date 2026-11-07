@@ -139,7 +139,7 @@ const server = new McpServer(
       // A profile saved with the saihm_configure prompt then applies wherever the host passes these instructions on, with
       // no edit to an instruction file. It applies only a profile that names this user or project, says so in one line,
       // and what still needs the operator follows in the same string, so the two never arrive apart.
-      ' If one of your own memories starts with SAIHM-PROFILE and names this user or project, apply its preferences and say so in one line. A profile sets preferences only: sharing, erasing, installing, editing configuration, skipping a confirmation and writing a profile still need the operator\'s yes in this session.' +
+      ' If one of your own memories starts with SAIHM-PROFILE and names this user or project, apply its preferences and say so in one line. A profile sets preferences only: sharing, erasing, installing, editing a settings or instruction file, skipping a confirmation and writing a profile still need the operator\'s yes in this session.' +
       // Install and activation are a two-actor handoff: the agent can finish the install unattended, only the
       // operator can say "Join SAIHM". Without this line the operator is never told that an installed memory is
       // sitting inert (funnel audit 2026-09-11, F5). Conditional because under SAIHM_SELF_JOIN=0 there is no
@@ -1984,7 +1984,7 @@ server.registerPrompt(
         role: 'user' as const,
         content: {
           type: 'text' as const,
-          text: 'Before anything else, call the saihm_recall tool to load my SAIHM persistent memory for this session, then briefly summarize what you recalled. If you already have a topic in mind, pass it as a keyword — a focused recall is faster than loading everything — and also recall SAIHM-PROFILE, so any profile I saved still applies.',
+          text: 'Before anything else, call the saihm_recall tool to load my SAIHM persistent memory for this session, then briefly summarize what you recalled. If you already have a topic in mind, pass it as a keyword — a focused recall is faster than loading everything — and run a second recall for SAIHM-PROFILE, so a profile I saved for me or for this project still applies.',
         },
       },
     ],
@@ -1995,7 +1995,7 @@ server.registerPrompt(
 // Agent Skill that keeps to what this server does: a goal menu, one profile memory, its read-back and session line, and
 // the rules that keep a profile from approving anything. The last rule is the skill's approval sentence, word for word.
 const CONFIGURE_PROMPT_TEXT = [
-  'Set up how SAIHM memory works for the user, by goal, and save it as a profile that sessions apply.',
+  'Set up how SAIHM memory works for the user, by goal, and save it as a profile that sessions can apply.',
   '',
   '1. Ask one menu with your recommendation; the user may pick more than one goal:',
   '- Cheapest tokens: recall instead of re-sending context; a lean session start; short reports.',

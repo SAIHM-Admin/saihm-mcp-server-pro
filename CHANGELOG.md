@@ -13,24 +13,22 @@ and the month each discount code is valid through. No tool added or removed.
 - **The `saihm_configure` prompt.** *Configure SAIHM memory* has your agent offer a
   menu of goals (cheapest tokens, recall accuracy, team sharing, strict compliance,
   maximum rigor), save your choice as one memory whose first line starts with
-  `SAIHM-PROFILE`, read it back, and print the line each session shows for it. A
-  profile sets preferences only: sharing, erasing, installing a hook or skill, and
-  editing a settings or instruction file still need your yes in the session. The tool
+  `SAIHM-PROFILE`, read it back, and print the line each session shows for it. The tool
   list is unchanged: nine tools by default, eight with `SAIHM_SELF_JOIN=0`. The
   REFERENCE lists both prompts.
 - **Sessions can apply your profile.** The server's instructions now tell each session to
   apply a memory of yours that starts with `SAIHM-PROFILE` and names you or your project,
   and to say so in one line. A profile sets preferences only: sharing, erasing,
-  installing, editing configuration, skipping a confirmation and writing a profile still
-  need your yes in the session.
+  installing, editing a settings or instruction file, skipping a confirmation and
+  writing a profile still need your yes in the session.
 - **Agent Skills.** A new README section links the SAIHM skills, installed with
   `npx skills add SAIHM-Admin/saihm-skills`. Their `saihm-configure` skill, like the
   new prompt, saves a profile your sessions can apply.
 
 ### Changed
 
-- **The *Load SAIHM memory* prompt** has the agent recall `SAIHM-PROFILE` as well when it
-  recalls by topic, so a saved profile still applies.
+- **The *Load SAIHM memory* prompt** has the agent run a second recall for `SAIHM-PROFILE`
+  when it recalls by topic, so a profile saved for you or your project still applies.
 - **Discount codes.** The README gives the month each code is valid through and says
   there are 100,000 of each.
 - **American spelling.** The *Load SAIHM memory* prompt now asks the agent to summarize
