@@ -166,7 +166,8 @@ SAIHM stores, the local copy and the free tier more precisely. No tool added or 
 ## [0.14.1] — 2026-10-13
 
 Hosts that fill in every field of a tool, such as Cline with an OpenAI model,
-can now save and recall memories. No tool added or removed.
+can now save and recall memories, and a join finishes by itself once you approve
+it. No tool added or removed.
 
 ### Fixed
 
