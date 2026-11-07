@@ -3316,7 +3316,7 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
   if (imported && !toHex(deriveIdentity(master).agentIdHash).startsWith(imported.label)) {
     master.fill(0);
     throw new IdentityTokenError(
-      `${IDENTITY_ENV} is labelled for a different identity than the one sealed inside it. Export ` +
+      `${IDENTITY_ENV} is labeled for a different identity than the one sealed inside it. Export ` +
         'the identity again on the machine that holds it.',
     );
   }

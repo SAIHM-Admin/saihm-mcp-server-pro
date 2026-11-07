@@ -211,7 +211,7 @@ with `gemini mcp list`, or `/mcp` inside Gemini CLI.
 Since 2026-06-18, Google no longer serves personal Google accounts in the Gemini CLI:
 signing in with one answers "This client is no longer supported for Gemini Code Assist
 for individuals". As of October 2026 the Gemini CLI still works with a Gemini API key,
-or with a Gemini Code Assist Standard or Enterprise licence.
+or with a Gemini Code Assist Standard or Enterprise license.
 
 ### Antigravity CLI (Google)
 
@@ -404,7 +404,7 @@ are in the [SAIHM manual](https://saihm.net/manual) and in [CASE-STUDY.md](./CAS
 | `saihm_share` | Grants one memory to one agent, optionally with an expiry |
 | `saihm_revoke_share` | Withdraws that grant |
 
-Every tool is labelled for your AI tool to read, including which are read-only and
+Every tool is labeled for your AI tool to read, including which are read-only and
 which one destroys data — so hosts that ask "are you sure?" before destructive
 actions know when to ask. The reference has [the full tool list](./REFERENCE.md#tools).
 
@@ -756,7 +756,7 @@ const status = await saihm.status();
 ## SHM — Super-Human Memory
 
 SAIHM keeps memory safe. SHM, Super-Human Memory, makes it work efficiently: it is the
-layer on top of SAIHM that organises memory and brings the right part of it forward, by
+layer on top of SAIHM that organizes memory and brings the right part of it forward, by
 meaning, before the agent asks. It keeps tasks apart and the context
 window clean, so one agent can take on work that today needs several, and a correction
 saved once is there to be recalled every time after.

@@ -155,7 +155,7 @@ test('a token labelled for another identity is refused before anything is booted
     withEnv({ SAIHM_IDENTITY: t.token, SAIHM_IDENTITY_PASSPHRASE: t.passphrase }, () => resolveIdentityFromEnv()),
   );
   assert.ok(e instanceof IdentityTokenError);
-  assert.match(m, /labelled for a different identity/);
+  assert.match(m, /labeled for a different identity/);
 });
 
 test('a token identity has no key file and no recall-cache default, even beside a default key', () => {

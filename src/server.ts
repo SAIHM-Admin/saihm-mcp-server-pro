@@ -1984,7 +1984,7 @@ server.registerPrompt(
         role: 'user' as const,
         content: {
           type: 'text' as const,
-          text: 'Before anything else, call the saihm_recall tool to load my SAIHM persistent memory for this session, then briefly summarise what you recalled. If you already have a topic in mind, pass it as a keyword — a focused recall is faster than loading everything.',
+          text: 'Before anything else, call the saihm_recall tool to load my SAIHM persistent memory for this session, then briefly summarize what you recalled. If you already have a topic in mind, pass it as a keyword — a focused recall is faster than loading everything.',
         },
       },
     ],

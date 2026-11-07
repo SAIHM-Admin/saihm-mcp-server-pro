@@ -45,7 +45,7 @@ discretion):
   `npx` downloads, it can show the server disconnected; check again.
   Personal Google accounts are no longer served in the Gemini CLI (since
   2026-06-18); as of October 2026 it needs a Gemini API key or a Gemini Code
-  Assist Standard or Enterprise licence.
+  Assist Standard or Enterprise license.
 - **Antigravity CLI:** `~/.gemini/config/mcp_config.json` (or a project's
   `.agents/mcp_config.json`), the entry below without `timeout`. Check with
   `/mcp` inside the CLI.

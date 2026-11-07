@@ -135,7 +135,7 @@ because that check waits only a few seconds; run it again.
 Since 2026-06-18, Google no longer serves personal Google accounts in the Gemini CLI:
 signing in with one answers "This client is no longer supported for Gemini Code Assist
 for individuals". As of October 2026 it still works with a Gemini API key, or with a
-Gemini Code Assist Standard or Enterprise licence.
+Gemini Code Assist Standard or Enterprise license.
 
 ### Antigravity CLI (Google)
 
@@ -291,7 +291,7 @@ settings — never in the chat. A hosted environment reads its variables when a
 session starts, so start a new session after setting them. The server needs to run
 locally (stdio) and reach `saihm.net` (or your `SAIHM_ENDPOINT_URL` host) — directly,
 or through the proxy in `HTTPS_PROXY` if the environment sets one (`NO_PROXY` is
-honoured; a network that inspects TLS needs its CA certificate, from the network's
+honored; a network that inspects TLS needs its CA certificate, from the network's
 administrator and never copied from the connection, saved to a file whose path is in
 `NODE_EXTRA_CA_CERTS`). Configuration differs by host. The steps follow each host's own documentation; none of these hosts
 has been tested end to end yet.
@@ -433,7 +433,7 @@ a copy was deleted somewhere.
   HTTPS only, with loopback `http` permitted for local development.
 - **Self-onboarding** — with no `SAIHM_AUTH_HEADER` set, the client proves control
   of your identity and mints its own short-lived token, refreshing transparently.
-  You paste one config once and never re-paste a token. Cancelling a subscription
+  You paste one config once and never re-paste a token. Canceling a subscription
   stops the next refresh, so access ends naturally. With the key file in `SAIHM_HOME`,
   the token is kept for the next session on this device until it expires (see
   `SAIHM_SESSION_CACHE`).
