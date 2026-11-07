@@ -5,7 +5,7 @@ All notable changes to `@saihm/mcp-server-pro` are documented here. This project
 ## [0.14.4] — 2026-11-08
 
 A new prompt, *Configure SAIHM memory*, sets how SAIHM memory works for you by goal
-and saves the result as a profile your sessions apply. The README adds Agent Skills
+and saves the result as a profile your sessions can apply. The README adds Agent Skills
 and the month each discount code is valid through. No tool added or removed.
 
 ### Added
@@ -18,23 +18,27 @@ and the month each discount code is valid through. No tool added or removed.
   editing a settings or instruction file still need your yes in the session. The tool
   list is unchanged: nine tools by default, eight with `SAIHM_SELF_JOIN=0`. The
   REFERENCE lists both prompts.
-- **Sessions apply your profile.** The server's instructions now tell each session to
-  apply the preferences of a memory of yours that starts with `SAIHM-PROFILE`, and say
-  that a profile never approves sharing, erasing or installing anything.
+- **Sessions can apply your profile.** The server's instructions now tell each session to
+  apply a memory of yours that starts with `SAIHM-PROFILE` and names you or your project,
+  and to say so in one line. A profile sets preferences only: sharing, erasing,
+  installing, editing configuration, skipping a confirmation and writing a profile still
+  need your yes in the session.
 - **Agent Skills.** A new README section links the SAIHM skills, installed with
   `npx skills add SAIHM-Admin/saihm-skills`. Their `saihm-configure` skill, like the
-  new prompt, saves a profile your sessions apply.
+  new prompt, saves a profile your sessions can apply.
 
 ### Changed
 
+- **The *Load SAIHM memory* prompt** has the agent recall `SAIHM-PROFILE` as well when it
+  recalls by topic, so a saved profile still applies.
 - **Discount codes.** The README gives the month each code is valid through and says
   there are 100,000 of each.
 - **American spelling.** The *Load SAIHM memory* prompt now asks the agent to summarize
-  what it recalled, and an identity-token error, the README, the REFERENCE and
+  what it recalled, and an identity-token error, the README, the REFERENCE, the case study and
   `llms-install.md` use American spelling too.
 - **The manual.** The README links both the manual's page and its PDF.
 - **Troubleshooting.** The REFERENCE's row for a free join that may still be waiting
-  for approval names the code the error carries, `no_free_entitlement`.
+  for approval names the reason its message carries, `no_free_entitlement`.
 - **The README's introduction** describes SAIHM as an enterprise-class memory protocol
   for AI agents that can prove what it remembers, shares and erases.
 

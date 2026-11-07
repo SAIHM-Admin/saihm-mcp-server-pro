@@ -137,9 +137,9 @@ const server = new McpServer(
     instructions:
       "SAIHM is this agent's persistent memory across sessions, models and vendors. Memories are encrypted and decrypted in this process; the key never leaves it. Load your memory before other work, and erase only when erasure is intended — it is cryptographic and irreversible." +
       // A profile saved with the saihm_configure prompt then applies wherever the host passes these instructions on, with
-      // no edit to an instruction file. It sets preferences and nothing else, and what still needs the operator is said
-      // in the same sentence, so the two never arrive apart.
-      ' If one of your own memories starts with SAIHM-PROFILE, apply its preferences for this session; a profile sets preferences only and never approves sharing, erasing or installing anything, which still need the operator\'s yes in this session.' +
+      // no edit to an instruction file. It applies only a profile that names this user or project, says so in one line,
+      // and what still needs the operator follows in the same string, so the two never arrive apart.
+      ' If one of your own memories starts with SAIHM-PROFILE and names this user or project, apply its preferences and say so in one line. A profile sets preferences only: sharing, erasing, installing, editing configuration, skipping a confirmation and writing a profile still need the operator\'s yes in this session.' +
       // Install and activation are a two-actor handoff: the agent can finish the install unattended, only the
       // operator can say "Join SAIHM". Without this line the operator is never told that an installed memory is
       // sitting inert (funnel audit 2026-09-11, F5). Conditional because under SAIHM_SELF_JOIN=0 there is no
@@ -1984,7 +1984,7 @@ server.registerPrompt(
         role: 'user' as const,
         content: {
           type: 'text' as const,
-          text: 'Before anything else, call the saihm_recall tool to load my SAIHM persistent memory for this session, then briefly summarize what you recalled. If you already have a topic in mind, pass it as a keyword — a focused recall is faster than loading everything.',
+          text: 'Before anything else, call the saihm_recall tool to load my SAIHM persistent memory for this session, then briefly summarize what you recalled. If you already have a topic in mind, pass it as a keyword — a focused recall is faster than loading everything — and also recall SAIHM-PROFILE, so any profile I saved still applies.',
         },
       },
     ],
@@ -2000,7 +2000,7 @@ const CONFIGURE_PROMPT_TEXT = [
   '1. Ask one menu with your recommendation; the user may pick more than one goal:',
   '- Cheapest tokens: recall instead of re-sending context; a lean session start; short reports.',
   '- Recall accuracy: recall before answering anything that may already be recorded.',
-  '- Team sharing: share only chosen memories, with specific agents and with expiries.',
+  '- Team sharing: when sharing, share only chosen memories, with specific agents and with expiries.',
   '- Strict compliance: erase on request with saihm_forget; keep audit evidence; never store secrets in memory.',
   '- Maximum rigor: a hostile review before shipping, and an assumption audit before load-bearing claims.',
   "Most goals are habits kept in the profile. A few need a launch setting in the host's MCP configuration (see " +
@@ -2009,8 +2009,8 @@ const CONFIGURE_PROMPT_TEXT = [
   '',
   "2. With the user's yes, save ONE memory with saihm_remember. Its first line:",
   'SAIHM-PROFILE v1 scope=<org|project|user> name=<org, project or user name> rev=<n>',
-  'Below it: the goals; what must persist (invariants, standing decisions, constraints); and the line from step 4, for ' +
-    'each session to print when it applies the profile. Progress and findings belong in other memories. Keep it under ' +
+  'Below it: the goals; what must persist (invariants, standing decisions, constraints); and the line from step 4 with its ' +
+    'angle-bracket parts as written, for each session to fill in and print when it applies the profile. Progress and findings belong in other memories. Keep it under ' +
     'about a thousand tokens.',
   '',
   '3. Read it back with saihm_recall and the cellId saihm_remember returned, and check that it says what the user approved.',
@@ -2040,15 +2040,15 @@ const CONFIGURE_PROMPT_TEXT = [
     'skill, and editing a settings or instruction file (such as `AGENTS.md` or `CLAUDE.md`) need the user\'s yes in the ' +
     'current session; a sub-agent does them only when the lead tells it to.',
   '',
-  'Hosts that support Agent Skills can install the full saihm-configure skill: ' +
-    'npx skills add SAIHM-Admin/saihm-skills --skill saihm-configure',
+  'Hosts that support Agent Skills can use the full saihm-configure skill: ask the user to run ' +
+    '`npx skills add SAIHM-Admin/saihm-skills --skill saihm-configure -g` themselves; do not run the installer yourself.',
 ].join('\n');
 
 server.registerPrompt(
   'saihm_configure',
   {
     title: 'Configure SAIHM memory',
-    description: 'Set how SAIHM memory behaves for you, by goal, saved as a profile your sessions apply.',
+    description: 'Set how SAIHM memory behaves for you, by goal, saved as a profile your sessions can apply.',
   },
   () => ({
     messages: [

@@ -18,7 +18,7 @@ A regulated payments company runs 40 services, each in its own repository. Its e
 
 1. **Migrate** card settlement to a new ledger service across all 40 repositories, keeping every interface decision consistent.
 2. **Handle a production incident** in week 6, mid-migration, and deliver a postmortem a regulator can follow.
-3. **Honour a customer's erasure request** that touches memories several agents hold.
+3. **Honor a customer's erasure request** that touches memories several agents hold.
 4. **Give a partner bank's planning agent** time-boxed access to the delivery forecast, and end it on the contract date.
 5. **Check every release** against the team's rules, in CI, without a person reading each changelog.
 

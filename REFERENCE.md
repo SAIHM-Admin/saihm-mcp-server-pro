@@ -197,8 +197,9 @@ bootstrap tool that answers *"Join SAIHM"*: on by default, removed by
 `saihm_session_bootstrap` (*Load SAIHM memory*) loads your memory at the start of a session,
 and `saihm_configure` (*Configure SAIHM memory*) asks which goals matter to you and saves them
 as one memory whose first line starts with `SAIHM-PROFILE`. The server's instructions tell each
-session to apply that profile. A profile sets preferences only: sharing, erasing and installing
-anything still need your yes in the session.
+session to apply a profile of yours that names you or your project, and to say so in one line.
+A profile sets preferences only: sharing, erasing, installing, editing configuration, skipping
+a confirmation and writing a profile still need your yes in the session.
 
 **Sharing.** `saihm_share` takes the `cellId` of one memory and the recipient: either
 `recipientRecordFile`, the full path of the file `identity-record` writes, or

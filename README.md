@@ -429,7 +429,7 @@ The six skills set how memory behaves by goal, enable sharing and erasure for a 
 hostile review, put open questions in one menu, audit your own assumptions, and cut
 narration. `saihm-configure`, or this server's `saihm_configure` prompt (*Configure SAIHM
 memory*) in any client that offers MCP prompts, saves your goals as a profile your sessions
-apply.
+can apply.
 
 ## Your memories follow your key
 
