@@ -1,8 +1,9 @@
 # SAIHM — memory for AI agents
 
-**Portable memory for AI agents.** Your assistant remembers what matters — across
-sessions, across models, across vendors. Share a memory with someone else's
-agent, take it back, or erase it for good.
+**An advanced sovereign, encrypted, sharable, persistent, enterprise-class memory protocol
+for AI agents.** Consumer-class tools remember; SAIHM can prove what it remembers, shares,
+and erases. Your assistant keeps what matters across sessions, models and vendors. Share a
+memory with someone else's agent, take it back, or erase it for good.
 
 [![npm version](https://img.shields.io/npm/v/@saihm/mcp-server-pro.svg)](https://www.npmjs.com/package/@saihm/mcp-server-pro)
 [![license](https://img.shields.io/npm/l/@saihm/mcp-server-pro.svg)](./LICENSE)
@@ -25,8 +26,9 @@ agent, take it back, or erase it for good.
 **Enjoyed them?** Like the videos, [subscribe to the SAIHM channel](https://www.youtube.com/@SAIHM-Memory?sub_confirmation=1),
 and turn on notifications with the bell 🔔 to hear about new videos and updates.
 
-**Prefer to read?** [The SAIHM manual](https://saihm.net/manual) (PDF) is a
-decision-maker's guide to SAIHM and [SHM](#shm--super-human-memory).
+**Prefer to read?** [The SAIHM manual](https://saihm.net/manual)
+([PDF](https://saihm.net/manual/SAIHM-Manual.pdf)) is a decision-maker's guide to SAIHM and
+[SHM](#shm--super-human-memory).
 
 AI assistants forget everything when the session ends. SAIHM gives yours a memory
 that doesn't — one that follows you to a different assistant, a different model,
@@ -413,6 +415,21 @@ copy becomes permanently unreadable — by you, by SAIHM, by anyone holding a ba
 it. This is how SAIHM answers a GDPR Article 17 erasure request, and it is why there
 is no undo. The answer confirms the erasure once the service's record of the key's
 destruction comes back with it.
+
+## Agent Skills
+
+The [SAIHM skills](https://github.com/SAIHM-Admin/saihm-skills) are Agent Skills for the AI
+clients that support them:
+
+```sh
+npx skills add SAIHM-Admin/saihm-skills
+```
+
+The six skills set how memory behaves by goal, enable sharing and erasure for a team, run a
+hostile review, put open questions in one menu, audit your own assumptions, and cut
+narration. `saihm-configure`, or this server's `saihm_configure` prompt (*Configure SAIHM
+memory*) in any client that offers MCP prompts, saves your goals as a profile your sessions
+apply.
 
 ## Your memories follow your key
 
@@ -817,14 +834,14 @@ If SAIHM is useful to you, here is how to help it reach more people:
 Upgrading? Run the upgrade command in [What it costs](#what-it-costs), then enter one of these
 codes in the promotion-code box at checkout:
 
-| Code | Offer |
-|---|---|
-| `SAIHM-90-OFF` | 90% off your first payment, for new customers |
-| `SAIHM-75-OFF` | 75% off your first payment |
-| `SAIHM-50-OFF` | 50% off for four months |
-| `SAIHM-25-OFF` | 25% off for six months |
+| Code | Offer | Valid through |
+|---|---|---|
+| `SAIHM-90-OFF` | 90% off your first payment, for new customers | December 2026 |
+| `SAIHM-75-OFF` | 75% off your first payment | March 2027 |
+| `SAIHM-50-OFF` | 50% off for four months | June 2027 |
+| `SAIHM-25-OFF` | 25% off for six months | December 2027 |
 
-One code per checkout, while the offers last.
+There are 100,000 of each code. One code per checkout, while the offers last.
 
 ## License
 
