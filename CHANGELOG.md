@@ -40,6 +40,8 @@ and the month each discount code is valid through. No tool added or removed.
   for approval names the reason its message carries, `no_free_entitlement`.
 - **The README's introduction** describes SAIHM as an enterprise-class memory protocol
   for AI agents that can prove what it remembers, shares and erases.
+- **The case study** frames its scenario as an example rather than a quarter, with a
+  shorter introduction.
 
 ## [0.14.3] — 2026-10-27
 
