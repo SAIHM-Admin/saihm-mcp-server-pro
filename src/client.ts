@@ -149,6 +149,7 @@ import {
 } from './warm-start.js';
 import { FileFeedStore, feedStatePath } from './feed-state-file.js';
 import { SessionTokenFile } from './session-token-file.js';
+import { PAID_PLAN_TIERS, PlanFile, paidPlanOf, type PaidPlan } from './plan-file.js';
 import { readShareStates, shareStatesPath, writeShareStates } from './share-states-file.js';
 import { ChangeFeedWriter, DESTRUCTION_ANCHOR, isoTime } from './change-feed.js';
 import { MALFORMED, safePathField, MAX_PATH_FIELD_CHARS } from './render_fence.js';
@@ -337,17 +338,68 @@ export const SIGN_IN_LIMITED = 'SAIHM could not sign in: too many sign-ins in a 
  * enough that the whole message, with every endpoint-chosen part at its slice, stays inside the
  * plain-message render budget.
  */
-function onboardRemedy(status: number, code: string | undefined, reason: string | undefined): string {
+function onboardRemedy(status: number, code: string | undefined, reason: string | undefined, followsPlan: boolean): string {
   if (status !== 401 || code !== 'verification_failed') return '';
   // The join comes FIRST (0.14.3, O22): this is what an identity whose free join waits for approval meets, from any
   // process but the one running the join (that one answers with the join's own steps), and the paid-plan variables
   // first read as if a new identity were needed. A join run again reuses the key that is there.
+  // A CLIENT THAT FOLLOWS THE PLAN (0.15.0) has already been told of any card, PayPal or Paystack subscription on this
+  // key, and switched to it: only a plan the server does not report this way, such as one paid in stablecoin, still
+  // needs the two settings. An identity token's paid plan is not followed (0.15.0 review): it gets the plain hint,
+  // since with no settings the token's plan applies and "leave them unset" was a dead end.
   if (reason === 'no_free_entitlement')
-    return ' A free join may still be waiting for approval: open its link and enter its code, or say "Join SAIHM". Paid plan? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for it.';
+    return followsPlan
+      ? ' A free join may still be waiting for approval: open its link and enter its code, or say "Join SAIHM". Stablecoin plan? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD.'
+      : ' A free join may still be waiting for approval: open its link and enter its code, or say "Join SAIHM". Paid plan? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for it.';
   if (reason === 'no_active_subscription')
-    return ' Check that SAIHM_TIER names the plan this identity was bought on.';
+    return followsPlan
+      ? ' Check that SAIHM_TIER names the plan this identity was bought on, or leave SAIHM_TIER and SAIHM_PAYMENT_METHOD unset so SAIHM finds the plan.'
+      : ' Check that SAIHM_TIER names the plan this identity was bought on.';
   return '';
 }
+
+/**
+ * What an onboard refusal said about the plan (0.15.0), kept beside the error it became: its reason, when it is one of
+ * the two this client acts on, and the paid plan a refusal of a FREE onboard named. Nothing else of the answer is kept.
+ */
+const onboardRefusals = new WeakMap<SaihmEndpointError, { reason: 'no_free_entitlement' | 'no_active_subscription' | undefined; paid: PaidPlan | undefined }>();
+
+/** True when `e` is an onboard refusal for `reason`, as its answer's typed `reason` gave it (exact match). */
+const onboardRefusedFor = (e: unknown, reason: 'no_free_entitlement' | 'no_active_subscription'): boolean =>
+  e instanceof SaihmEndpointError && onboardRefusals.get(e)?.reason === reason;
+
+/**
+ * How long a plan whose paid sign-in was refused is not switched to again (0.15.0): a loop guard, so a server that names
+ * a plan it then refuses costs one more onboard per sign-in at most. HELD BY PLAN AND PAYMENT METHOD, and SHORTER THAN
+ * THE FREE SIGN-IN'S FIRST REFRESH (0.15.0 review): its token lives an hour and is refreshed a minute early, so that
+ * refresh may take back a plan refused once by a renewal gap or a store error, and a paying customer spends one free
+ * sign-in on FREE, not two; the same plan moved to another payment provider is another plan here, taken at once. A
+ * hold also ends at that refresh when the refresh comes first (0.15.0 review 2): see {@link SaihmProClient.signInOnPlan}.
+ */
+const PLAN_REFUSAL_HOLD_MS = 50 * 60_000;
+/** How often a client whose settings name a refused plan asks, with one FREE onboard, which plan the key has (0.15.0). */
+const FREE_PROBE_INTERVAL_MS = 60 * 60_000;
+
+/** The key a refused plan is held under (0.15.0): its name and payment method, from the closed sets or the settings. */
+const heldPlanKey = (tier: string, paymentMethod: string | undefined): string => `${tier} ${paymentMethod ?? ''}`;
+
+/**
+ * The status note after a plan found from the server was refused at sign-in and the client went back to the free plan
+ * (0.15.0). It says what the sign-in found, not that the plan ended: a renewal gap or a store error is refused the same
+ * way. "Within the hour" is the free sign-in's refresh, past the hold. `plan` is a name from the closed set.
+ */
+const planLapsedNote = (plan: string): string =>
+  `SAIHM found no active subscription for this key's ${plan} plan at sign-in, so this client now signs in on the free plan. Once a plan is active, this client switches to it within the hour. To renew, email ops@saihm.net.`;
+
+/**
+ * The same with no free plan to fall back to (0.15.0): after "SAIHM " as the status note, and after "SAIHM could not
+ * sign in: it " as the `plan_inactive` error (inside the 256-character budget at the longest plan name, pinned by a
+ * test). No sign-in can be kept on such a key, so a restart signs in afresh, in a process that holds no plan back. Not
+ * "at once" (0.15.0 review 2): once sign-ins from this network have met the endpoint's limit, the restart's first
+ * sign-in comes after the wait that limit names.
+ */
+const planInactiveSaid = (plan: string): string =>
+  `found no active subscription for this key's ${plan} plan, and no free plan. Once a plan is active, this client switches to it within the hour, or at the first sign-in after a restart. To renew, email ops@saihm.net.`;
 
 /**
  * Appended to the one boot error that is not about an identity: an empty SAIHM_ENDPOINT_URL. A bare
@@ -474,6 +526,15 @@ const MONTHLY_PAID_TIERS: ReadonlySet<string> = new Set([
   'ENTERPRISE',
   'ENTERPRISE_FAST',
 ]);
+
+/**
+ * The refusal {@link SaihmProClient.requestUpgradeUrl} gives a key that already holds a paid plan (0.15.0): a second
+ * checkout for the same key would bill it twice. `tier` comes from the closed set `paidPlanOf` admits, or is undefined
+ * when a checkout refused this way named no plan from that set. Only the address is named (0.15.0 review): the site
+ * offers no billing-portal sign-in for a returning customer, so the address is the route every buyer has.
+ */
+const alreadySubscribedText = (tier: string | undefined): string =>
+  `This key already has ${tier ?? 'a paid plan'}, so no checkout was created. To change or cancel your plan, email ops@saihm.net.`;
 
 /** Lifetime-usage fractions (percent) at which the FREE tier surfaces an upgrade nag. 100 = hard cap reached. */
 const QUOTA_NAG_THRESHOLDS = [80, 95, 100] as const;
@@ -2372,6 +2433,30 @@ export interface SaihmProClientOpts {
    */
   persistSessionToken?: boolean;
   /**
+   * Follow the paid plan the endpoint reports for this identity (0.15.0). When a FREE sign-in's answer, or its refusal
+   * for want of a free plan, says this identity holds an active paid subscription, the client switches to that plan
+   * and signs in on it at once; when a paid sign-in on a plan found this way is refused for want of an active
+   * subscription, it goes back to FREE. Only a FREE `tier` ever switches: a paid one given here is kept as given. Off
+   * unless asked for, like the files below: `bootFromEnv` turns it on. Ignored with a static `authHeader`.
+   */
+  detectPlan?: boolean;
+  /**
+   * With `detectPlan`: save a plan found that way in this identity's plan file (see {@link defaultPlanPath}), remove it
+   * when the plan is refused, and, where `tier` is FREE, start from the plan saved there (0.15.0). Off unless asked
+   * for: `bootFromEnv` turns it on.
+   */
+  persistPlan?: boolean;
+  /**
+   * With `persistPlan`: false keeps `tier` as given at start, whatever the plan file holds, while a plan found later
+   * is still saved. For the free-join and upgrade paths, which need the FREE plan they were given.
+   */
+  startFromSavedPlan?: boolean;
+  /**
+   * Where `tier` came from, as `plan` reports it: `settings` (SAIHM_TIER, or the caller's code; the default),
+   * `identity` (an identity token), or `default` (the self-join default).
+   */
+  tierSource?: 'settings' | 'identity' | 'default';
+  /**
    * The proof-of-entitlement rail (`"stripe"`, `"stablecoin"`, …) used when SELF-ONBOARDING (i.e.
    * no static `authHeader`). Sent in the `/api/onboard` request alongside the ML-DSA-signed nonce.
    * Required for self-onboarding; ignored when a static `authHeader` is supplied.
@@ -2714,6 +2799,22 @@ export function defaultSessionTokenPath(agentIdHashHex: string): string {
   return pathJoin(dirname(defaultIdentityPath()), `session.${agentIdHashHex.slice(0, 16)}.json`);
 }
 
+/**
+ * Where the plan saved from the server is kept (0.15.0): beside the key file, the sequence marks and the kept sign-in,
+ * named by the identity's hash like them, so two identities sharing a home never use each other's. See {@link PlanFile}.
+ */
+export function defaultPlanPath(agentIdHashHex: string): string {
+  return pathJoin(dirname(defaultIdentityPath()), `plan.${agentIdHashHex.slice(0, 16)}.json`);
+}
+
+/** How long after `upgrade` printed a link a FREE sign-in is not kept on this device (0.15.0). */
+const UPGRADE_PENDING_MS = 24 * 60 * 60_000;
+
+/** The empty file whose age says `upgrade` printed a checkout link on this device (0.15.0); see `markUpgradePending`. */
+export function defaultUpgradePendingPath(agentIdHashHex: string): string {
+  return pathJoin(dirname(defaultIdentityPath()), `upgrade.${agentIdHashHex.slice(0, 16)}.pending`);
+}
+
 /** A file's first line, read no further than the longest line the feed writes (1 KiB, its newline included). */
 function firstLineOf(path: string): string {
   const firstLineReader = openSync(path, 'r');
@@ -3024,6 +3125,12 @@ function dirCanBeWritten(dir: string): boolean {
   }
 }
 
+/**
+ * Where a client's plan came from (0.15.0), as its `plan` reports it: `settings` (SAIHM_TIER, or the caller's code),
+ * `identity` (an identity token), `server` (saved from the server: a free sign-in's answer named it), or `default`.
+ */
+export type PlanSource = 'settings' | 'identity' | 'server' | 'default';
+
 /** The identity this process boots, as {@link resolveIdentityFromEnv} found it. */
 export interface ResolvedIdentity {
   /** The master secret. The CALLER owns it and must scrub it (`fill(0)`) when done. */
@@ -3249,7 +3356,7 @@ export function resolveIdentityFromEnv(): ResolvedIdentity {
           'variables or secrets - never in this chat or a file in the repository; each host\'s steps ' +
           "are in the package README under Hosted agent environments), then start a new session. " +
           'New to SAIHM? Say ' +
-          "'Join SAIHM' to start a new, empty memory.\" Run the saihm_join tool only when they ask " +
+          "'Join SAIHM' (or 'Add SAIHM') to start a new, empty memory.\" Run the saihm_join tool only when they ask " +
           'to join, then try again. Never ask for either value in the chat.',
         'path',
       );
@@ -4394,8 +4501,8 @@ export class SaihmProClient {
   private readonly endpoint: string;
   /** A static Authorization header (e.g. `"Bearer <JWT>"`), or `undefined` in self-onboard mode. */
   private readonly staticAuthHeader: string | undefined;
-  /** Self-onboard only: the proof-of-entitlement rail sent to `/api/onboard`. */
-  private readonly paymentMethod: string | undefined;
+  /** Self-onboard only: the proof-of-entitlement rail sent to `/api/onboard`. Changes with a plan the endpoint reports. */
+  private paymentMethod: string | undefined;
   /** WS-J discovery-attribution tag sent as `source` on self-onboard (optional). */
   private readonly discoverySource: string | undefined;
   /** Base origin for `/api/onboard*` + `/api/stripe/*` calls (defaults to the endpoint origin). */
@@ -4425,6 +4532,29 @@ export class SaihmProClient {
   private saidRecallIsUncached = false;
   private readonly requestTimeoutMs: number;
   private tier: string | undefined;
+  /** Where `tier` came from (0.15.0): `server` for a plan the endpoint reported, saved earlier or found in this process. */
+  private tierSource: PlanSource;
+  /** The plan this client was given (0.15.0): what it goes back to when a plan the endpoint reported is refused. */
+  private readonly givenPlan: { tier: string | undefined; paymentMethod: string | undefined; source: PlanSource };
+  /** Follow the paid plan the endpoint reports (0.15.0); see {@link SaihmProClientOpts.detectPlan}. */
+  private readonly detectPlan: boolean;
+  /** The plan saved from the server (0.15.0), when on; see {@link PlanFile}. */
+  private planFile: PlanFile | undefined;
+  /** What `plan` says beside the plan after a switch did not complete or a plan lapsed (0.15.0); a switch clears it. */
+  private planNote: string | undefined;
+  /**
+   * Until when each plan whose paid sign-in was refused for want of a subscription is not switched to again (0.15.0), by
+   * plan and payment method ({@link heldPlanKey}): {@link PLAN_REFUSAL_HOLD_MS} after the refusal, or the scheduled
+   * refresh of the free sign-in held beside it, whichever comes first ({@link signInOnPlan}).
+   */
+  private readonly planHolds = new Map<string, number>();
+  /**
+   * The plan refused on a key with no free plan to fall back to (0.15.0), until a sign-in succeeds: every sign-in until
+   * then is refused as that, not as a free join waiting for approval.
+   */
+  private inactivePlan: string | undefined;
+  /** When this process last asked which plan the key has, for settings that name a refused plan (0.15.0). */
+  private lastFreeProbeAt = -Infinity;
   // Self-onboard token cache (single-flight via authInFlight). Written to disk only as the kept sign-in below.
   private cachedJwt: string | undefined;
   private cachedJwtRefreshAtMs = 0;
@@ -4450,6 +4580,9 @@ export class SaihmProClient {
     this.identity = deriveIdentity(masterSecret);
     this.agentIdHashHex = toHex(this.identity.agentIdHash);
     this.tier = opts.tier;
+    this.givenPlan = { tier: opts.tier, paymentMethod: opts.paymentMethod, source: opts.tierSource ?? 'settings' };
+    this.tierSource = this.givenPlan.source;
+    this.detectPlan = opts.detectPlan === true && !(typeof authHeader === 'string' && authHeader.trim());
     this.onQuotaNag = opts.onQuotaNag;
     this.discoverySource = opts.discoverySource;
     this.seq = new SeqState(
@@ -4523,6 +4656,18 @@ export class SaihmProClient {
         );
       }
       this.paymentMethod = opts.paymentMethod;
+      // A PLAN SAVED FROM THE SERVER (0.15.0) applies only where the plan would otherwise be FREE: a paid tier given here,
+      // from SAIHM_TIER or an identity token, always wins. It is read after the checks above, so a saved plan never
+      // excuses a configuration they refuse.
+      if (this.detectPlan && opts.persistPlan === true) {
+        this.planFile = new PlanFile(defaultPlanPath(this.agentIdHashHex), this.agentIdHashHex);
+        const saved = this.tier === 'FREE' && opts.startFromSavedPlan !== false ? this.planFile.read() : undefined;
+        if (saved !== undefined) {
+          this.tier = saved.tier;
+          this.paymentMethod = saved.paymentMethod;
+          this.tierSource = 'server';
+        }
+      }
       // Bound to what the token is for: a file kept for another endpoint, identity, plan or payment method is not used.
       if (opts.persistSessionToken === true) {
         this.sessionTokens = new SessionTokenFile(defaultSessionTokenPath(this.agentIdHashHex), () => ({
@@ -4535,7 +4680,11 @@ export class SaihmProClient {
     }
   }
 
-  static bootFromEnv(): SaihmProClient {
+  /**
+   * `savedPlan: false` (0.15.0) starts from the plan the settings give, whatever plan was saved from the server: the
+   * free-join and upgrade paths need the FREE plan, and SAIHM_TIER=FREE would not reach it past a saved plan.
+   */
+  static bootFromEnv(boot: { savedPlan?: boolean } = {}): SaihmProClient {
     // Unset => the hosted operator declared as this var's default in server.json.
     // Explicitly empty is still a configuration error, not an opt-in to the default.
     const endpoint =
@@ -4619,6 +4768,13 @@ export class SaihmProClient {
     else if (!recallCacheOff && id.keyFile && !temporaryHome && dirCanBeWritten(dirname(defaultIdentityPath()))) opts.persistRecallCache = true;
     if (optPaymentMethod) opts.paymentMethod = optPaymentMethod;
     if (optDiscoverySource) opts.discoverySource = optDiscoverySource;
+    // THE SERVER FOLLOWS THE PLAN THE ENDPOINT REPORTS (0.15.0): after a payment, a FREE client switches to the paid plan
+    // at its next sign-in, with no settings to edit, and keeps it in SAIHM_HOME beside the sequence marks for the next
+    // session. Where the plan would otherwise be FREE only: a paid SAIHM_TIER, or a token's paid plan, is kept as given.
+    opts.detectPlan = true;
+    opts.persistPlan = true;
+    if (boot.savedPlan === false) opts.startFromSavedPlan = false;
+    opts.tierSource = id.tierFrom === 'SAIHM_IDENTITY' ? 'identity' : id.tierFrom === 'default' ? 'default' : 'settings';
     // THE SERVER OPTS IN to keeping its sign-in between sessions (0.14.3), for the DEFAULT key file only: the token file
     // then sits beside the key that can mint any number of them. A key file elsewhere (a removable or encrypted volume,
     // a mounted secret), an identity token and an inline secret sign in once per session, as before; so does any
@@ -4740,10 +4896,12 @@ export class SaihmProClient {
         return kept;
       }
     }
-    const jwt = await this.onboard();
+    const jwt = await this.signInOnPlan();
     this.keptSignInRefused = false;
-    // Only a token whose expiry can be read: the next session could not tell whether any other is still good.
-    if (jwtExpMs(jwt) !== undefined) this.sessionTokens?.keep(jwt);
+    // Only a token whose expiry can be read: the next session could not tell whether any other is still good. Nor a FREE
+    // one while an upgrade waits for its plan (0.15.0): the next session's first sign-in then finds the plan.
+    if (jwtExpMs(jwt) !== undefined && !(this.detectPlan && this.tier === 'FREE' && this.sessionTokens !== undefined && this.upgradePending()))
+      this.sessionTokens?.keep(jwt);
     return jwt;
   }
 
@@ -4775,8 +4933,11 @@ export class SaihmProClient {
    * verifies the signature + an active subscription and returns a short-lived JWT, which is cached
    * with its decoded expiry. The master secret / secret key never leave this process.
    */
-  private async onboard(): Promise<string> {
+  private async onboard(probe = false): Promise<{ jwt: string; paid: PaidPlan | undefined }> {
     const base = this.onboardBase;
+    // Only a FREE onboard's answer reports a paid plan (0.15.0): its success, or its refusal for want of a free plan. A
+    // PROBE is a FREE onboard made only to read that, whatever plan this client is on; its sign-in is not used.
+    const free = probe || this.tier === 'FREE';
     const ch = await this.onboardFetch<{ nonce?: unknown }>(
       base + '/api/onboard/challenge',
       { method: 'GET' },
@@ -4802,21 +4963,34 @@ export class SaihmProClient {
     const signature = toHex(
       signChallenge(this.identity.mldsaSecretKey, nonceBytes),
     );
-    const out = await this.onboardFetch<{ jwt?: unknown }>(
-      base + '/api/onboard',
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          pubkey: toHex(this.identity.mldsaPubKey),
-          nonce,
-          signature,
-          tier: this.tier,
-          paymentMethod: this.paymentMethod,
-          ...(this.discoverySource ? { source: this.discoverySource } : {}),
-        }),
-      },
-    );
+    // What a refusal said about the plan, read by the callback and kept beside the error (see onboardRefusals).
+    const seen: { refusal?: { reason: 'no_free_entitlement' | 'no_active_subscription' | undefined; paid: PaidPlan | undefined } } = {};
+    let out: { jwt?: unknown; paid?: unknown };
+    try {
+      out = await this.onboardFetch<{ jwt?: unknown; paid?: unknown }>(
+        base + '/api/onboard',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            pubkey: toHex(this.identity.mldsaPubKey),
+            nonce,
+            signature,
+            tier: probe ? 'FREE' : this.tier,
+            paymentMethod: probe ? undefined : this.paymentMethod,
+            ...(this.discoverySource ? { source: this.discoverySource } : {}),
+          }),
+        },
+        (status, body) => {
+          if (status !== 401 || body.error !== 'verification_failed') return;
+          const reason = body.reason === 'no_free_entitlement' || body.reason === 'no_active_subscription' ? body.reason : undefined;
+          seen.refusal = { reason, paid: free && reason === 'no_free_entitlement' ? paidPlanOf(body.paid) : undefined };
+        },
+      );
+    } catch (e) {
+      if (seen.refusal !== undefined && e instanceof SaihmEndpointError) onboardRefusals.set(e, seen.refusal);
+      throw e;
+    }
     if (typeof out.jwt !== 'string' || out.jwt.length === 0) {
       throw new SaihmEndpointError(
         502,
@@ -4826,8 +5000,275 @@ export class SaihmProClient {
     }
     // Schedule proactive refresh BEFORE expiry. Honor the token's own `exp`; for an opaque token assume
     // a short conservative TTL.
-    this.holdToken(out.jwt, jwtExpMs(out.jwt) ?? Date.now() + OPAQUE_TOKEN_TTL_MS);
-    return out.jwt;
+    if (!probe) this.holdToken(out.jwt, jwtExpMs(out.jwt) ?? Date.now() + OPAQUE_TOKEN_TTL_MS);
+    return { jwt: out.jwt, paid: free ? paidPlanOf(out.paid) : undefined };
+  }
+
+  /**
+   * A fresh sign-in that follows the plan the endpoint reports (0.15.0; see {@link SaihmProClientOpts.detectPlan}).
+   * Without that, it is one onboard on the plan given. With it, the plan changes at most twice per sign-in, each change
+   * costs one onboard, and nothing here waits or polls:
+   * - a plan found from the server, saved or switched to here, that the endpoint refuses for want of an active
+   *   subscription has LAPSED or CHANGED (a plan or payment-provider change, a renewal gap, a store error): the client
+   *   goes back to the plan it was given (FREE: a found plan applies only there), removes the saved plan, and signs in
+   *   once on FREE, whose answer may name the new plan (not the refused plan on the same payment method, for
+   *   {@link PLAN_REFUSAL_HOLD_MS}); with no free plan, `plan_inactive` until a sign-in succeeds
+   *   ({@link planInactive});
+   * - settings that name a refused plan are kept, and say which plan the key has ({@link settingsPlanRefused});
+   * - a FREE answer, or a FREE refusal for want of a free plan, that names a paid plan switches to it
+   *   ({@link switchToPaidPlan}).
+   */
+  private async signInOnPlan(): Promise<string> {
+    const jwt = await this.signInFollowingPlan();
+    if (this.inactivePlan !== undefined) {
+      // Signed in after a plan was refused on a key with no free plan: switched (the note is cleared there), or on a
+      // free plan granted since, which the note now says.
+      if (this.tier === 'FREE') this.planNote = planLapsedNote(this.inactivePlan);
+      this.inactivePlan = undefined;
+    }
+    // ON THE FREE PLAN NOW: no hold outlasts the scheduled refresh of the sign-in just held (0.15.0 review 2). That
+    // refresh time comes from the token's own expiry, which the server's clock sets; the hold is counted on this
+    // computer's clock. With this clock ahead of the server's by more than the few minutes between the hold's end and
+    // that refresh, the first refresh fell inside the hold, and a plan back in force waited a second token period. Only
+    // a token's own expiry ends a hold early: a token without one is refreshed on this clock after a short assumed life,
+    // and a refresh time already past (a clock ahead by more than the token's whole life) is no refresh at all, so in
+    // both cases each sign-in during the hold still costs one onboard, not two.
+    // KEPT AT A MEASURED COST (0.15.0 review 3): where that refresh comes less than 50 minutes after the refusal (a token
+    // life of 50 minutes or less, or, with an hour's token, this clock more than 9 minutes ahead), a server that names a
+    // plan and refuses it is asked again at every refresh, one extra onboard per sign-in at most. A floor under the
+    // hold, or a hold cut only once, asks less often but skips a refresh at which a plan back in force would be taken,
+    // so a fast clock would again cost a paying customer a token period or more.
+    const refreshAt = this.cachedJwtRefreshAtMs;
+    if (this.tier === 'FREE' && jwtExpMs(jwt) !== undefined && refreshAt > Date.now())
+      for (const [key, until] of this.planHolds) if (refreshAt < until) this.planHolds.set(key, refreshAt);
+    return jwt;
+  }
+
+  /** Hold `tier` on `paymentMethod`, whose paid sign-in was refused just now for want of a subscription (0.15.0). */
+  private holdPlan(tier: string, paymentMethod: string | undefined): void {
+    this.planHolds.set(heldPlanKey(tier, paymentMethod), Date.now() + PLAN_REFUSAL_HOLD_MS);
+  }
+
+  /** {@link signInOnPlan}'s sign-in, before what a success settles. */
+  private async signInFollowingPlan(): Promise<string> {
+    let lapsed: { tier: string; paymentMethod: string | undefined };
+    try {
+      const jwt = await this.onboardFollowingPlan();
+      // The paid plan the settings name signed in: a note that the key had another plan (the only note a paid plan from
+      // the settings gets) is out of date.
+      if (this.tierSource === 'settings' && this.tier !== 'FREE') this.planNote = undefined;
+      return jwt;
+    } catch (e) {
+      // A plan this process found refused on a key with no free plan: each later refusal of the free plan is still
+      // that, not a free join waiting for approval (0.15.0 review).
+      if (this.inactivePlan !== undefined && onboardRefusedFor(e, 'no_free_entitlement'))
+        throw this.planInactive(this.inactivePlan);
+      if (!onboardRefusedFor(e, 'no_active_subscription')) throw e;
+      if (this.tierSource === 'settings') throw await this.settingsPlanRefused(e);
+      if (this.tierSource !== 'server') throw e;
+      lapsed = { tier: this.tier ?? '', paymentMethod: this.paymentMethod };
+    }
+    this.holdPlan(lapsed.tier, lapsed.paymentMethod);
+    this.tier = this.givenPlan.tier;
+    this.paymentMethod = this.givenPlan.paymentMethod;
+    this.tierSource = this.givenPlan.source;
+    this.planFile?.discard();
+    this.planNote = planLapsedNote(lapsed.tier);
+    try {
+      return await this.onboardFollowingPlan();
+    } catch (e) {
+      if (!onboardRefusedFor(e, 'no_free_entitlement')) throw e;
+      // No free plan to fall back to: said as the lapse it is, not as a free join waiting for approval.
+      throw this.planInactive(lapsed.tier);
+    }
+  }
+
+  /**
+   * `plan` was refused for want of an active subscription on a key with no free plan to fall back to (0.15.0): the note
+   * says so, and so does every sign-in until one succeeds. Returns the error to throw.
+   */
+  private planInactive(plan: string): SaihmEndpointError {
+    this.inactivePlan = plan;
+    this.planNote = `SAIHM ${planInactiveSaid(plan)}`;
+    return new SaihmEndpointError(401, 'plan_inactive', `SAIHM could not sign in: it ${planInactiveSaid(plan)}`);
+  }
+
+  /**
+   * The settings name a paid plan the endpoint refused for want of an active subscription (0.15.0). Settings are never
+   * overridden: the client stays on that plan. At most once an hour per process, one FREE onboard asks which plan the
+   * key has; when it names another plan, or the same plan on another payment method (0.15.0 review), the error and the
+   * status say so. Otherwise the refusal is returned as it came.
+   */
+  private async settingsPlanRefused(refusal: unknown): Promise<unknown> {
+    if (!this.detectPlan || Date.now() - this.lastFreeProbeAt < FREE_PROBE_INTERVAL_MS) return refusal;
+    this.lastFreeProbeAt = Date.now();
+    const paid = await this.paidPlanOnKey();
+    if (paid === undefined || (paid.tier === this.tier && paid.paymentMethod === this.paymentMethod)) return refusal;
+    if (paid.tier === this.tier) {
+      // The plan is right and the payment method is not: the method is named, from the closed set (239 characters in
+      // the error below at the longest names; the budget is 256). The settings' own method is not shown.
+      this.planNote =
+        `This key's ${paid.tier} plan is paid through ${paid.paymentMethod}: set SAIHM_PAYMENT_METHOD to ` +
+        `${paid.paymentMethod}, or remove SAIHM_TIER and SAIHM_PAYMENT_METHOD to let SAIHM pick the plan.`;
+    } else {
+      const shown = this.tier === undefined ? null : displayablePlan(this.tier);
+      this.planNote =
+        `This key's plan is ${paid.tier}, but your settings say ${shown ?? 'another plan'}. Remove SAIHM_TIER and ` +
+        `SAIHM_PAYMENT_METHOD to let SAIHM pick the plan, or set SAIHM_TIER to ${paid.tier}.`;
+    }
+    return new SaihmEndpointError(
+      401,
+      'verification_failed',
+      `SAIHM could not sign in (verification_failed: no_active_subscription). ${this.planNote}`,
+    );
+  }
+
+  /**
+   * The paid plan this key holds, as ONE FREE onboard reports it (0.15.0), whatever plan this client is on; its sign-in
+   * is not used. Best effort: undefined when the answer names no plan or the onboard fails in any way, and never retried
+   * here. The endpoint names only a plan paid through a payment provider (never a stablecoin plan), and only when its
+   * lookup answers in time, so undefined does not prove the key has no plan. With `limitStops`, a sign-in limit (429)
+   * is thrown instead: see {@link requestUpgradeUrl}.
+   */
+  private async paidPlanOnKey(limitStops = false): Promise<PaidPlan | undefined> {
+    try {
+      return (await this.onboard(true)).paid;
+    } catch (e) {
+      if (limitStops && e instanceof SaihmEndpointError && e.status === 429) throw e;
+      return e instanceof SaihmEndpointError ? onboardRefusals.get(e)?.paid : undefined;
+    }
+  }
+
+  /** One onboard on the current plan, and a switch when its FREE answer names a paid plan this client may take. */
+  private async onboardFollowingPlan(): Promise<string> {
+    let answer: { jwt: string; paid: PaidPlan | undefined };
+    try {
+      answer = await this.onboard();
+    } catch (e) {
+      const paid = e instanceof SaihmEndpointError ? onboardRefusals.get(e)?.paid : undefined;
+      if (paid !== undefined && this.mayTakePlan(paid)) return this.switchToPaidPlan(paid, undefined);
+      throw e;
+    }
+    return answer.paid !== undefined && this.mayTakePlan(answer.paid)
+      ? this.switchToPaidPlan(answer.paid, answer.jwt)
+      : answer.jwt;
+  }
+
+  /**
+   * Whether this client takes the paid plan a FREE answer named: only while it follows the plan and is FREE (a paid
+   * SAIHM_TIER, or a token's paid plan, never switches), and not a plan, on that payment method, still held after its
+   * paid sign-in was refused ({@link planHolds}).
+   */
+  private mayTakePlan(paid: PaidPlan): boolean {
+    const heldUntil = this.planHolds.get(heldPlanKey(paid.tier, paid.paymentMethod));
+    return this.detectPlan && this.tier === 'FREE' && (heldUntil === undefined || Date.now() >= heldUntil);
+  }
+
+  /**
+   * Switch to `paid`, which a FREE answer named (0.15.0): set it in this process, save it, and sign in on it at once.
+   * That one paid onboard is the only extra one, and its own answer is not read for a plan. `freeJwt` is the FREE
+   * sign-in this client already holds, or undefined when the FREE onboard was refused for want of a free plan.
+   * - Refused for want of an active subscription: the endpoint does not hold the plan its answer named. Back to the
+   *   plan before, the saved plan removed and that plan, on that payment method, not taken again for the hold; the FREE
+   *   sign-in is kept, or, with none, the caller meets `plan_inactive` (the key has no free plan: a free join is not
+   *   what waits, so the free refusal's own words would mislead).
+   * - Any other failure: back to FREE for now with the FREE sign-in, the saved plan kept, and the next sign-in (within
+   *   the hour) tries again. With no FREE sign-in (the free plan was refused), the plan stays, so the next sign-in is one
+   *   onboard on it, not two.
+   */
+  private async switchToPaidPlan(paid: PaidPlan, freeJwt: string | undefined): Promise<string> {
+    const before = { tier: this.tier, paymentMethod: this.paymentMethod, source: this.tierSource };
+    const restore = (): void => {
+      this.tier = before.tier;
+      this.paymentMethod = before.paymentMethod;
+      this.tierSource = before.source;
+    };
+    this.tier = paid.tier;
+    this.paymentMethod = paid.paymentMethod;
+    this.tierSource = 'server';
+    this.planNote = undefined;
+    this.planFile?.keep(paid);
+    try {
+      const { jwt } = await this.onboard();
+      try {
+        unlinkSync(defaultUpgradePendingPath(this.agentIdHashHex)); // the plan is found: sign-ins are kept again
+      } catch {
+        /* none was pending */
+      }
+      return jwt;
+    } catch (e) {
+      if (onboardRefusedFor(e, 'no_active_subscription')) {
+        this.holdPlan(paid.tier, paid.paymentMethod);
+        this.planFile?.discard();
+        restore();
+        if (freeJwt === undefined) throw this.planInactive(paid.tier);
+        this.planNote = `SAIHM reports the ${paid.tier} plan on this key, but signing in on it was refused, so this client stays on the free plan for now and checks again within the hour.`;
+        return freeJwt;
+      }
+      if (freeJwt === undefined) throw e;
+      restore();
+      this.planNote = `SAIHM found this key's ${paid.tier} plan but could not switch to it just now. It tries again within the hour.`;
+      return freeJwt;
+    }
+  }
+
+  /**
+   * After `upgrade` prints a checkout link (0.15.0): remove the sign-in this identity kept on this device, and keep no
+   * FREE sign-in here for a day or until a plan is found, so the first sign-in of the next session is a fresh one,
+   * whose answer names the plan once it is paid: "restart it" switches a client on this device at once. Nothing waits
+   * for the payment. Never throws.
+   */
+  markUpgradePending(): void {
+    const marker = defaultUpgradePendingPath(this.agentIdHashHex);
+    try {
+      mkdirSync(dirname(defaultIdentityPath()), { recursive: true, mode: 0o700 });
+      // NEVER WRITTEN THROUGH ITS NAME (0.15.0 review): the name is predictable (the agent ID is public) and sits
+      // beside the key file, in a folder another user of the group may write, and writing to a path follows a link
+      // planted there: planted as a link to the key file, the marker emptied the key, and with it the identity and
+      // every memory. A new file, created here and nowhere else (`wx` refuses any name that exists, a link included),
+      // renamed over the marker's name: the rename replaces that name itself, never a file a link at it points to.
+      const tmp = `${marker}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+      writeFileSync(tmp, '', { mode: 0o600, flag: 'wx' });
+      try {
+        renameSync(tmp, marker);
+      } catch (e) {
+        try {
+          unlinkSync(tmp); // `wx` proves this process made it: only this exact name is removed
+        } catch {
+          /* already gone */
+        }
+        throw e;
+      }
+    } catch {
+      /* a folder that cannot be written: a kept FREE sign-in may delay the switch until it expires, within the hour */
+    }
+    this.discardKeptSignIn();
+  }
+
+  /**
+   * A FREE sign-in is not kept while an upgrade printed on this device in the last day waits for its plan (0.15.0): a
+   * marker that is a regular file of this user's with one name, not a link, not a second name for another file (0.15.0
+   * review 2, as {@link PlanFile} reads its file) and not another user's file, which could hold sign-ins back for a day.
+   */
+  private upgradePending(): boolean {
+    try {
+      const st = lstatSync(defaultUpgradePendingPath(this.agentIdHashHex));
+      if (!st.isFile() || st.nlink !== 1 || Date.now() - st.mtimeMs >= UPGRADE_PENDING_MS) return false;
+      const uid = process.getuid?.();
+      return uid === undefined || st.uid === uid;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The plan this client signs in on and where it came from (0.15.0), with a note after a plan lapsed or a switch did not
+   * complete; undefined with a static `authHeader`, which signs in to nothing. `tier` is as configured: a reader shows it
+   * through `displayablePlan`, since SAIHM_TIER is typed by hand.
+   */
+  get plan(): { tier: string | undefined; source: PlanSource; note: string | undefined } | undefined {
+    if (this.staticAuthHeader) return undefined;
+    return { tier: this.tier, source: this.tierSource, note: this.planNote };
   }
 
   /**
@@ -4850,10 +5291,18 @@ export class SaihmProClient {
    * FREE -> monthly-PRO upgrade: request a Stripe HOSTED-checkout URL to subscribe THIS SAME sovereign
    * identity to a paid MONTHLY tier (default `PRO`). The upgrade attaches billing to the SAME ML-DSA key,
    * so `agentIdHash` is unchanged and every existing memory persists — no migration, no re-onboard. After
-   * payment, reconfigure `SAIHM_TIER`/`SAIHM_PAYMENT_METHOD` for the paid tier and the ordinary refresh
-   * loop mints paid JWTs. This is the FREE->paid door: it requires `SAIHM_TIER=FREE` (an already-paid
-   * identity uses {@link requestCheckoutUrl}) and refuses anything but a monthly subscription tier.
-   * Only the PUBLIC key is sent; the master secret never leaves here.
+   * payment, a client that follows the plan (0.15.0) finds it at its next sign-in. This is the FREE->paid door: it
+   * requires `SAIHM_TIER=FREE` (an already-paid identity uses {@link requestCheckoutUrl}) and refuses anything but a
+   * monthly subscription tier. Only the PUBLIC key is sent; the master secret never leaves here.
+   *
+   * PURCHASE SAFETY (0.15.0): before asking for a checkout, ONE FREE onboard asks whether the key already holds a paid
+   * plan, and a key that does is refused with `already_subscribed` and no checkout: since 0.15.0 nothing changes in the
+   * settings after paying, so running `upgrade` again is a normal thing to do. The check fails open: when that onboard
+   * fails, the checkout is requested as before, with no second onboard. NOT ON A SIGN-IN LIMIT (429, 0.15.0 review):
+   * runs close together are what meet it, and they are the case this check is for, so the limit's own error stops the
+   * upgrade with no checkout, and a run after the wait checks again. It runs after the local checks, so a refused tier
+   * still costs no network. A server that makes the same check when the checkout is requested refuses with 409
+   * `already_subscribed` and the plan, which reads the same as this refusal ({@link checkoutUrlForTier}).
    */
   async requestUpgradeUrl(targetTier: string = 'PRO'): Promise<string> {
     if (this.tier !== 'FREE') {
@@ -4871,6 +5320,8 @@ export class SaihmProClient {
         `upgrade target must be a monthly paid tier (${[...MONTHLY_PAID_TIERS].join(', ')}); got '${targetTier}'`,
       );
     }
+    const paid = await this.paidPlanOnKey(true);
+    if (paid !== undefined) throw new SaihmEndpointError(409, 'already_subscribed', alreadySubscribedText(paid.tier));
     return this.checkoutUrlForTier(target);
   }
 
@@ -4904,20 +5355,35 @@ export class SaihmProClient {
       );
     }
     const signature = toHex(signChallenge(this.identity.mldsaSecretKey, nonceBytes));
-    const out = await this.onboardFetch<{ url?: unknown }>(
-      this.onboardBase + '/api/stripe/checkout',
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          tier,
-          mldsaPubKey: toHex(this.identity.mldsaPubKey),
-          nonce,
-          signature,
-          uiMode: 'hosted',
-        }),
-      },
-    );
+    // A server that refuses a second checkout for a key that already pays answers 409 `already_subscribed` with the plan
+    // (0.15.0 review 2): said as the check before the checkout says it, the plan named only from the closed set, and the
+    // server's own words not shown.
+    const refused: { held?: { tier: string | undefined } } = {};
+    let out: { url?: unknown };
+    try {
+      out = await this.onboardFetch<{ url?: unknown }>(
+        this.onboardBase + '/api/stripe/checkout',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            tier,
+            mldsaPubKey: toHex(this.identity.mldsaPubKey),
+            nonce,
+            signature,
+            uiMode: 'hosted',
+          }),
+        },
+        (status, body) => {
+          if (status === 409 && body.error === 'already_subscribed')
+            refused.held = { tier: typeof body.tier === 'string' && PAID_PLAN_TIERS.includes(body.tier) ? body.tier : undefined };
+        },
+      );
+    } catch (e) {
+      if (refused.held !== undefined && e instanceof SaihmEndpointError && e.status === 409)
+        throw new SaihmEndpointError(409, 'already_subscribed', alreadySubscribedText(refused.held.tier));
+      throw e;
+    }
     if (typeof out.url !== 'string' || !out.url.startsWith('https://')) {
       throw new SaihmEndpointError(
         502,
@@ -5202,7 +5668,11 @@ export class SaihmProClient {
   }
 
   /** Onboard-path HTTP with the same timeout + body-cap + typed-error discipline as `doCall`. */
-  private async onboardFetch<T>(url: string, init: RequestInit): Promise<T> {
+  private async onboardFetch<T>(
+    url: string,
+    init: RequestInit,
+    onRefused?: (status: number, body: Record<string, unknown>) => void,
+  ): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.requestTimeoutMs);
     try {
@@ -5228,6 +5698,8 @@ export class SaihmProClient {
           // default FREE tier read `verification_failed` on every call with nothing saying which
           // variable was wrong. Sliced at the mint like the code, and rendered beside it.
           if (typeof j.reason === 'string') reason = j.reason.slice(0, MAX_ERROR_CODE_CHARS);
+          // The sign-in reads what a refusal says about the plan (0.15.0); the message is built here as before.
+          if (typeof j === 'object' && j !== null && !Array.isArray(j)) onRefused?.(res.status, j);
         } catch {
           /* non-JSON error body — leave code undefined */
         }
@@ -5247,7 +5719,13 @@ export class SaihmProClient {
           // endpoint string reaching an error: short by RFC, unbounded by our transport.
           `SAIHM onboard failed: ${res.status} ${res.statusText.slice(0, MAX_ERROR_CODE_CHARS)}` +
             (code ? ` (${code}${reason ? `: ${reason}` : ''})` : '') +
-            onboardRemedy(res.status, code, reason),
+            // A token's paid plan is kept as given (0.15.0 review): leaving the settings unset changes nothing there.
+            onboardRemedy(
+              res.status,
+              code,
+              reason,
+              this.detectPlan && (this.tierSource !== 'identity' || this.tier === 'FREE'),
+            ),
         );
       }
       try {

@@ -24,7 +24,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 
@@ -44,6 +44,8 @@ process.on('exit', () => rmSync(SEQ_ISOLATED_HOME, { recursive: true, force: tru
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { fromHex } from '@saihm/client-pro';
 import { SaihmProClient, SaihmEndpointError, type QuotaNag } from '../src/client.js';
+import { PlanFile, PAID_PLAN_TIERS } from '../src/plan-file.js';
+import { failText, MAX_ERROR_MESSAGE_CHARS } from '../src/render_fence.js';
 
 // The erasure feed's root derives from the IDENTITY's directory - `SAIHM_ERASURE_FEED_DIR`, then
 // `SAIHM_HOME`, then `~/.saihm` - so a `forget()` in an unpinned test appends a REAL erasure line to
@@ -110,12 +112,28 @@ interface MockOpts {
   forgetQuota?: QuotaTelem;
   /** Force the minted JWT's `tier` claim to diverge from the tier the client sent (client-opt vs JWT-tier test). */
   onboardTierOverride?: string;
+  /** Sent as `paid` on every FREE onboard answer, success or refusal (0.15.0: the key's paid plan). */
+  onboardPaid?: unknown;
+  /** A FREE onboard is refused as the endpoint refuses a key with no free plan (401 no_free_entitlement). */
+  onboardNoFreePlan?: boolean;
+  /** Every onboard fails with this HTTP status (a transient failure). */
+  onboardFailStatus?: number;
+  /** Every onboard's connection is cut before any answer (a network failure). */
+  onboardDrop?: boolean;
+  /** Every onboard meets the edge's own limit: a 429 with no body, only `retry-after` (0.15.0 review). */
+  onboardLimitNoBody?: boolean;
+  /** The checkout answers 409 with this body: a server that refuses a second checkout itself (0.15.0 review 2). */
+  checkoutConflict?: unknown;
 }
 
 interface Mock {
   base: string;
   challengeCount: () => number;
   checkoutCount: () => number;
+  /** Every POST /api/onboard that arrived, whatever its answer. */
+  onboardAttempts: () => number;
+  /** The tier each POST /api/onboard sent, in order. */
+  onboardTiers: () => ReadonlyArray<string>;
   checkoutBodies: () => ReadonlyArray<Record<string, unknown>>;
   rememberCount: () => number;
   requestCount: () => number;
@@ -132,6 +150,8 @@ async function withMock(
   let checkouts = 0;
   let remembers = 0;
   let onboards = 0;
+  let onboardAttempts = 0;
+  const onboardTiers: string[] = [];
   let requests = 0;
   const hardCap = new Set(opts.hardCap ?? []);
 
@@ -185,6 +205,7 @@ async function withMock(
         if (!verifySig(b, 'mldsaPubKey')) return send(401, { error: 'bad_signature' });
         issuedNonces.delete(String(b.nonce)); // single-use
         if (opts.checkoutNoUrl) return send(200, {});
+        if (opts.checkoutConflict !== undefined) return send(409, opts.checkoutConflict);
         return send(200, {
           url: opts.checkoutUrl ?? `https://checkout.stripe.test/session/${b.tier}`,
         });
@@ -192,8 +213,24 @@ async function withMock(
     }
 
     if (req.method === 'POST' && url === '/api/onboard') {
+      onboardAttempts += 1;
+      if (opts.onboardDrop) {
+        req.socket.destroy();
+        return;
+      }
       return readBody((b) => {
+        onboardTiers.push(String(b.tier));
         if (!verifySig(b, 'pubkey')) return send(401, { error: 'bad_signature' });
+        if (opts.onboardFailStatus !== undefined) return send(opts.onboardFailStatus, { error: 'busy' });
+        if (opts.onboardLimitNoBody) {
+          res.writeHead(429, { 'retry-after': '30' });
+          res.end();
+          return;
+        }
+        const paid = b.tier === 'FREE' && opts.onboardPaid !== undefined ? { paid: opts.onboardPaid } : {};
+        if (b.tier === 'FREE' && opts.onboardNoFreePlan) {
+          return send(401, { error: 'verification_failed', reason: 'no_free_entitlement', ...paid });
+        }
         onboards += 1;
         const sub = sha256Hex(String(b.pubkey));
         const jwt = `${b64url({ alg: 'EdDSA' })}.${b64url({
@@ -204,7 +241,7 @@ async function withMock(
         // staleFirstOnboard: the first minted JWT is intentionally NOT accepted, forcing exactly one
         // 401 -> drop cached JWT -> re-onboard -> retry cycle in the client.
         if (!(opts.staleFirstOnboard && onboards === 1)) valid.add(jwt);
-        return send(201, { jwt });
+        return send(201, { jwt, ...paid });
       });
     }
 
@@ -258,6 +295,8 @@ async function withMock(
       base,
       challengeCount: () => challenges,
       checkoutCount: () => checkouts,
+      onboardAttempts: () => onboardAttempts,
+      onboardTiers: () => onboardTiers,
       checkoutBodies: () => checkoutBodies,
       rememberCount: () => remembers,
       requestCount: () => requests,
@@ -325,6 +364,161 @@ describe('UN3: a paid identity cannot use the FREE->paid door', () => {
       assert.equal(m.challengeCount(), 0, 'refused before any network');
       assert.equal(m.checkoutCount(), 0);
     });
+  });
+});
+
+describe('UN26: purchase safety: a key that already pays is not sent to checkout again (0.15.0)', () => {
+  const refusal = (tier: string): string =>
+    `This key already has ${tier}, so no checkout was created. To change or cancel your plan, email ops@saihm.net.`;
+  const refused = (tier: string) => (e: unknown): boolean =>
+    e instanceof SaihmEndpointError && e.code === 'already_subscribed' && e.status === 409 && e.message === refusal(tier);
+
+  it('a FREE answer that names a paid plan: refused, ONE onboard, and no checkout', async () => {
+    await withMock(
+      async (m) => {
+        const c = freeClient(m.base, 26);
+        await assert.rejects(() => c.requestUpgradeUrl('PRO_FAST'), refused('PRO'));
+        assert.equal(m.checkoutCount(), 0, 'no checkout was requested');
+        assert.equal(m.onboardAttempts(), 1, 'one probe');
+        assert.deepEqual(m.onboardTiers(), ['FREE'], 'the probe is a FREE onboard');
+        assert.equal(m.challengeCount(), 1, "the probe's challenge only");
+      },
+      { onboardPaid: { tier: 'PRO', paymentMethod: 'stripe' } },
+    );
+  });
+
+  it('a FREE refusal (no free plan) that names a paid plan: refused the same way', async () => {
+    await withMock(
+      async (m) => {
+        const c = freeClient(m.base, 27);
+        await assert.rejects(() => c.requestUpgradeUrl('PRO'), refused('PRO_FAST'));
+        assert.equal(m.checkoutCount(), 0);
+        assert.equal(m.onboardAttempts(), 1);
+      },
+      { onboardPaid: { tier: 'PRO_FAST', paymentMethod: 'paystack' }, onboardNoFreePlan: true },
+    );
+  });
+
+  it('fails open: a probe that fails, or names no plan, leads to the checkout as before, with no second probe', async () => {
+    const cases: Array<[string, MockOpts]> = [
+      ['an HTTP failure', { onboardFailStatus: 503 }],
+      ['a cut connection', { onboardDrop: true }],
+      ['a refusal that names no plan', { onboardNoFreePlan: true }],
+      ['a FREE answer that names no plan', {}],
+      ['a `paid` that is not a plan', { onboardPaid: { tier: 'PRO', paymentMethod: 'stablecoin' } }],
+    ];
+    for (const [what, opts] of cases) {
+      await withMock(async (m) => {
+        const c = freeClient(m.base, 28);
+        const url = await c.requestUpgradeUrl('PRO');
+        assert.equal(url, 'https://checkout.stripe.test/session/PRO', `${what}: the checkout link`);
+        assert.equal(m.checkoutCount(), 1, `${what}: one checkout`);
+        assert.equal(m.onboardAttempts(), 1, `${what}: one probe, never repeated`);
+      }, opts);
+    }
+  });
+
+  it('a probe stopped by the sign-in limit (429) stops the upgrade: no checkout, the limit said, no second probe', async () => {
+    // 0.15.0 review: failing open here sent runs made close together, the case the check is for, to a second checkout.
+    for (const [what, opts] of [
+      ['a limit with a code', { onboardFailStatus: 429 }],
+      ['the edge limit, no body', { onboardLimitNoBody: true }],
+    ] as Array<[string, MockOpts]>) {
+      await withMock(async (m) => {
+        const c = freeClient(m.base, 29);
+        await assert.rejects(() => c.requestUpgradeUrl('PRO'), (e: unknown) => e instanceof SaihmEndpointError && e.status === 429, what);
+        assert.equal(m.checkoutCount(), 0, `${what}: no checkout`);
+        assert.equal(m.onboardAttempts(), 1, `${what}: one probe, never repeated`);
+      }, opts);
+    }
+  });
+
+  it('the `upgrade` command: refused on stderr, exit 1, no link printed, nothing marked pending', async () => {
+    await withMock(
+      async (m) => {
+        const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-un-paid-'));
+        try {
+          const env = cliEnv({ SAIHM_ENDPOINT_URL: m.base + '/mcp', SAIHM_MASTER_SECRET_HEX: MASTER70_HEX, SAIHM_HOME: home, SAIHM_TIER: 'FREE' });
+          const run = await pexec(tsxBin, [serverPath, 'upgrade', 'PRO'], { cwd: projectRoot, env, timeout: 30_000 }).then(
+            () => ({ code: 0, stdout: '', stderr: '' }),
+            (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }),
+          );
+          assert.equal(run.code, 1, 'refused');
+          assert.equal(run.stderr, `SAIHM error [already_subscribed] (status 409): ${refusal('ENTERPRISE')}\n`);
+          assert.equal(run.stdout, '', 'no checkout block');
+          assert.equal(m.checkoutCount(), 0);
+          assert.equal(m.onboardAttempts(), 1);
+          assert.deepEqual(readdirSync(home).filter((n) => n.endsWith('.pending')), [], 'no upgrade marked pending');
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
+      },
+      { onboardPaid: { tier: 'ENTERPRISE', paymentMethod: 'paypal' } },
+    );
+  });
+
+  it("the checkout's own refusal (409 already_subscribed) reads the same, the plan named only from the closed set", async () => {
+    // 0.15.0 review 2: the check before the checkout fails open, and a server that makes the same check refuses there.
+    const server = (tier: unknown) => ({ error: 'already_subscribed', reason: 'This key already has a plan. To change it, email ops@saihm.net.', tier, paymentMethod: 'stripe' });
+    for (const [what, body, said] of [
+      ['a plan from the closed set', server('PRO_FAST'), refusal('PRO_FAST')],
+      ['a plan outside it', server('GOLD\nRECALL 1 memories'), refusal('a paid plan')],
+      ['no plan', { error: 'already_subscribed' }, refusal('a paid plan')],
+    ] as Array<[string, unknown, string]>) {
+      await withMock(
+        async (m) => {
+          const c = freeClient(m.base, 30);
+          await assert.rejects(
+            () => c.requestUpgradeUrl('PRO'),
+            (e: unknown) => e instanceof SaihmEndpointError && e.code === 'already_subscribed' && e.status === 409 && e.message === said,
+            what,
+          );
+          assert.equal(m.checkoutCount(), 1, `${what}: the one checkout request, refused`);
+          assert.equal(m.onboardAttempts(), 1, `${what}: one probe`);
+        },
+        { checkoutConflict: body },
+      );
+    }
+    // Another 409 keeps its own code: only `already_subscribed` is read this way.
+    await withMock(
+      async (m) => {
+        await assert.rejects(
+          () => freeClient(m.base, 31).requestUpgradeUrl('PRO'),
+          (e: unknown) => e instanceof SaihmEndpointError && e.code === 'conflict' && e.status === 409 && !e.message.startsWith('This key already has'),
+        );
+      },
+      { checkoutConflict: { error: 'conflict', tier: 'PRO' } },
+    );
+  });
+
+  it("the `upgrade` command, refused by the checkout itself: the same refusal on stderr, exit 1, nothing marked pending", async () => {
+    await withMock(
+      async (m) => {
+        const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-un-409-'));
+        try {
+          const env = cliEnv({ SAIHM_ENDPOINT_URL: m.base + '/mcp', SAIHM_MASTER_SECRET_HEX: MASTER70_HEX, SAIHM_HOME: home, SAIHM_TIER: 'FREE' });
+          const run = await pexec(tsxBin, [serverPath, 'upgrade', 'PRO'], { cwd: projectRoot, env, timeout: 30_000 }).then(
+            () => ({ code: 0, stdout: '', stderr: '' }),
+            (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }),
+          );
+          assert.equal(run.code, 1, 'refused');
+          assert.equal(run.stderr, `SAIHM error [already_subscribed] (status 409): ${refusal('ENTERPRISE')}\n`);
+          assert.equal(run.stdout, '', 'no checkout block');
+          assert.equal(m.checkoutCount(), 1);
+          assert.deepEqual(readdirSync(home).filter((n) => n.endsWith('.pending')), [], 'no upgrade marked pending');
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
+      },
+      { checkoutConflict: { error: 'already_subscribed', reason: 'This key already has a plan.', tier: 'ENTERPRISE', paymentMethod: 'paystack' } },
+    );
+  });
+
+  it('the refusal renders whole through the error fence, for the longest plan name', () => {
+    const longest = [...PAID_PLAN_TIERS].sort((a, b) => b.length - a.length)[0];
+    const e = new SaihmEndpointError(409, 'already_subscribed', refusal(longest));
+    assert.equal(failText(e), `SAIHM error [already_subscribed] (status 409): ${refusal(longest)}`);
+    assert.ok(refusal(longest).length <= MAX_ERROR_MESSAGE_CHARS, `${refusal(longest).length} chars`);
   });
 });
 
@@ -686,7 +880,7 @@ describe('UN11: each (callType, threshold) nag fires at most once', () => {
 });
 
 describe('UN11c: dedupe key is per (callType, threshold), not per threshold alone', () => {
-  it('after remember hits 100%, a distinct sharing-labelled 80% nag still fires', async () => {
+  it('after remember hits 100%, a distinct sharing-labeled 80% nag still fires', async () => {
     await withMock(
       async (m) => {
         const nags: QuotaNag[] = [];
@@ -944,7 +1138,7 @@ describe('UN16d: result-path callType falls back to nagCallType for a NON-rememb
 });
 
 describe('UN16e: an empty-string telemetry callType falls back to the method mapping', () => {
-  it('callType:"" is treated as absent -> nag labelled by nagCallType, not ""', async () => {
+  it('callType:"" is treated as absent -> nag labeled by nagCallType, not ""', async () => {
     await withMock(
       async (m) => {
         const nags: QuotaNag[] = [];
@@ -1063,28 +1257,37 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
         timeout: 30_000,
       });
       assert.match(stdout, /https:\/\/checkout\.stripe\.test\/session\/PRO/);
-      // 0.14.3 (customer F8): the two lines a paid plan needs, as they go into a client's env block, and a check.
-      assert.ok(stdout.includes('\n    "SAIHM_TIER": "PRO",\n    "SAIHM_PAYMENT_METHOD": "stripe"\n'), stdout);
-      // In TOML too (Codex, Grok), where the JSON lines are a parse error: the whole env line, as the README gives it,
-      // since an inline table ends at its line (0.14.3 review 2) and the pair on a line of its own does not parse.
-      assert.ok(stdout.includes('\n    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }\n'), stdout);
-      // The lead-in says exactly what that line is (0.14.3 review 3): the README's env line, holding only the endpoint,
-      // with the two added - so a reader whose line holds more adds the two to it, and copies nothing else.
-      assert.ok(stdout.includes("\n  after a comma. The README's env line, which holds only the endpoint, then reads:\n\n    env = { "), stdout);
+      // 0.15.0: nothing to configure after paying. Each client finds the plan at its next sign-in, so the env and TOML
+      // steps 0.14.3 printed are gone, and nothing waits for the payment.
+      for (const step of ['"SAIHM_TIER":', '"SAIHM_PAYMENT_METHOD"', 'env = {', 'SAIHM_TIER = ', 'A paid plan needs both'])
+        assert.ok(!stdout.includes(step), `no settings step: ${step}\n${stdout}`);
+      assert.match(stdout, /After you pay, there is nothing to change: every AI client that uses this key switches to\n  PRO on its own within the hour, once it runs SAIHM 0\.15\.0 or later\. To switch one on\n  this computer now, restart it, then say "Show my SAIHM status"\./);
+      assert.match(stdout, /A client whose settings name a paid SAIHM_TIER keeps those settings: remove SAIHM_TIER\n  and SAIHM_PAYMENT_METHOD there to let SAIHM pick the plan\./);
       const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
       const tomlLine = readme.split('\n').find((l) => l.startsWith('env = { SAIHM_ENDPOINT_URL'))!;
       assert.equal(tomlLine, 'env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp" }', "the README's env line holds only the endpoint");
-      assert.ok(stdout.includes(`\n    ${tomlLine.slice(0, -2)}, SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }\n`), 'and the printed line is it, with the two added');
-      assert.ok(!stdout.includes('\n    SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD'), 'never the pair on a line of its own');
-      // What happens without the payment method, as measured: the server starts, and each memory call names it.
-      assert.match(stdout, /A paid plan needs both: without SAIHM_PAYMENT_METHOD the server starts, but every memory\n  call fails and names it until it is set\./);
-      assert.match(stdout, /"Show my SAIHM status": it names your plan, and every memory on this key is still there\./);
       // The printed identity is the one derived from the SAME master secret the child booted from.
       const ref = new SaihmProClient(m.base + '/mcp', undefined, masterOf(70), { tier: 'FREE' });
       assert.ok(stdout.includes(ref.agentIdHash), 'CLI prints the derived agentIdHash');
       assert.equal(m.checkoutCount(), 1);
       assert.ok(m.requestCount() >= 1, 'the request counter sees the checkout');
       assert.equal(m.checkoutBodies()[0].tier, 'PRO', 'the CLI target tier reaches checkout');
+    });
+  });
+
+  it('`upgrade` reads the FREE plan from the settings, whatever plan was saved from the server (0.15.0)', async () => {
+    await withMock(async (m) => {
+      const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-un-plan-'));
+      try {
+        const ref = new SaihmProClient(m.base + '/mcp', undefined, masterOf(70), { tier: 'FREE' });
+        assert.equal(new PlanFile(pathJoin(home, `plan.${ref.agentIdHash.slice(0, 16)}.json`), ref.agentIdHash).keep({ tier: 'PRO', paymentMethod: 'stripe' }), true);
+        const env = cliEnv({ SAIHM_ENDPOINT_URL: m.base + '/mcp', SAIHM_MASTER_SECRET_HEX: MASTER70_HEX, SAIHM_HOME: home, SAIHM_TIER: 'FREE' });
+        const { stdout } = await pexec(tsxBin, [serverPath, 'upgrade', 'PRO_FAST'], { cwd: projectRoot, env, timeout: 30_000 });
+        assert.match(stdout, /https:\/\/checkout\.stripe\.test\/session\/PRO_FAST/, 'not refused as a paid identity');
+        assert.equal(m.checkoutCount(), 1);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     });
   });
 
@@ -1140,7 +1343,7 @@ describe('UN20: the `upgrade`/`free-join` CLI subcommands execute end-to-end (sp
       });
       assert.match(stdout, /https:\/\/checkout\.stripe\.test\/session\/PRO/);
       assert.equal(m.checkoutBodies()[0].tier, 'PRO');
-      assert.ok(stdout.includes('\n    "SAIHM_TIER": "PRO",\n'), 'the line names the default tier too');
+      assert.ok(stdout.includes('switches to\n  PRO on its own within the hour'), 'the line names the default tier too');
     });
   });
 
@@ -1241,5 +1444,44 @@ describe('UN25: a quota counter is bounded before it is parsed', () => {
         ],
       },
     );
+  });
+});
+
+// The 0.15.0 round-1 reviewer's kill tests: `join` and `free-join` read the plan from the settings, never the saved one
+// (bootFromEnv({ savedPlan: false })): each pins a guard a mutant removed with the suite still green.
+describe('K8K9: join and free-join ignore a saved plan (0.15.0)', () => {
+  const seeded = (base: string): string => {
+    const home = mkdtempSync(pathJoin(tmpdir(), 'saihm-k89-'));
+    const ref = new SaihmProClient(base + '/mcp', undefined, masterOf(70), { tier: 'FREE' });
+    assert.equal(new PlanFile(pathJoin(home, `plan.${ref.agentIdHash.slice(0, 16)}.json`), ref.agentIdHash).keep({ tier: 'PRO', paymentMethod: 'stripe' }), true);
+    return home;
+  };
+  const run = (args: string[], env: NodeJS.ProcessEnv) =>
+    pexec(tsxBin, [serverPath, ...args], { cwd: projectRoot, env, timeout: 30_000 }).then(
+      (r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }),
+      (e: { code?: number; stdout?: string; stderr?: string }) => ({ code: e.code, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }),
+    );
+  it('K8 `join` with SAIHM_TIER=FREE and a saved PRO plan asks for no PRO checkout', async () => {
+    await withMock(async (m) => {
+      const home = seeded(m.base);
+      try {
+        await run(['join'], cliEnv({ SAIHM_ENDPOINT_URL: m.base + '/mcp', SAIHM_MASTER_SECRET_HEX: MASTER70_HEX, SAIHM_HOME: home, SAIHM_TIER: 'FREE' }));
+        assert.deepEqual(m.checkoutBodies().map((b) => b.tier), ['FREE'], 'the checkout names the settings plan, never the saved one');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  });
+  it('K9 `free-join` with SAIHM_TIER=FREE and a saved PRO plan starts the free join, not refused as paid', async () => {
+    await withMock(async (m) => {
+      const home = seeded(m.base);
+      try {
+        const r = await run(['free-join'], cliEnv({ SAIHM_ENDPOINT_URL: m.base + '/mcp', SAIHM_MASTER_SECRET_HEX: MASTER70_HEX, SAIHM_HOME: home, SAIHM_TIER: 'FREE' }));
+        assert.match(r.stdout, /starting your free join/);
+        assert.doesNotMatch(r.stderr, /not_free_tier|requires the FREE tier/, r.stderr);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
   });
 });

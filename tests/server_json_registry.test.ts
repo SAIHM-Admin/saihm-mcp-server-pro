@@ -151,6 +151,14 @@ describe("RM3: declared environment variables are real", () => {
     }
   });
 
+  it("SAIHM_TIER says a plan paid by card needs no setting, and self-join off needs it for every plan (0.15.0)", () => {
+    const tier = manifest.packages.flatMap((p: any) => p.environmentVariables ?? []).find((v: any) => v.name === "SAIHM_TIER");
+    assert.equal(
+      tier?.description,
+      "The plan this identity onboards with (FREE, PRO, PRO_FAST, ENTERPRISE, ENTERPRISE_FAST). Defaults to FREE while self-join is on (the default). From 0.15.0 a plan paid by card needs no setting: the client finds it at sign-in. Set it for a stablecoin plan, and with SAIHM_SELF_JOIN=0 for every plan, FREE included. An export-identity token carries its own, which a non-empty value here overrides.",
+    );
+  });
+
   it("any variable holding a secret is marked isSecret", () => {
     for (const p of manifest.packages) {
       for (const v of p.environmentVariables ?? []) {

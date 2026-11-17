@@ -7,12 +7,12 @@
     "url": "https://github.com/SAIHM-Admin/saihm-mcp-server-pro",
     "source": "github"
   },
-  "version": "0.14.4",
+  "version": "0.15.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@saihm/mcp-server-pro",
-      "version": "0.14.4",
+      "version": "0.15.0",
       "transport": {
         "type": "stdio"
       },
@@ -53,7 +53,7 @@
         },
         {
           "name": "SAIHM_TIER",
-          "description": "The plan this identity onboards with (FREE, PRO, PRO_FAST, ENTERPRISE, ENTERPRISE_FAST). Defaults to FREE while self-join is on (the default); set it for a paid plan, and with SAIHM_SELF_JOIN=0 for every plan, FREE included. An export-identity token carries its own, which a non-empty value here overrides.",
+          "description": "The plan this identity onboards with (FREE, PRO, PRO_FAST, ENTERPRISE, ENTERPRISE_FAST). Defaults to FREE while self-join is on (the default). From 0.15.0 a plan paid by card needs no setting: the client finds it at sign-in. Set it for a stablecoin plan, and with SAIHM_SELF_JOIN=0 for every plan, FREE included. An export-identity token carries its own, which a non-empty value here overrides.",
           "isRequired": false,
           "format": "string"
         },

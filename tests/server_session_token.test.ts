@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { deriveIdentity, fromHex, toHex } from '@saihm/client-pro';
 import { SessionTokenFile } from '../src/session-token-file.js';
+import { PlanFile } from '../src/plan-file.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, '../src/server.ts');
@@ -542,6 +543,33 @@ test('several sessions starting at once: each works, the file left is whole, and
     await oneSession(d, d.env(m));
     assert.equal(m.signIns(), before, 'the next session uses the kept sign-in');
     assertNoTokenShown(d, m);
+  } finally {
+    await close(m);
+    rmSync(d.dir, { recursive: true, force: true });
+  }
+});
+
+test('the status says where the plan came from in the structured result\'s own words (0.15.0 review: `server`)', async () => {
+  const m = startMock();
+  await listen(m);
+  const d = device();
+  try {
+    const free = await oneSession(d, d.env(m));
+    assert.equal(free.isError, false, free.text);
+    assert.match(free.text, /\n  plan=FREE  plan-from=default(\n|$)/);
+    // A plan an earlier session found on the server and saved: this session starts on it.
+    const plan = new PlanFile(join(d.home, `plan.${d.agentIdHash.slice(0, 16)}.json`), d.agentIdHash);
+    assert.equal(plan.keep({ tier: 'PRO', paymentMethod: 'stripe' }), true);
+    const s = await session(d.env(m));
+    try {
+      const r = await s.status();
+      assert.equal(r.isError, false, r.text);
+      assert.match(r.text, /\n  plan=PRO  plan-from=server(\n|$)/);
+      assert.doesNotMatch(r.text, /saved-from-server/);
+      assert.deepEqual(JSON.parse(r.raw).result.structuredContent.plan, { tier: 'PRO', from: 'server', note: null });
+    } finally {
+      await s.stop();
+    }
   } finally {
     await close(m);
     rmSync(d.dir, { recursive: true, force: true });

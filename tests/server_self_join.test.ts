@@ -15,7 +15,9 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
-import { mkdtempSync, statSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, statSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { SaihmProClient } from '../src/client.js';
+import { PlanFile } from '../src/plan-file.js';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
@@ -371,6 +373,57 @@ test('saihm_join DEFAULT: flag unset => saihm_join is exposed alongside the cano
   }
 });
 
+/** Some hosts cap a tool's description at 1024 characters (0.15.0 review 2); this package keeps each to 1000. */
+const TOOL_DESCRIPTION_LIMIT = 1000;
+
+/**
+ * Every string under a "description" key in `v`, at any depth, with where it sits (0.15.0 review 3): a nested
+ * parameter's, an output schema's, and a prompt's and its arguments' are read like a tool's own. A key named
+ * "description" that holds an object (a parameter of that name) is walked into, not read.
+ */
+const descriptionsIn = (v: unknown, at: string, out: Array<[string, string]> = []): Array<[string, string]> => {
+  if (Array.isArray(v)) v.forEach((x, i) => descriptionsIn(x, `${at}[${i}]`, out));
+  else if (v !== null && typeof v === 'object')
+    for (const [k, x] of Object.entries(v)) {
+      if (k === 'description' && typeof x === 'string') out.push([`${at}.description`, x]);
+      else descriptionsIn(x, `${at}.${k}`, out);
+    }
+  return out;
+};
+
+test('every description in tools/list and prompts/list, at any depth, is 1000 characters or fewer', async () => {
+  // The walk reaches a nested description, and one under a parameter named "description" (positive controls).
+  assert.deepEqual(
+    descriptionsIn({ inputSchema: { properties: { a: { items: { description: 'n' } }, description: { description: 'd' } } } }, 't'),
+    [
+      ['t.inputSchema.properties.a.items.description', 'n'],
+      ['t.inputSchema.properties.description.description', 'd'],
+    ],
+  );
+  const mock = startMock();
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const home = mkdtempSync(join(tmpdir(), 'saihm-desc-limit-'));
+  const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home });
+  try {
+    await handshake(d);
+    const tools = (await d.rpc(9, 'tools/list', {})).result.tools as { name: string }[];
+    const prompts = (await d.rpc(10, 'prompts/list', {})).result.prompts as { name: string; description?: string }[];
+    assert.equal(tools.length, 9, 'self-join is on, so saihm_join is measured too');
+    assert.ok(prompts.length > 0, 'the prompts are measured too');
+    const found = [...descriptionsIn(tools, 'tools'), ...descriptionsIn(prompts, 'prompts')];
+    // Not vacuous: each tool's own description, and each prompt's, is among those measured.
+    tools.forEach((t, i) => assert.ok(found.some(([at]) => at === `tools[${i}].description`), `${t.name} is measured`));
+    prompts.forEach((p, i) => {
+      if (p.description !== undefined) assert.ok(found.some(([at]) => at === `prompts[${i}].description`), `${p.name} is measured`);
+    });
+    for (const [at, text] of found) assert.ok(text.length <= TOOL_DESCRIPTION_LIMIT, `${at}: ${text.length} characters`);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('saihm_join ON: 9 tools; two-phase self-join self-generates the key, binds it, persists mode 600', async () => {
   const mock = startMock({ pendingBeforeGrant: 1 });
   await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
@@ -646,3 +699,25 @@ test('saihm_join: no bridge-chosen expiry reaches the human unbounded', async ()
 // The floor IS pinned, at the layer where it is observable: the clamp's output is `expiresIn` on the
 // prompt, and `client_free_onboard.test.ts` asserts its exact value. Rendered minutes cannot see it —
 // 60 and 59 both render as 1 — which is why asserting on this text surface could never have worked.
+
+// The 0.15.0 round-1 reviewer's kill test: saihm_join reads the FREE plan, never a saved one (a mutant that read it
+// survived the suite).
+test('K10 saihm_join on an existing key with a saved PRO plan starts the FREE join', async () => {
+  const mock = startMock({ pendingBeforeGrant: 1 });
+  await new Promise<void>((r) => mock.server.listen(0, '127.0.0.1', () => r()));
+  const home = mkdtempSync(join(tmpdir(), 'saihm-k10-'));
+  writeFileSync(join(home, 'free-identity.key'), 'c3'.repeat(32) + '\n', { mode: 0o600 });
+  const ref = new SaihmProClient('https://saihm.net/mcp', undefined, Buffer.from('c3'.repeat(32), 'hex'), { tier: 'FREE' });
+  assert.equal(new PlanFile(join(home, `plan.${ref.agentIdHash.slice(0, 16)}.json`), ref.agentIdHash).keep({ tier: 'PRO', paymentMethod: 'stripe' }), true);
+  const d = startServer(mock.base() + '/mcp', { SAIHM_HOME: home, SAIHM_SELF_JOIN: '1' });
+  try {
+    await handshake(d);
+    const r = await callText(d, 3, 'saihm_join', {});
+    assert.doesNotMatch(r.text, /not_free_tier|requires the FREE tier/, r.text);
+    assert.match(r.text, /https:\/\/device\.test\/activate/, r.text);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => mock.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});

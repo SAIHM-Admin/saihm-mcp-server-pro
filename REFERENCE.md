@@ -189,7 +189,7 @@ documented only.
 `saihm_recall`, `saihm_forget`, `saihm_status`, `saihm_share`, `saihm_revoke_share`,
 `saihm_governance_propose` and `saihm_governance_vote`. The two governance tools are
 present but answer "governance unavailable" for now. It also registers `saihm_join`, the
-bootstrap tool that answers *"Join SAIHM"*: on by default, removed by
+bootstrap tool that answers *"Join SAIHM"* or *"Add SAIHM"*: on by default, removed by
 `SAIHM_SELF_JOIN=0`. So a client lists nine tools by default, and eight with
 `SAIHM_SELF_JOIN=0`.
 
@@ -204,7 +204,7 @@ file, skipping a confirmation and writing a profile still need your yes in the s
 **Sharing.** `saihm_share` takes the `cellId` of one memory and the recipient: either
 `recipientRecordFile`, the full path of the file `identity-record` writes, or
 `recipientRecord` with `recipientPinnedAgentIdHashHex`. It also takes an optional `scope`
-(`read`, `write` or `readwrite`; blank is `read`) and an optional `expiryEpoch` in whole hours
+(`read`, `write` or `readwrite`; blank or `default` is `read`) and an optional `expiryEpoch` in whole hours
 since the UNIX epoch. See [Your identity record, for sharing](#your-identity-record-for-sharing).
 To read a memory shared with you, `saihm_recall` takes the sharer's agent ID as
 `sharerPinnedAgentIdHashHex` and the memory's `cellId`; no record is needed.
@@ -221,20 +221,21 @@ you exactly what it does know (see [Troubleshooting](#troubleshooting)).
 `npx -y @saihm/mcp-server-pro export-identity`, run on the machine that has your key, carries your identity
 to another machine or a hosted agent (see the [README](./README.md#your-memories-follow-your-key)).
 
-Run it with the same `SAIHM_*` settings your MCP client gives the server there —
-on a paid plan at least `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`, e.g.
-`SAIHM_TIER=PRO SAIHM_PAYMENT_METHOD=stripe npx -y @saihm/mcp-server-pro export-identity`
-— because it exports the identity and tier this shell would boot, and it prints
-the identity and tier so you can check. If your key is inline
-(`SAIHM_MASTER_SECRET_HEX`), put it in a mode-600 file and point
+Run it with the same `SAIHM_*` settings your MCP client gives the server there,
+because it exports the identity and tier this shell would boot, and it prints
+the identity and tier so you can check. A plan paid by card needs no plan
+settings: the hosted agent finds it at sign-in and follows later changes. On a
+stablecoin plan set at least `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`, e.g.
+`SAIHM_TIER=PRO SAIHM_PAYMENT_METHOD=stablecoin npx -y @saihm/mcp-server-pro export-identity`.
+If your key is inline (`SAIHM_MASTER_SECRET_HEX`), put it in a mode-600 file and point
 `SAIHM_MASTER_SECRET_FILE` at it for the export, rather than typing it into your
 shell history. It writes two values to a file only you can read:
 `SAIHM_IDENTITY` (your key, sealed) and `SAIHM_IDENTITY_PASSPHRASE` (the passphrase
 that opens it). Set both as environment variables or secrets wherever the memory
 should follow you — a hosted agent environment's settings, or the environment
 your MCP client starts the server from — and the memory tools use that identity
-from the next session. Don't say *"Join SAIHM"* there: a join creates a new, empty
-memory. Together the two values **are** your identity: never paste them into a
+from the next session. Don't say *"Join SAIHM"* or *"Add SAIHM"* there: a join creates
+a new, empty memory. Together the two values **are** your identity: never paste them into a
 chat or write them into a config file in a repository. Keep a copy in a password
 manager, then delete the export file.
 
@@ -387,7 +388,10 @@ session.
 | No SAIHM tools appear, and no error anywhere | The client stopped waiting before `npx` finished its first download: keep the start-up setting in [your client's block](./README.md#add-saihm-to-your-ai-client). Then check the file is valid JSON |
 | Every other tool vanished too | The settings file is no longer valid JSON: a trailing comma, or non-breaking spaces (U+00A0) from a copy and paste. Claude Code may replace a broken `~/.claude.json` with a fresh one and keep the original under `~/.claude/backups/`: fix that copy and put it back |
 | The memory tools say the join is waiting for approval | Open the link the join gave, sign in, enter the code and approve. The join then finishes by itself, and the next memory call works |
-| A memory call fails with `verification_failed: no_free_entitlement` and says a free join may still be waiting for approval | This identity has no free memory yet: approve the join you started (in a terminal or another session), or say *"Join SAIHM"*, which reuses the key that is there and shows its link and code. A paid identity needs `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` for its plan |
+| A memory call fails with `verification_failed: no_free_entitlement` and says a free join may still be waiting for approval | This identity has no free memory yet: approve the join you started (in a terminal or another session), or say *"Join SAIHM"*, which reuses the key that is there and shows its link and code. A plan paid by card is found at sign-in; only a stablecoin plan needs `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` |
+| `upgrade` says `already_subscribed` | The key already has a paid plan, so no second checkout was created. To change or cancel the plan, email ops@saihm.net with [billing] at the start of the subject |
+| "This key's plan is X, but your settings say Y", or "This key's X plan is paid through M" | That client's settings name a plan or payment method the key does not have. Remove `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` from its settings to let SAIHM pick the plan, or set `SAIHM_TIER` to the plan the message names and, when it names one, `SAIHM_PAYMENT_METHOD` to its payment method |
+| "...found no active subscription for this key's X plan, and no free plan" (`plan_inactive`) | The plan lapsed or was canceled, or a renewal has not reached SAIHM yet. When a plan is active, the client switches to it on its own within the hour, or at the first sign-in after a restart (if the restart meets the sign-in limit, after the wait the limit names); to renew, email ops@saihm.net with [billing] at the start of the subject |
 | "SAIHM could not sign in: too many sign-ins in a short time" | The sign-in that starts a session, or renews it, met the endpoint's limit. Wait the time it names, then try again |
 | Tools appear but every call fails | `SAIHM_ENDPOINT_URL` unreachable |
 | Every call fails behind a proxy | In a hosted environment, allow the endpoint's host in its network settings; otherwise check `HTTPS_PROXY` (an `http://` URL) and `NO_PROXY`. A network that inspects TLS needs its CA certificate, from its administrator, in a file named by `NODE_EXTRA_CA_CERTS` |
@@ -406,10 +410,14 @@ session.
 
 **In plain terms.** Your memories are encrypted on your machine before they are sent,
 and decrypted on your machine after they come back. SAIHM stores them encrypted, with
-the few routing details they need and each memory's key locked under yours (the
-security model below lists what it holds). To erase something, that key is destroyed —
-which is why erasing the stored memory is immediate and final rather than a promise that
-a copy was deleted somewhere.
+each memory's key locked under yours. The service can see the details it needs to store,
+find, share and bill for them, such as each memory's id, version and time, your plan, and
+whom you share with (the security model below lists what it holds, and the
+[privacy notice](https://saihm.net/terms#privacy) lists the details). To erase a memory,
+SAIHM deletes its key, so the stored memory can no longer be read through SAIHM:
+immediate and final, rather than a promise that a copy was deleted somewhere. Copies
+outside the service, such as text your assistant already showed you, stay where they
+are.
 
 **For the technically inclined.**
 
@@ -434,16 +442,17 @@ a copy was deleted somewhere.
   HTTPS only, with loopback `http` permitted for local development.
 - **Self-onboarding** — with no `SAIHM_AUTH_HEADER` set, the client proves control
   of your identity and mints its own short-lived token, refreshing transparently.
-  You paste one config once and never re-paste a token. Canceling a subscription
-  stops the next refresh, so access ends naturally. With the key file in `SAIHM_HOME`,
-  the token is kept for the next session on this device until it expires (see
-  `SAIHM_SESSION_CACHE`).
+  You paste one config once and never re-paste a token. When a canceled subscription's
+  paid period ends, the client's next refresh is refused, so paid access ends naturally;
+  a client that follows the plan then signs in on the free plan, where the key has one.
+  With the key file in `SAIHM_HOME`, the token is kept for the next session on this
+  device until it expires (see `SAIHM_SESSION_CACHE`).
 
 ### Security model
 
 | Property | Guarantee |
 | --- | --- |
-| Confidentiality vs the endpoint | The endpoint holds ciphertext, wrapped DEKs, public keys and the routing details each cell needs, such as its id and time — no key able to decrypt. |
+| Confidentiality vs the endpoint | The endpoint holds ciphertext, wrapped DEKs and public keys, and can read the details each cell needs to be stored, found, shared and billed, such as its id, version and time, the plan, and the agents it is shared with — no key able to decrypt. |
 | Integrity / authenticity | Every cell is ML-DSA-65-signed over its contents, including the sequence number. |
 | Anti-replay | The signed monotonic sequence is rejected by the endpoint if it does not strictly increase. |
 | Tenant isolation | Your `agentIdHash` (the JWT `sub`) namespaces your state; a write whose signed identity differs from the JWT is rejected. |
@@ -480,14 +489,14 @@ the rest have working defaults.
 | `SAIHM_IDENTITY` | see note | An identity token written by `export-identity`: your key, sealed. Set it with `SAIHM_IDENTITY_PASSPHRASE` to use that identity without a key file — see *Hosted agent environments*. Cannot be combined with either master-secret variable; blank counts as unset. |
 | `SAIHM_IDENTITY_PASSPHRASE` | with `SAIHM_IDENTITY` | The passphrase `export-identity` generated for that token. The two together are your identity: store them as secrets, never in a chat or a committed file. |
 | `SAIHM_MASTER_SECRET_HEX` | see note | The master secret inline, ≥ 64 hex characters (≥ 32 bytes), high-entropy, client-held, never sent. Prefer the file form: anything inline lands in the config file itself. |
-| `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool — the one that answers *"Join SAIHM"*. **On by default**; set to `0` to remove it and expose only the canonical eight tools. |
+| `SAIHM_SELF_JOIN` | no | Controls the `saihm_join` onboarding tool — the one that answers *"Join SAIHM"* or *"Add SAIHM"*. **On by default**; set to `0` to remove it and expose only the canonical eight tools. |
 | `HTTPS_PROXY` / `NO_PROXY` | no | An HTTP proxy for reaching an `https://` endpoint, and the hosts to reach directly instead — `https_proxy`, or `HTTPS_PROXY` if that is unset (`HTTP_PROXY` is not used for https, as with npm and curl). Only an `http://` proxy URL is supported; any other fails with an error naming the setting rather than connecting directly. A network that inspects TLS presents its own certificate: get its CA certificate (PEM) from the network's administrator (never copy one from the connection itself), save it to a file and set `NODE_EXTRA_CA_CERTS` to that file's path in the server's environment; Node reads it at start. `NO_PROXY` (or `no_proxy`) takes `*`, host names, domain suffixes and ports. Loopback endpoints (`127.0.0.0/8`, `::1`, `localhost` and `*.localhost`) never use a proxy. Proxy credentials in the URL go to the proxy only and are never printed. |
 | `SAIHM_EPHEMERAL_HOME` | no | Says whether this environment's home directory is temporary, discarded when a session ends, or a CI runner's home that later jobs can reach. Set it (e.g. `1`) where it is: the join then refuses to create a key there (it would be lost, or left where those jobs could read it), and SAIHM keeps no recall copy and no sign-in there by default. A copy or sign-in already written there stays until you delete it: the `recall.` and `session.` files in `SAIHM_HOME` (`~/.saihm` by default). `0` declares a home that is kept and that only you use, and overrides a host's own signal: set it only there, never on a runner whose home later jobs can reach. Unset, SAIHM recognizes it where the host says so: `CLAUDE_CODE_REMOTE`, `GITHUB_ACTIONS` or `CI`, and on the runners that set no `CI`, by their own marker: Jenkins (`JENKINS_URL` with `BUILD_ID`), Azure Pipelines (`TF_BUILD`), TeamCity (`TEAMCITY_VERSION`), AWS CodeBuild (`CODEBUILD_BUILD_ARN`), Google Cloud Build (`BUILDER_OUTPUT`) and Bamboo (`bamboo_planKey`). On any other runner, and wherever the home folder outlives the job, set it to `1`. |
 | `SAIHM_HOME` | no | Where the identity file lives (`$SAIHM_HOME/free-identity.key`, mode 600), where per-restart bookkeeping is kept, and where the erasure feed is written unless `SAIHM_ERASURE_FEED_DIR` overrides it. Defaults to `~/.saihm`. Give a full path: a JSON config does not expand `~`, so `~/.saihm` there is a relative path, and a relative path (or one that begins with a space) is refused at start. Versions before 0.13.0 used it, under the server's working directory: a key made there is still there, so move it into the full path you set. |
 | `SAIHM_AUTH_HEADER` | no | `Bearer <JWT>`, used verbatim. **Omit to self-onboard** (recommended) — the client mints and refreshes its own token, so there is nothing to paste or re-paste. |
 | `SAIHM_SESSION_CACHE` | no | Keeps your sign-in between sessions on this device. **On by default** for the key file in `SAIHM_HOME` (the one a join creates), except where the home is temporary or kept for later jobs (see `SAIHM_EPHEMERAL_HOME`): after a sign-in, the token is kept in `$SAIHM_HOME/session.<first 16 characters of your agent ID>.json`, readable only by your user (mode 600), and a new session on this device uses it until it expires instead of signing in again. That makes one sign-in per device rather than one per session, so a team behind one office address signs in far less often. The file holds the sign-in token, which expires on its own, and the endpoint, agent ID, plan and payment method it was issued for. It holds no key, so it cannot make another sign-in. A session uses it only for that same endpoint, identity, plan and payment method, and only from a file of your user's that no one else can read; a token the service refuses is removed, and anything else is replaced at the next sign-in. To keep the sign-in in memory only, one per session as before 0.14.3, set `0` in every AI client and app that runs SAIHM with your key on this device. SAIHM then deletes the sign-in this identity kept here earlier when it next loads your key: that file only, and only while it holds a SAIHM sign-in for your agent ID. An identity token, an inline secret and a key file kept elsewhere sign in once per session either way. |
-| `SAIHM_TIER` | paid self-onboard; any self-onboard with `SAIHM_SELF_JOIN=0` | Plan label carried with each memory's routing details (`FREE`, `PRO`, …). Defaults to `FREE` while self-join is on (the default); set it for a paid plan, and with self-join off for every plan, `FREE` included. An `export-identity` token carries its own, which a non-empty value here overrides. With self-join off and a static `SAIHM_AUTH_HEADER`, resolved via `status()`. |
-| `SAIHM_PAYMENT_METHOD` | paid self-onboard | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan: `stripe` for the card checkout that `upgrade` prints, which keeps the key you have and its memories; `stablecoin` for a plan paid on [the join page](https://saihm.net/join). Paying there starts a new identity with its own key, and the memories on a key you already have do not move to it, so upgrade an existing key with the card link. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. An identity token carries it; a non-empty value here overrides the token's. |
+| `SAIHM_TIER` | a plan paid in stablecoin; any self-onboard with `SAIHM_SELF_JOIN=0` | Plan label carried with each memory, among the details the service can see (`FREE`, `PRO`, …). Defaults to `FREE` while self-join is on (the default); set it with self-join off for every plan: `FREE` for the free plan or a plan paid by card, which the client then finds at sign-in. From 0.15.0 a plan on this key paid through Stripe or Paystack needs no setting: where the plan would otherwise be `FREE`, the client switches to it at sign-in and saves it in `$SAIHM_HOME/plan.<first 16 characters of your agent ID>.json` (mode 600) for the next session, and follows a later plan change. A paid value set here is kept as set and never switched; set one only for a plan the server does not report, such as one paid in stablecoin. An `export-identity` token carries its own, which a non-empty value here overrides. With self-join off and a static `SAIHM_AUTH_HEADER`, resolved via `status()`. |
+| `SAIHM_PAYMENT_METHOD` | paid self-onboard with `SAIHM_TIER` set | Entitlement rail (`stripe`, `stablecoin`, …) for a paid plan named in `SAIHM_TIER` (a plan the client finds itself brings its own): `stripe` for the card checkout that `upgrade` prints, which keeps the key you have and its memories; `stablecoin` for a plan paid in stablecoin on [the join page](https://saihm.net/join), by a gasless signed authorization. Paying there starts a new identity with its own key, and the memories on a key you already have do not move to it, so upgrade an existing key with the card link. **Not used by the free tier.** Ignored when `SAIHM_AUTH_HEADER` is set. An identity token carries it; a non-empty value here overrides the token's. |
 | `SAIHM_SEQ_STATE_PATH` | no | Overrides where the anti-rollback bookkeeping is written. Running as an MCP server this is **on by default** at `$SAIHM_HOME/seq.<id>.json`; set it only to relocate it. The default location is ours to manage: if it can't be written, the tally stays in memory for the session and `status` says so. A location **you** set is yours: if it can't be written, calls fail and name the path, so a safeguard you asked for never goes quiet without telling you. `status` reports this as `seq-state=…` followed by `rollback-guard=persisting` (writes still work, so the next one rewrites the file) or `memory-only-this-run` (it retries at the next restart). Either way, if the file couldn't be READ at startup the safeguard starts from scratch and rebuilds as each memory is next read — so an older copy of a memory would not be caught during that window. At the default location that window is about accidental corruption rather than an attacker: writing to that file takes the same access that reads the identity key sitting beside it. Somewhere you relocate it to, that no longer follows — give it the protection you give `$SAIHM_HOME`. Give a full path: a relative one resolves against the server's working directory. |
 | `SAIHM_RECALL_CACHE` | no | Controls the recall cache: a copy of every memory saved or read on this device and, after the first recall, of all your memories, kept so that recall asks the service only for memories that are new or have changed, on this device or another. **On by default** when your key comes from a key file: the self-join identity file in `SAIHM_HOME`, or the file `SAIHM_MASTER_SECRET_FILE` names, wherever it is (from 0.14.3; before, only the first), as long as files can be written in `SAIHM_HOME` (where they cannot, recall fetches every memory, as with the copy off) and the home is not temporary or kept for later jobs (a hosted agent session or a CI runner, as `SAIHM_EPHEMERAL_HOME` describes: there a copy is made only at a `SAIHM_RECALL_CACHE_PATH` you set); `0` stops making one. Every process on this device that uses your key with the cache on writes the same file, so to keep no copy, set `0` in every AI client and app that runs SAIHM with your key on this device; the README's [How it works](./README.md#how-it-works) has the steps to turn the copy off everywhere and delete one already written. The copy is kept unencrypted, so recall can use it at once, in a file readable only by your user (mode 600) in `SAIHM_HOME`; `forget` removes a memory from it, and a memory erased from another device leaves it at the next successful recall. A memory erased on this device and then saved again elsewhere may not show in a recall here. |
 | `SAIHM_RECALL_CACHE_PATH` | no | Where the recall cache is written. **With a cache, a recall first checks each memory's version with the service and fetches only what is new or has changed since the last one; without a cache it fetches every memory, every time.** The cache is a file, so it survives a restart: only the very first run, which builds it, pays the full fetch. If the service offers no version check, the recall fetches every memory; if the check fails, the recall reports the error. It never answers from the cache unchecked. The cache defaults ON for an identity that boots from a key file: the one in `$SAIHM_HOME`, or one `SAIHM_MASTER_SECRET_FILE` names anywhere (from 0.14.3; before, only the first), except where the home is temporary or kept for later jobs (see `SAIHM_EPHEMERAL_HOME`), where only a path set here makes one. It is then written in `$SAIHM_HOME`, beside the sequence marks. For an identity token or an inline secret, which usually run where the home folder is not kept, it is OFF unless you set this, and the client says so once on its first recall. The copy is kept unencrypted, in a file only your user can read, so a recall can use it at once. `SAIHM_RECALL_CACHE=0` turns it off in every case, an explicit path included, and silences the notice. To keep no copy, set `SAIHM_RECALL_CACHE=0` in every AI client and app that runs SAIHM with your key on this device and delete the copy already written, in `$SAIHM_HOME` or at a path set here: the README's [How it works](./README.md#how-it-works) has the steps. Give a full path: a relative one resolves against the server's working directory. |
@@ -662,6 +671,7 @@ schema. A field is absent, or null where it is always present, when the endpoint
 | `error` | any failed call of the eight protocol tools | `{code, status}`, as in the text's `SAIHM error [code]`; status `0` when no answer arrived; `{code: "unknown", status: 0}` when the failure is not the endpoint's |
 | `timing` | all four | `serverMs` (the endpoint's time), `totalMs` (this client's time, from request to last byte) and `admission` (`reserved` or `shared`); present when the endpoint sends timing |
 | `features` | `saihm_status` | What this identity may use, passed on unread (check each shape yourself); `null` when the endpoint gives none. `features.warmStart.token` is this client's own: `"required"` while it serves that offer |
+| `plan` | `saihm_status` | The plan this client signs in on: `tier`, `from` (`settings`, `identity`, `server` or `default`, the words the text's `plan-from=` uses) and `note` (null, or a sentence when a plan lapsed, a switch did not complete, or the settings name a plan or payment method the key does not have); null with a static `SAIHM_AUTH_HEADER` |
 | `snapshotId`, `createdAt`, `bytes`, `coversThrough` | `saihm_remember` with `warmStart: "put"` | The snapshot stored (see *Warm start*) |
 | `snapshot`, `snapshots` | `saihm_recall` with `warmStart` | The snapshot restored, or `null`; the snapshots listed |
 | `deleted` | `saihm_forget` with `warmStart: "delete"` | `true` once the snapshot is destroyed |

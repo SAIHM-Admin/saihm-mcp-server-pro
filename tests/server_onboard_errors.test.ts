@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SaihmEndpointError, SaihmProClient } from '../src/client.js';
+import { PlanFile } from '../src/plan-file.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SERVER = resolve(HERE, '../src/server.ts');
@@ -585,6 +586,59 @@ test('a key from a failed first join that was granted after all: on the retried 
     const recall = await d.call('saihm_recall', {});
     assert.equal(recall.isError, false, recall.text);
     assert.doesNotMatch(recall.text, /^SAIHM memory is not active yet/, recall.text);
+  } finally {
+    d.proc.kill();
+    await new Promise<void>((r) => m.server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a plan lapsed on a key with no free plan, then a free join in the same session: one onboard, then the join answers (0.15.0 review 2)', async () => {
+  // After such a lapse the client says each refusal of the free plan as `plan_inactive`. While a free join started since
+  // waits, that is the join's wait: its link and code, and no sign-in per memory call.
+  let granted = false;
+  const onboards: string[] = [];
+  const freeJwt = (): string => `${seg({ alg: 'EdDSA' })}.${seg({ sub: 'x', tier: 'FREE', exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
+  const m = await listen((route, body, res) => {
+    const send = (s: number, b: unknown) => void res.writeHead(s, { 'content-type': 'application/json' }).end(JSON.stringify(b));
+    if (route === 'GET /api/onboard/challenge') return send(200, { nonce: '66'.repeat(32) });
+    if (route === 'POST /api/free-onboard/start')
+      return send(200, { flowId: 'flow-8', userCode: 'LAPS-8888', verificationUri: 'https://device.test/activate', expiresIn: 900, interval: 1 });
+    if (route === 'POST /api/free-onboard/claim') {
+      const pubkey = (JSON.parse(body) as { pubkey?: string }).pubkey ?? '';
+      return send(200, granted ? { status: 'granted', agentIdHash: 'ab'.repeat(32), pubkey } : { status: 'pending' });
+    }
+    if (route === 'POST /api/onboard') {
+      const tier = String((JSON.parse(body) as { tier?: unknown }).tier);
+      onboards.push(tier);
+      if (tier === 'FREE' && granted) return send(201, { jwt: freeJwt() });
+      if (tier === 'FREE') return send(401, { error: 'verification_failed', reason: 'no_free_entitlement' });
+      return send(401, { error: 'verification_failed', reason: 'no_active_subscription' });
+    }
+    if (route === 'POST /mcp') return send(200, []);
+    return send(404, { error: 'not_found' });
+  });
+  const home = mkdtempSync(join(tmpdir(), 'saihm-oberr-'));
+  const hex = '5a'.repeat(32);
+  writeFileSync(join(home, 'free-identity.key'), hex, { mode: 0o600 });
+  // The PRO plan an earlier session found and saved for this key, which has lapsed since.
+  const agentIdHash = new SaihmProClient('https://saihm.net/mcp', undefined, Buffer.from(hex, 'hex'), { tier: 'FREE' }).agentIdHash;
+  assert.equal(new PlanFile(join(home, `plan.${agentIdHash.slice(0, 16)}.json`), agentIdHash).keep({ tier: 'PRO', paymentMethod: 'stripe' }), true);
+  const d = await startServer({ HOME: home, SAIHM_HOME: home, SAIHM_ENDPOINT_URL: `${m.base}/mcp` });
+  try {
+    const lapsed = await d.call('saihm_status', {});
+    assert.match(lapsed.text, /\[plan_inactive\]/, lapsed.text);
+    assert.deepEqual(onboards, ['PRO', 'FREE']);
+    assert.match((await d.call('saihm_join', {})).text, /LAPS-8888/);
+    for (let i = 0; i < 3; i++) {
+      const t = (await d.call('saihm_status', {})).text;
+      assert.match(t, /^SAIHM memory is not active yet: the join is waiting for approval\.\nTo activate/, t);
+      assert.match(t, /LAPS-8888/, t);
+    }
+    assert.deepEqual(onboards, ['PRO', 'FREE', 'FREE'], 'one onboard, then the join answers for itself');
+    granted = true;
+    const recall = await d.call('saihm_recall', {});
+    assert.equal(recall.isError, false, recall.text);
   } finally {
     d.proc.kill();
     await new Promise<void>((r) => m.server.close(() => r()));

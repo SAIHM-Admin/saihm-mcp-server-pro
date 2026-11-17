@@ -3,19 +3,23 @@
 This file is for the AI agent doing the install. Follow it end to end. You can do
 the install without the user, except for restarting the client where step 2 says so.
 Activating the free memory needs the user once:
-a browser and a GitHub account for a one-time sign-in (step 4).
+a browser and a GitHub account for a one-time sign-in (step 4). Without GitHub,
+the user starts at https://saihm.net/free instead and signs in with Google or
+Microsoft.
 
 ## What this server is
 
 Sovereign, client-side-sealed persistent memory. Cells are sealed **in the
 client process** before they leave the machine, so the operator stores
-ciphertext it cannot open.
+ciphertext it cannot open, beside the details it needs to store, find, share
+and bill for each cell (such as its id, version and time, the plan, and whom it
+is shared with), which it can read.
 
 The server registers eight protocol tools: `saihm_remember`, `saihm_recall`,
 `saihm_forget`, `saihm_status`, `saihm_share`, `saihm_revoke_share`,
 `saihm_governance_propose` and `saihm_governance_vote`. The two governance tools are
 present but answer "governance unavailable" for now. It also registers `saihm_join`,
-the bootstrap tool that answers "Join SAIHM": on by default, removed by
+the bootstrap tool that answers "Join SAIHM" or "Add SAIHM": on by default, removed by
 `SAIHM_SELF_JOIN=0`. So a client lists nine tools by default, and eight with
 `SAIHM_SELF_JOIN=0`.
 
@@ -121,12 +125,12 @@ without side effects, `saihm_status` is read-only.
 
 Once the tools appear, tell the user that memory is installed but not yet
 activated. If they already have a SAIHM identity, they bring it rather than
-joining (see point 3 below); if they are new, saying **"Join SAIHM"** activates
-it. Do this whether or not they asked: they cannot ask for something they do
-not know exists. Say it once, in your own words, and do not call `saihm_join`
-yourself.
+joining (see point 3 below); if they are new, saying
+**"Join SAIHM"** or **"Add SAIHM"** activates it. Do this whether or not they
+asked: they cannot ask for something they do not know exists. Say it once, in
+your own words, and do not call `saihm_join` yourself.
 
-## Step 4 — activation (only when the user says "Join SAIHM")
+## Step 4 — activation (only when the user, after the install, says "Join SAIHM" or "Add SAIHM")
 
 When they do, call `saihm_join`. The first call that would create a key answers
 with a question: whether they already have an identity to bring. Put it to them once,
@@ -151,7 +155,7 @@ the key file in place: a later join on this machine uses it.
 
 Three things to tell the user, in your own words:
 
-1. **`saihm_join` is one-time.** It claims a lifetime free grant for this
+1. **`saihm_join` is one-time.** It claims a limited free allowance for this
    device identity. Do not call it speculatively, in a loop, or to test that
    the install worked. Its first call asks whether they already have a SAIHM
    identity: a join creates a NEW, EMPTY memory, so pass `newIdentity: true` only
@@ -178,8 +182,8 @@ Three things to tell the user, in your own words:
    the user gives it, and the memory's cellId: `saihm_recall` takes them as
    `sharerPinnedAgentIdHashHex` and `cellId`. If they want the SAME memory there, have them run
    `npx -y @saihm/mcp-server-pro export-identity` on the machine that holds the
-   key, with the same `SAIHM_*` settings their MCP client uses there (on a paid
-   plan, `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`), and set the two values it
+   key, with the same `SAIHM_*` settings their MCP client uses there (on a
+   stablecoin plan, `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`), and set the two values it
    writes, `SAIHM_IDENTITY` and `SAIHM_IDENTITY_PASSPHRASE`, in the other
    environment's own variables or secrets settings, then start a new session (a
    key file placed before the server starts also works where files can be
@@ -194,18 +198,25 @@ eight tools.
 
 If the user already has a master secret, have them save it to a file readable
 only by them (never by pasting it into the chat) and point at it with
-`SAIHM_MASTER_SECRET_FILE`, alongside
-`SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`. Prefer the file over
-`SAIHM_MASTER_SECRET_HEX` for the reason given in step 1: an inline secret lands
-in the config store itself, which is frequently synced between machines. Have
-the user write the value; do not ask them to read it out to you. Full option
-table: see `REFERENCE.md`.
+`SAIHM_MASTER_SECRET_FILE`. A plan paid by card needs nothing more: the client
+finds it at sign-in. Add `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` only for a
+stablecoin plan. With `SAIHM_SELF_JOIN=0`, set `SAIHM_TIER` for every plan:
+`FREE` for a plan paid by card, which the client then finds at sign-in. Prefer
+the file over `SAIHM_MASTER_SECRET_HEX` for the reason given in step 1: an
+inline secret lands in the config store itself, which is frequently synced
+between machines. Have the user write the value; do not ask them to read it out
+to you. Full option table: see `REFERENCE.md`.
 
 Prices are on https://saihm.net/pricing. The `upgrade` command prints a card
-checkout link, which goes with `SAIHM_PAYMENT_METHOD=stripe` and keeps the user's
-key and memories, and the two lines, `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`, to add
-to the client's settings after paying. Stablecoin is paid on the website's join page,
-https://saihm.net/join, and goes with `stablecoin`. Paying there starts a new
+checkout link, which keeps the user's key and memories. After paying there is
+nothing to add to the client's settings: each client that runs SAIHM 0.15.0 or
+later finds the plan at its next sign-in, within the hour. On the computer where
+`upgrade` ran, a restart finds it at once; on another computer a restart reuses
+the sign-in kept there until it expires, within the hour. Do not set `SAIHM_TIER` to
+the paid plan: a paid `SAIHM_TIER` is kept as set, so a later plan change would not
+be followed. Stablecoin is paid on the website's join page,
+https://saihm.net/join, by a gasless signed authorization, and goes with
+`stablecoin`. Paying there starts a new
 identity with its own key; the memories on a key the user already has do not move
 to it. To upgrade an existing key, the user pays with the card link.
 

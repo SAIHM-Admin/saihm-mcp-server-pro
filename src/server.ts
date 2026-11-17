@@ -145,7 +145,7 @@ const server = new McpServer(
       // sitting inert (funnel audit 2026-09-11, F5). Conditional because under SAIHM_SELF_JOIN=0 there is no
       // saihm_join tool to point at.
       (selfJoinEnabled()
-        ? ' If a memory tool answers that there is no SAIHM memory yet on this device, tell the operator: "SAIHM memory is installed but not active yet. Already have a SAIHM identity? Run export-identity where it lives and set the two values it writes in this environment\'s settings instead of joining. New to SAIHM? Say \'Join SAIHM\' to start a new, empty memory." Then wait; call saihm_join only when they ask.'
+        ? ' If a memory tool answers that there is no SAIHM memory yet on this device, tell the operator: "SAIHM memory is installed but not active yet. Already have a SAIHM identity? Run export-identity where it lives and set the two values it writes in this environment\'s settings instead of joining. New to SAIHM? Say \'Join SAIHM\' (or \'Add SAIHM\') to start a new, empty memory." Then wait; call saihm_join only when they ask.'
         : '') +
       // Unconditional: a token arrives the same way whether or not self-join is on, and the operators who
       // run with it off are the ones most likely to be bringing one.
@@ -235,9 +235,19 @@ const timingOf = (
 /** A memory tool called while this server's join waits for approval. Its message is built from fenced parts. */
 class JoinPendingError extends Error {}
 
-/** The endpoint's refusal of an identity with no free memory yet: what a join waiting for approval looks like from a tool. */
+/** Where the status says a plan came from (0.15.0): the same words as the structured `plan.from`. */
+const PLAN_FROM_LABEL = { settings: 'settings', identity: 'identity', server: 'server', default: 'default' } as const;
+
+/**
+ * The endpoint's refusal of an identity with no free memory yet: what a join waiting for approval looks like from a tool.
+ * Also `plan_inactive` (0.15.0 review 2): once a plan lapses on a key with no free plan, the client says every later
+ * refusal of the free plan that way, and a free join started since in this process is then what waits; read as the
+ * join, the memory tools give its link and code and stop signing in, as they do for the refusal's own words.
+ */
 const refusedForNoEntitlement = (e: unknown): boolean =>
-  e instanceof SaihmEndpointError && e.status === 401 && e.code === 'verification_failed' && e.message.includes(': no_free_entitlement)');
+  e instanceof SaihmEndpointError &&
+  e.status === 401 &&
+  ((e.code === 'verification_failed' && e.message.includes(': no_free_entitlement)')) || e.code === 'plan_inactive');
 
 /** Surface any error as a typed MCP tool error (never crash the server). */
 function fail(thrown: unknown) {
@@ -650,7 +660,7 @@ server.registerTool(
       // Every optional field of every tool reads null and blank values as absent (see tool-input.ts).
       cellId: optionalInput(z.string()).describe('Existing cell id (hex) to update; omit to create a new cell'),
       warmStart: optionalChoice(['put']).describe(
-        '"put" stores the payload file warm-start/put-<token>.bin as an encrypted snapshot, then removes the file. Only coversThrough and token go with it. Leave it blank to remember content.',
+        '"put" stores the payload file warm-start/put-<token>.bin as an encrypted snapshot, then removes the file. Only coversThrough and token go with it. Leave it blank, or "default", to remember content.',
       ),
       coversThrough: optionalPattern(COVERS_THROUGH_PATTERN).describe(
         'With warmStart "put": the change feed position the payload covers, the cursor of a position marker. Blank otherwise.',
@@ -774,12 +784,28 @@ server.registerTool(
   },
 );
 
+/**
+ * The line terminators a host may honor: CPython's `str.splitlines()` set (LF, CR, CRLF, VT, FF, FS, GS, RS, NEL, U+2028,
+ * U+2029). CITED, not claimed complete: the shared-recall body below states why this set, and how a wider claim failed.
+ * Both recall bodies split on it, so the two fences cannot drift apart.
+ */
+const LINE_TERMINATORS = /\r\n|[\n\r\u2028\u2029\u0085\u000b\u000c\u001c\u001d\u001e]/;
+
+/**
+ * An OWN memory's text as the recall text shows it (0.15.0): the first line stays on the memory's row, and every further
+ * line opens `  | `, so a memory can only ever continue its own row. Raw, its text could start a line in any shape this
+ * block writes: a memory holding pasted text rendered as two own-memory rows, the second starting SAIHM-PROFILE (the
+ * 0.14.4 review's C1-01 residual), and could mint `  ! ` pointer and `  > ` shared lines too. Lossless like the shared
+ * fence: a line ending becomes `\n`, and every other character stays as stored. The structured copy is whole.
+ */
+const ownMemoryText = (plaintext: string): string => plaintext.split(LINE_TERMINATORS).join('\n  | ');
+
 server.registerTool(
   'saihm_recall',
   {
     title: 'Recall',
     description:
-      'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or leave it out to load everything. Pass cellId alone to read one of your own cells. To read a single cell another agent shared with you, pass their agent ID as sharerPinnedAgentIdHashHex together with the cellId, taking that ID from your user, not from a shared pointer; that path is read-only. Pass listOnly to list your cells\' versions without their content. Pass sharesOnly to list every pointer shared with you, a page at a time, where the endpoint offers it. With warmStart "latest", it instead restores the newest encrypted warm-start snapshot into the payload file named by token; "list" lists them.',
+      'Retrieve your memories from SAIHM and decrypt them in this process; the server never sees plaintext. Use this at the start of a session, or whenever past context is needed. Pass query to filter by keyword, or omit it to load everything. Pass cellId alone to read one of your own cells. To read a single cell another agent shared with you, pass their agent ID as sharerPinnedAgentIdHashHex together with the cellId, taking that ID from your user, not from a shared pointer; that path is read-only. Pass listOnly to list your cells\' versions without their content. In the text, each further line of one of your memories starts with "  | ": that mark is display only, not part of the memory, so leave it out when you copy a memory to save it again. Pass sharesOnly to list every pointer shared with you, a page at a time, where the endpoint offers it. With warmStart "latest", it instead restores the newest encrypted warm-start snapshot into the payload file named by token; "list" lists them.',
     inputSchema: {
       query: optionalInput(z.string()).describe(
         'Filter your OWN memories by keyword (empty = all). Ignored when reading one cell by cellId.',
@@ -808,7 +834,7 @@ server.registerTool(
       ),
       after: optionalInput(z.string()).describe('With listOnly or sharesOnly: the next value of the previous page.'),
       warmStart: optionalChoice(['latest', 'list']).describe(
-        '"latest" restores the newest snapshot into warm-start/latest-<token>.bin (read it, then remove it); "list" lists snapshots. Only token goes with it. Leave it blank to recall memories.',
+        '"latest" restores the newest snapshot into warm-start/latest-<token>.bin (read it, then remove it); "list" lists snapshots. Only token goes with it. Leave it blank, or "default", to recall memories.',
       ),
       token: optionalPattern(WARM_START_TOKEN_PATTERN).describe(
         'With warmStart: 16 to 32 characters from a-z and 0-9, chosen at random for this call. It names the payload file. Blank otherwise.',
@@ -1162,9 +1188,10 @@ server.registerTool(
         // and unlike an announcement `cellId` there is no adversary-prose budget to defend — the agent
         // asked for this cell by id. Marking every PHYSICAL line closes line-minting completely and
         // losslessly: an embedded newline can only ever produce another marked line, never a top-level
-        // one, and no byte of the memory is altered. Own-cell plaintext below stays unmarked and
-        // unfenced for the same reason inverted — it is the agent's own data, and `  ! `/`  > ` are
-        // exactly the signals that distinguish the two.
+        // one, and no byte of the memory is altered. Own-cell plaintext below is not fenced as foreign,
+        // for the same reason inverted — it is the agent's own data, and `  ! `/`  > ` are exactly the
+        // signals that distinguish the two. Since 0.15.0 its further lines carry a mark of their own,
+        // `  | ` (see `ownMemoryText`), so its text continues its own row and cannot start one.
         //
         // The split covers the line terminators of CPython's `str.splitlines()`: LF, CR, CRLF, VT,
         // FF, FS, GS, RS, NEL, U+2028 and U+2029. That set is CITED, not asserted — it is a superset
@@ -1186,9 +1213,10 @@ server.registerTool(
         // The argument for including a bare CR — a host honouring it starts a fresh visual line —
         // applies verbatim to all ten. This site deliberately does not scrub AND marks every line
         // that survives, and it is the only one that does both. "The one render site where
-        // terminators survive" would be too broad, and this comment said it: own-cell `plaintext` is
-        // interpolated raw in the branch below, so all ten survive there too — a residual the
-        // `sharedLines` block states rather than closes. What is unique here is WHOSE content it is.
+        // terminators survive" would be too broad: own-cell `plaintext` was interpolated raw in the
+        // branch below until 0.15.0, and since then it is split on the same set and its lines marked
+        // `  | ` (`ownMemoryText`), so terminators are normalized there too. What is unique here is
+        // WHOSE content it is.
         // Every site that fences an ENDPOINT-chosen value scrubs the whole below-U+0020 range through
         // `safeField`, which is why the gap existed on these two lines and nowhere else. Normalising
         // a line ending is the one alteration worth making — every other byte of the memory survives
@@ -1199,7 +1227,7 @@ server.registerTool(
         // sharer who was already pinned choosing to store a very large cell — a cost the recipient
         // opted into, not one the endpoint can impose.
         const sharedBody = cell.plaintext
-          .split(/\r\n|[\n\r\u2028\u2029\u0085\u000b\u000c\u001c\u001d\u001e]/)
+          .split(LINE_TERMINATORS)
           .map((l) => `  > ${l}`)
           .join('\n');
         // The header names the sharer's agent ID beside the label (0.14.3 review 3), as the structured row does: the pin
@@ -1246,7 +1274,7 @@ server.registerTool(
           });
         }
         return ok(
-          `RECALL 1 memories\n  [${labelSafe(safeScalar(own.cellId))}] seq=${labelSafe(safeScalar(own.seq))} | ${own.plaintext}` +
+          `RECALL 1 memories\n  [${labelSafe(safeScalar(own.cellId))}] seq=${labelSafe(safeScalar(own.seq))} | ${ownMemoryText(own.plaintext)}` +
             (timingMalformed ? '\n  timing=' + MALFORMED : ''),
           {
             count: 1,
@@ -1305,12 +1333,12 @@ server.registerTool(
       // server-composed and interpolates no endpoint-chosen text, so it needs no marker of its own.
       //
       // Scope of that guarantee, precisely: it holds against the endpoint, which is the party this
-      // block defends against. It is NOT a claim that the `  ! ` shape is unreachable in general —
-      // own-cell `plaintext` is interpolated raw below, so a memory whose CONTENT contains a newline
-      // followed by `  ! POINTER …` renders a line of this shape. That content is authenticated as
-      // this agent's own cell; authenticated means it is the agent's, not that it is trustworthy, so
-      // an agent that stored attacker-influenced text can be shown a pointer its own memory minted.
-      // The damage is bounded, though less than it was. Since 0.14.3 a pointer is readable with the
+      // block defends against. Until 0.15.0 the `  ! ` shape was also reachable from own-cell
+      // `plaintext`, interpolated raw below: a memory whose CONTENT held a newline followed by
+      // `  ! POINTER …` rendered a line of this shape, authenticated as this agent's own cell
+      // (authenticated means it is the agent's, not that it is trustworthy). Since 0.15.0 every
+      // further line of an own memory opens `  | ` (`ownMemoryText`), so its content cannot start a
+      // pointer line. A pointer's reach is bounded as before: since 0.14.3 a pointer is readable with the
       // sharer's agent ID and its cellId alone, both of which a forged line can name, and such a read
       // proves only that the holder of that agent ID wrote the cell, not who that holder is. What
       // bounds it: the footer asks for the agent ID as the user gave it, not as listed here, and what
@@ -1415,12 +1443,12 @@ server.registerTool(
               // the premise it rests on. This fence answers a renderer question, and the channel it
               // fences is the one an agent actually reads.
               //
-              // Plaintext stays RAW by design — it is the payload, not a label;
-              // the residual that creates is documented on the `sharedLines` block earlier in this
-              // same handler, not above it.
+              // Plaintext is the payload, not a label, so it is not scrubbed: `ownMemoryText` keeps every
+              // character and marks each line after the first `  | `, so the text continues this row and
+              // cannot start another (0.15.0; the residual it closed is recorded on that helper).
               ...cells.map(
                 (c) =>
-                  `  [${labelSafe(safeScalar(c.cellId))}] seq=${labelSafe(safeScalar(c.seq))} | ${c.plaintext}`,
+                  `  [${labelSafe(safeScalar(c.cellId))}] seq=${labelSafe(safeScalar(c.seq))} | ${ownMemoryText(c.plaintext)}`,
               ),
             ];
       // The summary on every recall while the feed runs; the entries only when asked for.
@@ -1462,7 +1490,7 @@ server.registerTool(
       // Optional only for warm start: any other call without it is refused (id_required).
       id: z.string().optional().describe('Memory cell id (hex) to erase. Required unless warmStart is "delete".'),
       warmStart: optionalChoice(['delete']).describe(
-        '"delete" destroys the snapshot named by snapshotId instead of a memory. Only snapshotId and token go with it. Leave it blank to erase a memory by id.',
+        '"delete" destroys the snapshot named by snapshotId instead of a memory. Only snapshotId and token go with it. Leave it blank, or "default", to erase a memory by id.',
       ),
       snapshotId: optionalPattern(SNAPSHOT_ID_PATTERN).describe('With warmStart "delete": the snapshot to destroy. Blank otherwise.'),
       token: optionalPattern(WARM_START_TOKEN_PATTERN).describe(
@@ -1633,6 +1661,15 @@ server.registerTool(
       // degradation the note above records. Nullable and always present, so adding it widens the
       // contract without making any consumer's previously-valid response invalid.
       seqStateDegraded: z.string().nullable(),
+      // LOCAL too (0.15.0): the plan this client signs in on, where it came from, and a note after a plan lapsed or a
+      // switch did not complete. Null with a static auth header, which signs in to nothing. Declared for the reason above.
+      plan: z
+        .object({
+          tier: z.string(),
+          from: z.enum(['settings', 'identity', 'server', 'default']),
+          note: z.string().nullable(),
+        })
+        .nullable(),
       // What THIS identity may use: the endpoint's `features`, passed on whole and unread when it is a plain object
       // within the client's bounds, else null. Null and always present: absent from the answer is null, which is
       // what a server that predates the field means. Each feature's own shape is the reader's to check. The one member
@@ -1700,6 +1737,13 @@ server.registerTool(
       // is written at all. Both set the reason; only the second is memory-only, and the line used to
       // assert the second for both.
       const seqStatePersisting = client.seqStatePersisting;
+      // The plan is read LOCALLY, like the agent ID, and shown only by a name this package knows: SAIHM_TIER is typed by
+      // hand, and a key pasted there must not come back in a reply.
+      const p = client.plan;
+      const plan =
+        p === undefined
+          ? null
+          : { tier: p.tier === undefined ? 'none' : (displayablePlan(p.tier) ?? 'unrecognized'), from: p.source, note: p.note ?? null };
       return ok(
         // Every remaining interpolated value is endpoint-chosen, and the `\n  ` here is OURS — which
         // is exactly why a raw field carrying its own newline could mint a further line in this block.
@@ -1723,16 +1767,21 @@ server.registerTool(
           // that `)` survives every fence in this module, so a wrapper only offers a delimiter to
           // close; a pair that was never opened cannot be closed. Same two-space separator as every
           // other field, on its own line so it reads as a report rather than a suffix on `epoch`.
+          // 0.15.0: the plan this client signs in on and where it came from, on its own line: LOCAL, like the agent ID.
+          (plan === null ? '' : `\n  plan=${labelSafe(safeScalar(plan.tier))}  plan-from=${labelSafe(PLAN_FROM_LABEL[plan.from])}`) +
           (seqStateDegraded === null
             ? ''
             : `\n  seq-state=${labelSafe(safeScalar(seqStateDegraded))}  rollback-guard=${seqStatePersisting ? 'persisting' : 'memory-only-this-run'}`) +
           // Only when the endpoint sent a `features` this client refused: a valid one is structured output alone.
           (featuresMalformed ? '\n  features=' + MALFORMED : '') +
-          (timingMalformed ? '\n  timing=' + MALFORMED : ''),
+          (timingMalformed ? '\n  timing=' + MALFORMED : '') +
+          // Our own sentence, naming plans only from the closed set: fenced all the same, like every line here.
+          (plan?.note ? `\n  plan-note=${labelSafe(safeField(plan.note, MAX_JOIN_FIELD_CHARS))}` : ''),
         {
           agentIdHash,
           tier,
           custody,
+          plan,
           activeShardCount: shards,
           activeSharingContracts: sharing,
           bfsi,
@@ -1817,7 +1866,7 @@ server.registerTool(
       recipientPinnedAgentIdHashHex: optionalInput(z.string()).describe(
         "The grantee's agentIdHash (hex), pinned out-of-band. Required with recipientRecord; with recipientRecordFile, optional: the out-of-band check of the file, which must name the same agent ID",
       ),
-      scope: optionalChoice(['read', 'write', 'readwrite']).describe('Access scope (blank = read)'),
+      scope: optionalChoice(['read', 'write', 'readwrite']).describe('Access scope (blank or "default" = read)'),
       expiryEpoch: optionalPattern(/^[0-9]+$/, 'expiryEpoch must be a decimal count of whole hours since the UNIX epoch').describe(
         'Optional expiry in whole HOURS since the UNIX epoch (decimal string), not seconds: floor(unix_ms / 3600000). Example: "498192" is 2026-11-01 00:00 UTC. Blank = no expiry',
       ),
@@ -2201,7 +2250,7 @@ if (selfJoinEnabled()) {
     {
       title: 'Join SAIHM (activate free memory)',
       description:
-        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, sign up for, or set up SAIHM. Where no identity is configured, a join creates a NEW, EMPTY memory, so the first call answers with a question instead: whether they already have a SAIHM identity (from another machine or an earlier session). Put it to them once; if they do, do not join: they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, or in a CI job, do not join there either: they join on their own computer, then bring that identity in the same way. Once they confirm they want a new one here, call again with newIdentity: true. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, the join finishes by itself and the memory tools work; there is no need to call saihm_join again. No payment.',
+        'Activate free SAIHM persistent memory for this agent. Call this when the user asks to join, add, sign up for, or set up SAIHM ("Join SAIHM" or "Add SAIHM"). With no identity configured, a join creates a NEW, EMPTY memory, so the first call answers with a question instead: whether they already have a SAIHM identity (from another machine or session). Put it to them once; if they do, do not join: they bring it with export-identity instead. In a hosted or cloud session that starts fresh each time, or in a CI job, do not join there either: they join on their own computer and bring that identity the same way. Once they confirm they want a new one here, call again with newIdentity: true. It self-generates a sovereign memory key on this device and starts a one-time human approval — the tool returns a URL and short code for the user to open and enter. After the user approves, the join finishes by itself and the memory tools work, with no need to call saihm_join again. No payment.',
       inputSchema: {
         newIdentity: optionalInput(z.boolean()).describe(
           'true once the user confirms they have no SAIHM identity to bring here and want a new, empty memory',
@@ -2265,7 +2314,8 @@ if (selfJoinEnabled()) {
 
         // Fresh flow: ensure an identity, boot a FREE client, run the device flow in the background.
         const { created, keyPath } = ensureSelfJoinIdentityEnv();
-        const jc = SaihmProClient.bootFromEnv(); // tier FREE (defaulted by ensureSelfJoinIdentityEnv)
+        // Tier FREE (defaulted by ensureSelfJoinIdentityEnv), whatever plan was saved from the server: the free join needs it.
+        const jc = SaihmProClient.bootFromEnv({ savedPlan: false });
         // Capture THIS flow's state object; every background callback guards on `joinState === s` so a
         // late callback from a superseded flow can never mutate a newer one (defence in depth — by
         // construction only one background runs at a time, but this survives future refactors).
@@ -2449,7 +2499,7 @@ function stablecoinCheckoutNote(): string[] {
 }
 
 async function runJoin(): Promise<void> {
-  const c = SaihmProClient.bootFromEnv();
+  const c = SaihmProClient.bootFromEnv({ savedPlan: false });
   const url = await c.requestCheckoutUrl();
   const fenced = safeField(url, MAX_URL_FIELD_CHARS);
   // Resolved ONCE. It was called twice below - as the condition, then again inside the branch with
@@ -2545,7 +2595,7 @@ async function runFreeJoin(): Promise<void> {
   // first start that may itself have spent a minute downloading, and a terminal that showed nothing read as hung.
   process.stdout.write('SAIHM: starting your free join. This takes a few seconds.\n');
   if (selfJoinEnabled()) ensureSelfJoinIdentityEnv();
-  const c = SaihmProClient.bootFromEnv();
+  const c = SaihmProClient.bootFromEnv({ savedPlan: false });
   const r = await c.acquireFreeEntitlement({
     onPrompt: (p) =>
       process.stdout.write(
@@ -2751,14 +2801,18 @@ function runExportIdentity(): void {
       ...(id.tierFrom === 'none'
         ? [
             'This token carries no tier, because SAIHM_TIER is not set here: where it is used, it boots FREE',
-            '(where self-join is on) unless SAIHM_TIER is set there. If this identity is on a paid plan,',
-            'set SAIHM_TIER and SAIHM_PAYMENT_METHOD as your MCP client does, and export again.',
+            '(where self-join is on) unless SAIHM_TIER is set there. A plan paid by card is found at sign-in;',
+            'for a stablecoin plan, set SAIHM_TIER and SAIHM_PAYMENT_METHOD as your MCP client does, and',
+            'export again.',
           ]
         : []),
+      // 0.15.0 review: a FREE token follows the plan where it is used, so only a plan the server does not report (one
+      // paid in stablecoin) still needs the two settings baked in.
       ...(id.tierFrom === 'default'
         ? [
-            'The tier is FREE only because SAIHM_TIER is not set here: if this identity is on a paid plan,',
-            'set SAIHM_TIER and SAIHM_PAYMENT_METHOD as your MCP client does, and export again.',
+            'The tier is FREE only because SAIHM_TIER is not set here. Where the token is used, SAIHM finds a',
+            'plan paid by card at sign-in; for a stablecoin plan, set SAIHM_TIER and SAIHM_PAYMENT_METHOD as',
+            'your MCP client does, and export again.',
           ]
         : []),
       '',
@@ -2786,9 +2840,9 @@ function runExportIdentity(): void {
         : []),
       'Together they ARE your identity: anyone holding both can read, change and erase your memory.',
       'Never paste them into a chat or write them into a config file in a repository. Keep a copy in',
-      'a password manager, then delete the file. Where they are set, do not "Join SAIHM": the memory',
-      'tools use this identity as soon as the server starts. Agents: do not open or print the file -',
-      'tell the operator where it is.',
+      'a password manager, then delete the file. Where they are set, do not say "Join SAIHM" or',
+      '"Add SAIHM": the memory tools use this identity as soon as the server starts.',
+      'Agents: do not open or print the file - tell the operator where it is.',
       '',
     ].join('\n'),
   );
@@ -2919,11 +2973,12 @@ function runIdentityRecord(): void {
  * Self-serve FREE -> paid upgrade: derive this identity from the env master secret and request a Stripe
  * hosted-checkout link to subscribe it to a monthly paid tier (default PRO; override via arg or
  * SAIHM_UPGRADE_TIER). Billing attaches to THIS same key, so every existing memory persists. Requires
- * SAIHM_TIER=FREE. After payment, reconfigure SAIHM_TIER/SAIHM_PAYMENT_METHOD and start the server
- * normally. Writes only to stdout/stderr — not the MCP stream.
+ * SAIHM_TIER=FREE, read from the settings whatever plan was saved from the server. After payment there is nothing to
+ * configure (0.15.0): each client finds the plan at its next sign-in. It does not wait for the payment. Writes only to
+ * stdout/stderr — not the MCP stream.
  */
 async function runUpgrade(): Promise<void> {
-  const c = SaihmProClient.bootFromEnv();
+  const c = SaihmProClient.bootFromEnv({ savedPlan: false });
   // `|| 'PRO'` AFTER the trim, not `??` alone. `??` falls through only on null/undefined, so
   // `upgrade ""` — and an exported-but-empty SAIHM_UPGRADE_TIER — reached `requestUpgradeUrl('')`.
   //
@@ -2961,68 +3016,21 @@ async function runUpgrade(): Promise<void> {
       '  Open the link above in a browser and pay. Copy it whole — everything after the "#" is part',
       '  of the link, and a copy that loses it is refused as incomplete.',
       '',
-      // THE TWO LINES THEMSELVES (0.14.3, customer F8): a payment that went through left a client that would not
-      // start when only one of them was set, and the reader had to work out both from the names alone.
-      '  After payment, add these two settings to SAIHM in each AI client that uses this key, in',
-      '  the form that client\'s settings use, then restart the client. In a JSON "env" block:',
+      // NOTHING TO CONFIGURE (0.15.0): each client's next sign-in finds the plan on this key and switches to it, so the
+      // two settings 0.14.3 printed here are gone. Nothing waits for the payment either.
+      `  After you pay, there is nothing to change: every AI client that uses this key switches to`,
+      `  ${fencedTier} on its own within the hour, once it runs SAIHM 0.15.0 or later. To switch one on`,
+      '  this computer now, restart it, then say "Show my SAIHM status".',
       '',
-      paidTierEnvLine(target),
-      '    "SAIHM_PAYMENT_METHOD": "stripe"',
-      '',
-      '  In a TOML config (Codex, Grok), env = { ... } stays on one line: add the two inside it,',
-      "  after a comma. The README's env line, which holds only the endpoint, then reads:",
-      '',
-      paidTierTomlLine(target),
-      '',
-      '  A paid plan needs both: without SAIHM_PAYMENT_METHOD the server starts, but every memory',
-      '  call fails and names it until it is set. Then say',
-      '  "Show my SAIHM status": it names your plan, and every memory on this key is still there.',
+      '  A client whose settings name a paid SAIHM_TIER keeps those settings: remove SAIHM_TIER',
+      '  and SAIHM_PAYMENT_METHOD there to let SAIHM pick the plan.',
       '',
     ].join('\n'),
   );
-}
-
-/**
- * A TOML client's whole `env = { ... }` line (Codex, Grok) with the two settings in it, for a monthly plan `upgrade`
- * accepted, in the form the README gives: ONE line, because TOML 1.0 ends an inline table at its line, so the two
- * pasted on a line of their own inside the braces do not parse (0.14.3 review 2). Written out per plan, like
- * {@link paidTierEnvLine}, so nothing anyone typed is rendered inside the quotes. Each plan's line is exactly the
- * README's line for Codex and Grok, which holds only the endpoint, with the two added: what the sentence above it
- * says (0.14.3 review 3). The last arm is never printed: `requestUpgradeUrl` refuses any other plan first.
- */
-function paidTierTomlLine(tier: string): string {
-  switch (tier) {
-    case 'PRO':
-      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }';
-    case 'PRO_FAST':
-      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO_FAST", SAIHM_PAYMENT_METHOD = "stripe" }';
-    case 'ENTERPRISE':
-      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "ENTERPRISE", SAIHM_PAYMENT_METHOD = "stripe" }';
-    case 'ENTERPRISE_FAST':
-      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "ENTERPRISE_FAST", SAIHM_PAYMENT_METHOD = "stripe" }';
-    default:
-      return '    env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = the name of the plan you paid for, SAIHM_PAYMENT_METHOD = "stripe" }';
-  }
-}
-
-/**
- * The `SAIHM_TIER` line, as it goes into a client's `env` block, for a monthly plan `upgrade` accepted: written out per
- * plan, so nothing anyone typed is rendered inside its quotes. `requestUpgradeUrl` refuses any other plan before this
- * is reached; the last arm says so rather than naming a plan nobody chose.
- */
-function paidTierEnvLine(tier: string): string {
-  switch (tier) {
-    case 'PRO':
-      return '    "SAIHM_TIER": "PRO",';
-    case 'PRO_FAST':
-      return '    "SAIHM_TIER": "PRO_FAST",';
-    case 'ENTERPRISE':
-      return '    "SAIHM_TIER": "ENTERPRISE",';
-    case 'ENTERPRISE_FAST':
-      return '    "SAIHM_TIER": "ENTERPRISE_FAST",';
-    default:
-      return '    "SAIHM_TIER": the name of the plan you paid for,';
-  }
+  // So "restart it" is true on this computer: the next session's first sign-in is a fresh one, not one kept from
+  // before. Another computer keeps its own sign-in, which it reuses until it expires (within the hour), so the text
+  // says "on this computer".
+  c.markUpgradePending();
 }
 
 // argv[2] absent means "run as an MCP server" — the package's primary job, and the default that must

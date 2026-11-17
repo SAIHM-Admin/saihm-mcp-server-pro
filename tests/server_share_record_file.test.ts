@@ -355,3 +355,26 @@ test('every refusal is made before anything is asked of the endpoint, with a fix
     await teardown(s);
   }
 });
+
+
+// 0.15.0 round-1 review (a mutant advertising 'default' as a real scope survived the suite, whose strict-host mock records
+// method names only): a choice left as "default", blank or null reaches the bridge as an omitted one does, never as the
+// literal "default".
+test('a strict host leaving scope ("default", "", null) sends the bridge the scope an omitted one does', async () => {
+  const s = await setup();
+  try {
+    const omitted = await s.d.call('saihm_share', { cellId: s.cellId, recipientRecordFile: s.recordFile });
+    assert.equal(omitted.isError, false, omitted.text);
+    const base = s.mock.shares.at(-1)!.scope;
+    assert.equal(base, 'read', 'an omitted scope is read');
+    for (const scope of ['default', '', null]) {
+      const n = s.mock.shares.length;
+      const r = await s.d.call('saihm_share', { cellId: s.cellId, recipientRecordFile: s.recordFile, scope });
+      assert.equal(r.isError, false, `${JSON.stringify(scope)}: ${r.text}`);
+      assert.equal(s.mock.shares.length, n + 1, `${JSON.stringify(scope)}: one share reached the bridge`);
+      assert.equal(s.mock.shares[n]!.scope, base, `scope ${JSON.stringify(scope)} reached the bridge as ${JSON.stringify(s.mock.shares[n]!.scope)}`);
+    }
+  } finally {
+    await teardown(s);
+  }
+});

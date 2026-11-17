@@ -1,8 +1,9 @@
 // The saihm_configure prompt and the profile sentence in the server's instructions (0.14.4), over stdio against the
 // real server. What these tests hold: the prompt is listed beside saihm_session_bootstrap and adds no tool; its text
 // carries the profile header format and the approval sentence word for word; every tool and argument it names is one
-// this server has; and the instructions carry the profile sentence whether self-join is on or off. None of it asks the
-// endpoint anything, so the endpoint here is a listener that counts requests, and the count must stay 0.
+// this server has; the instructions carry the profile sentence whether self-join is on or off, and end where they
+// should; and the bootstrap prompt's whole text is pinned. None of it asks the endpoint anything, so the endpoint here
+// is a listener that counts requests, and the count must stay 0.
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -193,6 +194,8 @@ test('initialize: the instructions carry the profile sentence with self-join on 
     try {
       const instr = s.instructions;
       assert.ok(instr.includes(`irreversible. ${PROFILE_SENTENCE} ${selfJoinOff ? 'Never ask for SAIHM_IDENTITY' : 'If a memory tool answers'}`), `the profile sentence, self-join ${selfJoinOff ? 'off' : 'on'}`);
+      // Anchored at the end too (0.14.4 review C5-01): a sentence appended after the last one passed the anchor above.
+      assert.ok(instr.endsWith(' Never ask for SAIHM_IDENTITY or its passphrase in the chat, and never write either into a file.'), `nothing follows the last sentence, self-join ${selfJoinOff ? 'off' : 'on'}`);
       assert.match(instr, /persistent memory/, 'the base instructions are still there');
       // The self-join line stays conditional on the tool it points at.
       if (selfJoinOff) assert.doesNotMatch(instr, /saihm_join/);

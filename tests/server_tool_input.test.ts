@@ -14,6 +14,7 @@ import { dirname, resolve, join } from 'node:path';
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { fromHex } from '@saihm/client-pro';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -429,6 +430,23 @@ test('the schemas a host is shown are the plain ones: every optional field has i
         if (!(t.inputSchema.required ?? []).includes(k)) types[`${t.name}.${k}`] = s.enum ? `${s.type}:${s.enum.join('|')}` : s.pattern ? `${s.type}:${s.pattern}` : s.type;
       }
     }
+    // Gemini's `parameters` field (an OpenAPI subset) refuses a declaration with an empty enum value ("enum[0]: cannot be
+    // empty"), and every request of the agent fails with it; its `parametersJsonSchema` field takes JSON Schema as is.
+    // Checked over every property at every depth, so no nested enum can bring the blank back.
+    const enums: string[] = [];
+    const walk = (where: string, sch: any): void => {
+      if (sch === null || typeof sch !== 'object') return;
+      if (Array.isArray(sch.enum)) {
+        enums.push(where);
+        for (const v of sch.enum) assert.ok(typeof v === 'string' && v.trim() !== '', `${where}: Gemini parameters refuse the enum value ${JSON.stringify(v)}`);
+      }
+      for (const [k, v] of Object.entries(sch.properties ?? {})) walk(`${where}.${k}`, v);
+      if (sch.items) walk(`${where}[]`, sch.items);
+      for (const alt of [...(sch.anyOf ?? []), ...(sch.oneOf ?? []), ...(sch.allOf ?? [])]) walk(where, alt);
+    };
+    for (const t of tools) walk(t.name, t.inputSchema);
+    assert.deepEqual(enums.sort(), ['saihm_forget.warmStart', 'saihm_governance_propose.scope', 'saihm_recall.warmStart', 'saihm_remember.warmStart', 'saihm_share.scope'], 'the walk saw every enum');
+    for (const t of tools) new AjvJsonSchemaValidator().getValidator(t.inputSchema as never); // parametersJsonSchema: compiles as JSON Schema
     assert.deepEqual(types, {
       'saihm_remember.cellId': 'string',
       'saihm_recall.query': 'string',
@@ -444,21 +462,22 @@ test('the schemas a host is shown are the plain ones: every optional field has i
       // Warm start: the mode, its token, the put's position and the delete's snapshot, each with its grammar; content and
       // id, required unless warmStart, are listed here because the schema can no longer mark them required.
       'saihm_remember.content': 'string',
-      // 0.14.1: every optional choice and grammar also offers the blank, so a host that fills every field can leave it.
-      'saihm_remember.warmStart': 'string:|put',
+      // 0.14.1: every optional choice and grammar also offers a way to leave it, so a host that fills every field can. A
+      // choice offers "default" from 0.15.0 (Gemini refuses an empty enum value); a grammar offers the blank.
+      'saihm_remember.warmStart': 'string:default|put',
       'saihm_remember.coversThrough': 'string:^$|^[!-~]{1,64}$',
       'saihm_remember.token': 'string:^$|^[a-z0-9]{16,32}$',
-      'saihm_recall.warmStart': 'string:|latest|list',
+      'saihm_recall.warmStart': 'string:default|latest|list',
       'saihm_recall.token': 'string:^$|^[a-z0-9]{16,32}$',
       'saihm_forget.id': 'string',
-      'saihm_forget.warmStart': 'string:|delete',
+      'saihm_forget.warmStart': 'string:default|delete',
       'saihm_forget.snapshotId': 'string:^$|^[0-9a-f]{64}$',
       'saihm_forget.token': 'string:^$|^[a-z0-9]{16,32}$',
       // 0.14.3: the record file, and the inline pair it stands in for, now optional (required in the tool unless the file).
       'saihm_share.recipientRecordFile': 'string',
       'saihm_share.recipientRecord': 'object',
       'saihm_share.recipientPinnedAgentIdHashHex': 'string',
-      'saihm_share.scope': 'string:|read|write|readwrite',
+      'saihm_share.scope': 'string:default|read|write|readwrite',
       'saihm_share.expiryEpoch': 'string:^$|^[0-9]+$',
       'saihm_governance_propose.paramKey': 'string',
       'saihm_governance_propose.proposedValue': 'string',
@@ -492,9 +511,11 @@ test('saihm_join without an identity: a null or blank newIdentity, or no argumen
 
 test('optionalChoice and optionalPattern offer the blank and read it as absent; every value valid before is valid, and no other', () => {
   const c = optionalChoice(['put']);
-  for (const v of ['', ' ', null, undefined]) assert.equal(c.parse(v), undefined, JSON.stringify(v));
+  for (const v of ['', ' ', null, undefined, 'default']) assert.equal(c.parse(v), undefined, JSON.stringify(v));
   assert.equal(c.parse('put'), 'put');
-  for (const v of ['PUT', 'x', false, {}]) assert.throws(() => c.parse(v), JSON.stringify(v));
+  for (const v of ['PUT', 'x', false, {}, 'DEFAULT', ' default']) assert.throws(() => c.parse(v), JSON.stringify(v));
+  assert.deepEqual((z.toJSONSchema(z.object({ c })) as any).properties.c.enum, ['default', 'put'], 'advertised: "default", never ""');
+  assert.throws(() => optionalChoice(['default', 'x']), '"default" is the leave-it choice, never a value');
   const p = optionalPattern(/^[a-z0-9]{16,32}$/);
   for (const v of ['', '  ', null]) assert.equal(p.parse(v), undefined, JSON.stringify(v));
   assert.equal(p.parse('a'.repeat(16)), 'a'.repeat(16));
@@ -544,10 +565,11 @@ test('a strict host: the advertised schema of every tool lets it leave each opti
     }
     assert.deepEqual(violations, [], 'a strict host can send the blank choice of every optional field');
 
-    // The arguments a Cline + OpenAI run sent, once the model may leave warmStart blank: a plain remember.
+    // The arguments a Cline + OpenAI run sends, once the model may leave warmStart: a plain remember. From 0.15.0 the
+    // advertised choice is "default"; the blank 0.14.1 to 0.14.4 advertised is still read as absent (below).
     const remember = tools.find((t) => t.name === 'saihm_remember')!;
+    assert.equal(strictViolation(remember.inputSchema as never, { warmStart: 'default', content: 'x', cellId: '', coversThrough: '', token: '' }), null);
     const cline = { warmStart: '', content: 'x', cellId: '', coversThrough: '', token: '' };
-    assert.equal(strictViolation(remember.inputSchema as never, cline), null);
     const before = m.methods.length;
     const plain = await d.call('saihm_remember', { content: 'x' });
     const plainMethods = m.methods.slice(before);

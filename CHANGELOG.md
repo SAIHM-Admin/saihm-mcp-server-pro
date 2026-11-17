@@ -2,6 +2,89 @@
 
 All notable changes to `@saihm/mcp-server-pro` are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] — 2026-11-17
+
+After you pay, there is nothing to change: SAIHM finds the plan on your key and every
+client switches to it on its own. Gemini agents that convert tool schemas work with SAIHM
+again. No tool added or removed.
+
+### Added
+- **Your plan, found for you.** When a free sign-in's answer says your key holds an active
+  Stripe or Paystack plan, the client switches to that plan, signs in on it
+  at once and saves it in `$SAIHM_HOME/plan.<first 16 characters of your agent ID>.json`
+  (mode 600) for the next session. This applies wherever the plan would otherwise be FREE;
+  a paid `SAIHM_TIER`, or an identity token that carries a paid plan, is always kept as set.
+- **Plan changes followed.** A plan changed later (PRO to PRO_FAST, say, or the same plan
+  moved to another payment provider) is followed the same way, and one that lapses moves
+  the client back to the free plan, with a note in *"Show my SAIHM status"*; a key with no
+  free plan stops with `plan_inactive` and says so, with how to renew. If a free join is
+  then started on that key, the memory tools show its link and code while it waits for
+  approval. A refused plan is not taken again on the same payment method for 50 minutes,
+  or until the free sign-in's next refresh if that comes sooner, so a renewal that reaches
+  SAIHM late is picked up at the next hourly sign-in, even on a computer whose clock runs
+  fast. Finding a plan change costs at most two extra sign-ins (one on the free plan, one
+  on the new plan), and nothing polls.
+- **Settings that name another plan say so.** When a paid `SAIHM_TIER` is refused and the
+  key holds a different plan, or the same plan on another payment method, the error and the
+  status say which, and how to fix it. The settings are never overridden; the client
+  checks this at most once an hour, and the note goes away once the plan the settings name
+  signs in again.
+- **The status shows your plan** and where it came from: `plan=` and `plan-from=`
+  (`settings`, `identity`, `server` or `default`), the same words as `plan` in structured
+  output.
+- **"Add SAIHM"** starts the free activation, like *"Join SAIHM"*.
+- **`upgrade` checks the key's plan first.** Before it asks for a checkout link, it makes
+  one free sign-in. When the answer names a plan the key already holds (one paid through
+  Stripe or Paystack), it stops with `already_subscribed`, names the plan and creates no
+  checkout. If that sign-in fails, `upgrade` goes on as before; if it meets the sign-in
+  limit, `upgrade` stops there and creates no checkout. If the service itself refuses a
+  checkout because the key already has a plan, `upgrade` reports that the same way.
+
+### Changed
+- **`upgrade` no longer prints settings to add.** After you pay, every client that uses
+  the key and runs 0.15.0 or later switches within the hour; to switch one on the device
+  that ran `upgrade` now, restart it, then say *"Show my SAIHM status"*. On that device no
+  free sign-in is kept for a day or until the plan is found, so a restarted session finds
+  it at once; another device reuses the sign-in it kept until that expires. `upgrade`,
+  `free-join` and `join` read the plan from your settings, whatever plan was saved.
+- **An optional choice offers `default`, not a blank.** `warmStart` and `scope` advertised
+  `""` as a choice from 0.14.1; Gemini refuses a tool declaration whose enum holds an empty
+  value, so a Gemini agent with SAIHM configured failed every request. They now advertise
+  `default`, and a blank is still read as absent.
+- The hint after a refused free sign-in, and the note `export-identity` prints for a token
+  with no tier, name `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` only for a plan paid in
+  stablecoin, which the server does not report this way.
+- Every tool description is 1,000 characters or fewer, so a host that limits their length
+  takes each one whole.
+- **Each memory reads as one memory.** In the text `saihm_recall` returns, every line of a
+  memory after its first now starts with `  | ` under the memory's own row, and the tool's
+  description says the mark is display only, so an agent copying a memory leaves it out.
+  Text pasted into a memory can no longer look like a second memory, a profile or a shared
+  pointer. The memory's text is kept, each line ending shown as a new line, and its
+  structured copy is unchanged.
+
+### Documentation
+- README, REFERENCE and llms-install describe the plan found at sign-in, and the README
+  says that `free-join` waits up to about 15 minutes for approval in a terminal with no
+  browser, and that Ctrl+C stops it safely.
+- The README, REFERENCE and llms-install name *"Add SAIHM"* beside *"Join SAIHM"*, and the
+  README gives Microsoft Marketplace customers their start page,
+  <https://saihm.net/microsoft>.
+- The README's payment table names the website's card routes and the gasless signed
+  authorization for stablecoin, and a sentence below it covers pay-as-you-go, which is
+  charged per call.
+- What the service can see, and what erasing covers, now match the
+  [privacy notice](https://saihm.net/terms#privacy): your memories stay encrypted, the
+  service can see the details it needs to store, find, share and bill for them, and copies
+  outside the service stay where they are.
+- The README and REFERENCE say how to change or cancel a plan: email ops@saihm.net with
+  [billing] at the start of the subject. llms-install says that only a stablecoin plan
+  needs `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD`, and that with `SAIHM_SELF_JOIN=0` every
+  plan sets `SAIHM_TIER`; REFERENCE adds the new plan messages and the `plan` field of
+  `saihm_status`.
+- The 0.14.4 entry below now says that the *Load SAIHM memory* prompt asks for its
+  one-line notice whenever a profile applies, and older entries use American spelling.
+
 ## [0.14.4] — 2026-11-07
 
 A new prompt, *Configure SAIHM memory*, sets how SAIHM memory works for you by goal
@@ -28,8 +111,9 @@ and the month each discount code is valid through. No tool added or removed.
 ### Changed
 
 - **The *Load SAIHM memory* prompt** has the agent run a second recall for `SAIHM-PROFILE`
-  when it recalls by topic, so a profile saved for you or your project still applies, with
-  a one-line notice when it does. It repeats that a profile sets preferences only.
+  when it recalls by topic, so a profile saved for you or your project still applies. It
+  asks for a one-line notice whenever a profile applies, and repeats that a profile sets
+  preferences only.
 - **Discount codes.** The README gives the month each code is valid through and says
   there are 100,000 of each.
 - **American spelling.** The *Load SAIHM memory* prompt now asks the agent to summarize
@@ -103,7 +187,7 @@ removed.
   recall copy. To keep it in memory only, set `SAIHM_SESSION_CACHE` to `0` in every AI
   client and app that runs SAIHM with your key on this device: SAIHM then deletes the
   sign-in kept earlier, the next time it loads your key.
-- **A shared memory is labelled in the structured result too.** A shared read's row in
+- **A shared memory is labeled in the structured result too.** A shared read's row in
   `memories` now carries the sharer's agent ID as `sharer` and `owner: "another-agent"`,
   and the text names that agent ID beside its label, so the memory is marked as another
   agent's whichever part of the result an AI client passes to the model.
@@ -628,7 +712,7 @@ tools' published schemas or structured results.
   the endpoint's own request limit sends it, was reported as `[unknown]`. It is now
   `rate_limited` and says how long to wait, from `retry-after` when the endpoint
   gives whole seconds. A 429 with a code, such as the free tier's lifetime cap, is
-  unchanged. The share events feed now also honours `retry-after` when a refusal of
+  unchanged. The share events feed now also honors `retry-after` when a refusal of
   its poll names no wait in its body; the header never reached it before. Whatever
   wait the endpoint names, the feed waits at least one second: before, a wait of a few
   milliseconds named in an answer's or a refusal's body made it poll almost as fast as
@@ -744,7 +828,7 @@ Bring an existing identity anywhere. No protocol tool added or removed; the
 - **HTTP proxies.** An `https://` endpoint is reached through the proxy in
   `https_proxy`, or `HTTPS_PROXY` if that is unset, by a CONNECT tunnel with the
   endpoint's certificate verified end to end. `HTTP_PROXY` is not used for https,
-  as with npm and curl. `NO_PROXY` is honoured, loopback (`127.0.0.0/8`, `::1`,
+  as with npm and curl. `NO_PROXY` is honored, loopback (`127.0.0.0/8`, `::1`,
   `localhost`, `*.localhost`) never uses a proxy, proxy errors name the variable that
   was read, and proxy credentials are never printed. Only an `http://` proxy URL is
   supported. A
@@ -813,7 +897,7 @@ These narrower things do:
   the default, `FREE`.
 - **With self-join off and no `SAIHM_TIER`, the error asks for the tier first.** A
   free identity was told to set a payment method, which it does not need.
-- **`HTTPS_PROXY` is now honoured.** A machine that sets `https_proxy` or
+- **`HTTPS_PROXY` is now honored.** A machine that sets `https_proxy` or
   `HTTPS_PROXY` and reached the endpoint directly before now goes through that
   proxy; `HTTP_PROXY` alone changes nothing. A proxy URL this transport cannot use
   (`socks5://`, `https://`) now fails every call with an error naming the setting,
@@ -1097,7 +1181,7 @@ change: every tool accepts exactly the input it accepted in `0.6.1`.
 
 - **`SAIHM_RECALL_CACHE=0` keeps no local copy**, even when
   `SAIHM_RECALL_CACHE_PATH` is set. An inline key (`SAIHM_MASTER_SECRET_HEX`) or
-  a key file placed anywhere else keeps the previous behaviour: no cache unless
+  a key file placed anywhere else keeps the previous behavior: no cache unless
   `SAIHM_RECALL_CACHE_PATH` names one.
 
 - **Library callers are unchanged.** A client constructed directly still writes
@@ -1157,7 +1241,7 @@ and no schema change: every tool accepts exactly the input it accepted in
   The root follows the IDENTITY chain — `SAIHM_ERASURE_FEED_DIR`, then
   `SAIHM_HOME`, then `~/.saihm`. It deliberately does not read
   `SAIHM_STATE_DIR`: that variable relocates one unrelated artifact, and
-  honouring it here would silently split a single identity's feed across two
+  honoring it here would silently split a single identity's feed across two
   roots the first time an operator set it. The server creates the identity's
   directory on its first tool call — measured from the packed artifact, not
   from the code — so a consumer that polls for the directory arms its watch
@@ -1241,7 +1325,7 @@ schema change: every tool accepts exactly the input it accepted in `0.5.2`.
   current user; older than an hour, so a mint running concurrently in another
   process is never destroyed; and unlinked one at a time by resolved name. It
   runs only where this package writes temps, never beside an operator-configured
-  key file. **It stays dark until the behaviour is proven in the field** — the
+  key file. **It stays dark until the behavior is proven in the field** — the
   failure mode of a sweep bug is deleting something that mattered.
 
 ## [0.5.2] — 2026-08-31
@@ -1365,7 +1449,7 @@ tools take, and does not call `saihm_forget` expecting a working set to tidy.
 ### Grading
 
 A patch. No announced identifier changes value, nothing stops round-tripping, and
-no tool, parameter or return shape changes. The only behaviour that differs at all
+no tool, parameter or return shape changes. The only behavior that differs at all
 is what a FAILED `saihm_join` says, which the second paragraph below takes up
 rather than waving past. `instructions` is optional server documentation rather than functionality —
 the same class as the tool descriptions beside it, and nothing matches on it. The
@@ -1586,7 +1670,7 @@ rendered with a `?` in its place and will not round-trip; that is the deliberate
 trade against a path that reads as one thing and is another.
 
 URL sites deliberately keep `safeField`: an invalid URL is echoed back to be
-recognised, and collapsing an invisible character to `?` makes the cause visible
+recognized, and collapsing an invisible character to `?` makes the cause visible
 rather than hiding it. That argument covers the diagnostic arm and NOT the two live
 URLs a human is told to open — the hosted checkout link and the device-flow
 `verificationUri` — where an IDN authority is mangled to `?` and becomes a link that
@@ -1601,7 +1685,7 @@ Tracked separately.
   alone, so a path budget can only be rendered through the path fence.
 - The persist sweep proves CONTAINMENT — the call inside a try whose catch carries
   the wrapper — where it previously matched a 400-character window, in which an
-  unwrapped call could borrow a neighbour's wrapper.
+  unwrapped call could borrow a neighbor's wrapper.
 - A new sweep ENUMERATES every occurrence of a caller-chosen value outside a fence and
   pins the count per file. STATED LIMIT: it is a named-value guard, not taint analysis
   — it knows five identifiers (`keyPath`, `secretFile`, `savedTo`,
@@ -1634,7 +1718,7 @@ Tracked separately.
   policed it and the two tests that policed that guard are all deleted — there is
   nothing left for them to police.
 - **The sweeps match on SYMBOLS, not names.** The AST rewrite killed the lexical
-  evasions and left a simpler one: every sweep still recognised its subject by the
+  evasions and left a simpler one: every sweep still recognized its subject by the
   name at the call site. Measured, all four — `import { safeField as fence }` and
   `const fence = safeField` each hid a caller-actionable path behind the
   ASCII-collapsing fence at a path budget with the whole suite green; a receiver alias
@@ -1784,10 +1868,10 @@ them could occur. Checkable against the published tag rather than on trust:
   response is lost leaves the mark one short, and before marks persisted a restart
   cleared it. Writing at that sequence puts a second envelope where the endpoint
   already holds one — the equivocation `stale_cell` and the `share` guard exist to
-  detect, produced locally, out of a defence. The persisted mark keeps its whole
+  detect, produced locally, out of a defense. The persisted mark keeps its whole
   security value: it is a FLOOR, and a replayed older envelope still cannot drag a
   client backwards. What it no longer does is stand in for the live read. **Cost:
-  at most one extra recall per updated cell per process** — the behaviour before
+  at most one extra recall per updated cell per process** — the behavior before
   marks persisted, and discharged by any recall that already opened the cell,
   since opening a row IS a live observation. A session that recalls before it
   writes pays nothing. A cell already at the uint64 ceiling is exempt, because
@@ -1821,7 +1905,7 @@ them could occur. Checkable against the published tag rather than on trust:
   reported as though it were.
 
 `README.md`'s configuration table and troubleshooting row for
-`SAIHM_SEQ_STATE_PATH` described the DEFAULT location's behaviour under the
+`SAIHM_SEQ_STATE_PATH` described the DEFAULT location's behavior under the
 variable that overrides it. A location you set is yours: if it cannot be written,
 calls fail and name the path rather than falling back, so a safeguard you asked for
 never goes quiet. Only the default degrades to memory for the session.
@@ -1940,7 +2024,7 @@ marked as such below; two more are breaking without being regressions (the
   `MAX_PATH_MESSAGE_CHARS`: a non-ASCII cache path renders correctly instead of as
   `?`, and the bound widens 33×. `forget` is a tool, not a CLI verb, so this is not
   covered by the CLI bullet.
-- **`saihm_status` no longer parenthesises the BFSI sub-scores.** The line read
+- **`saihm_status` no longer parenthesizes the BFSI sub-scores.** The line read
   `bfsi=0.812 (R=0.900 M=0.700)` and now reads `bfsi=0.812  R=0.900  M=0.700`, which
   is the two-space `key=value` convention every other field on that line already
   used. `R` and `M` are raw endpoint-chosen strings — unlike `tier`, `custody` and
@@ -2088,7 +2172,7 @@ it sees a different value.
   never at fault — spawned directly with a cold `HOME` it completes the handshake
   and enumerates all nine tools. Both `mcpServers` examples in `README.md` now
   carry `timeout`, with a note on why removing it breaks Cline specifically.
-  Hosts that do not recognise the field ignore it.
+  Hosts that do not recognize the field ignore it.
 
 ### Added
 
@@ -2158,7 +2242,7 @@ eight tools plus the `saihm_join` bootstrap affordance are unchanged.
 - Regression cover added for the genuinely-unset state. Every pre-existing
   self-join test pinned `SAIHM_ENDPOINT_URL`, so the suite was green while the
   real first-run path was broken; three new cases assert the unset, defaulted,
-  and explicitly-empty behaviours, and pin `SAIHM_HOME` to a temp dir so a
+  and explicitly-empty behaviors, and pin `SAIHM_HOME` to a temp dir so a
   developer's own `~/.saihm` identity cannot mask a failure.
 
 ## [0.2.0] — 2026-07-28
@@ -2174,7 +2258,7 @@ tools are unchanged.
   64+ hex-char master secret, which an autonomous agent cannot produce for
   itself. Self-join generates and persists that identity on-device instead, so
   _"Join SAIHM"_ works out of the box. Set `SAIHM_SELF_JOIN=0` to restore the
-  previous behaviour — the tool is not registered and every self-join path is
+  previous behavior — the tool is not registered and every self-join path is
   inert. `saihm_join` remains a one-time onboarding bootstrap affordance, not a
   ninth protocol tool.
 - Boot with no master secret and no persisted identity now returns the
@@ -2227,7 +2311,7 @@ tools are unchanged.
 
 - **Structured tool output.** `saihm_remember`, `saihm_recall`, and `saihm_status` now advertise an `outputSchema` and return matching `structuredContent`, so MCP hosts and agents get typed results instead of parsing prose.
 - **`saihm_session_bootstrap` prompt.** A new MCP prompt (the `prompts` capability is now advertised) that tells an agent to load its SAIHM memory via `saihm_recall` at the start of a session.
-- **`SAIHM_DISCOVERY_SOURCE`** (also `discoverySource` on `SaihmProClientOpts`) — an optional attribution tag (e.g. `"glama"`, `"mcp-registry"`) sent as `source` on self-onboard, so an operator can attribute a paid conversion to the install channel. Free-form; sanitised endpoint-side.
+- **`SAIHM_DISCOVERY_SOURCE`** (also `discoverySource` on `SaihmProClientOpts`) — an optional attribution tag (e.g. `"glama"`, `"mcp-registry"`) sent as `source` on self-onboard, so an operator can attribute a paid conversion to the install channel. Free-form; sanitized endpoint-side.
 - npm `keywords`, README badges, and a `SECURITY.md` coordinated-disclosure policy (source tree only; not part of the published tarball) for discovery.
 
 ### Changed
@@ -2274,6 +2358,7 @@ Initial public release.
 - API: `remember`, `recall`, `recallOne`, `forget`, `status`, `share`, `revokeShare`; `bootFromEnv()`; getters `agentIdHash`, `identityRecord`.
 - Endpoint hardening (HTTPS-only; loopback `http` permitted for local dev), signed monotonic anti-replay sequencing with optional mode-600 persistence, and a fully typed `SaihmEndpointError` surface.
 
+[0.15.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.15.0
 [0.14.4]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.4
 [0.14.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.3
 [0.14.2]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.14.2
@@ -2310,4 +2395,4 @@ Initial public release.
 [0.1.5]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.5
 [0.1.3]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.3
 [0.1.0]: https://www.npmjs.com/package/@saihm/mcp-server-pro/v/0.1.0
-[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.14.4...HEAD
+[Unreleased]: https://github.com/SAIHM-Admin/saihm-mcp-server-pro/compare/v0.15.0...HEAD

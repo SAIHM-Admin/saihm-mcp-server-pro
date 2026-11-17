@@ -428,6 +428,7 @@ const RENDER_SITES_PIN: Record<string, number> = {
   // 0 - the kept sign-in (0.14.3) renders nothing: every failure in it is silent and costs one sign-in, and the token
   // it holds is never printed.
   'session-token-file.ts': 0,
+  'plan-file.ts': 0,
   // 0 - the warm-start module renders nothing: it seals, opens, checks answers and handles the payload files, and throws
   // refusals whose text names no value; the tools render what it returns.
   'warm-start.ts': 0,
@@ -476,16 +477,16 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'the status line. Every span VERIFIED fenced by reading: agent/tier/custody are labelSafe(shortScalar|safeScalar), shards/sharing are numbers-or-marker, bfsi is a number or the marker, and R/M/epoch are labelSafe(safeScalar). Reported only because the predicate does not reduce `??` and numeric unions inside a template span',
   'server.ts:`SHARED-RECALL [${labelSafe(safeScalar(cell.cellId))}] seq=$':
     'the shared-recall receipt. cellId and seq are labelSafe(safeScalar), and the sharer (0.14.3 review 3) is hexOrMarker; the trailing `${sharedBody}` is the PAYLOAD - and note how it is bounded: `cell.plaintext` is split on EVERY line terminator and every line re-prefixed with `  > `, so an embedded newline yields another QUOTED line rather than a forged record at column zero',
-  'server.ts:c.plaintext':
-    'the PAYLOAD, raw by design and documented as such at the site: it is the memory the agent asked ' +
-    'for, not a label, and fencing it would corrupt the thing being recalled. The residual this ' +
-    'creates is disclosed on the sharedLines block in the same handler. Note what bounds it: every ' +
-    'OTHER field on that line is fenced and labelSafe-d, so plaintext cannot forge a neighbouring ' +
-    'pair - it can only be itself',
-  'server.ts:own.plaintext':
-    'the PAYLOAD of the own-cell read by id (0.13.0), raw by design exactly as `c.plaintext` above: the memory ' +
-    'the agent asked for, opened and authenticated by this client. Every other field on its line is fenced and ' +
-    'labelSafe-d, so the plaintext cannot forge a neighbouring pair - it can only be itself',
+  'server.ts:ownMemoryText(c.plaintext)':
+    'the PAYLOAD: the memory the agent asked for, not a label, so no character is scrubbed - fencing it would ' +
+    'corrupt the thing being recalled. Since 0.15.0 `ownMemoryText` splits it on the line terminators a host may ' +
+    'honor and opens every line after the first with `  | `, so it continues its own row and cannot start a line ' +
+    'of any shape this block writes (tests/server_render_hostile.test.ts, the pasted-text test). Every OTHER field ' +
+    'on that line is fenced and labelSafe-d, so plaintext cannot forge a neighbouring pair - it can only be itself',
+  'server.ts:ownMemoryText(own.plaintext)':
+    'the PAYLOAD of the own-cell read by id (0.13.0), rendered exactly as `ownMemoryText(c.plaintext)` above: the ' +
+    'memory the agent asked for, opened and authenticated by this client, its further lines marked `  | `. Every ' +
+    'other field on its line is fenced and labelSafe-d, so the plaintext cannot forge a neighbouring pair',
   "server.ts:listLines.join('\\n') + (timingMalformed ? '\\n timing=' + MAL":
     'the version listing (0.13.0). Its banner interpolates only a client-computed count and fixed text; every ' +
     'other line is prefixed `  ! ` and each endpoint value on it - cell, seq, commit, after - is ' +
@@ -500,13 +501,13 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'marker: fixed text and the MALFORMED constant, chosen by a boolean. Reported only because the predicate does not ' +
     'follow an array built above the join',
   "server.ts:[...lines, ...sharedLines].join('\\n') + (timingMalformed ? '":
-    'the full recall (0.13.0 appended the timing marker): own-memory lines fenced as `c.plaintext` above records, ' +
+    'the full recall (0.13.0 appended the timing marker): own-memory lines fenced as `ownMemoryText(c.plaintext)` above records, ' +
     'pointer lines prefixed `  ! ` with every endpoint value labelSafe-d or a closed-set checker, and a banner of ' +
     'counts and fixed text (the kept end is one of two fixed phrases). The `+` adds fixed text and the MALFORMED ' +
     'constant, chosen by a boolean. Reported only because the predicate does not follow arrays built above the join',
   "server.ts:`RECALL 1 memories\\n [${labelSafe(safeScalar(own.cellId))}] ":
     'the own-cell read by id (0.13.0) with the timing marker appended: cellId and seq labelSafe(safeScalar), the ' +
-    'plaintext the PAYLOAD as `own.plaintext` records, and the `+` adding fixed text and the MALFORMED constant ' +
+    'plaintext the PAYLOAD as `ownMemoryText(own.plaintext)` records, and the `+` adding fixed text and the MALFORMED constant ' +
     'chosen by a boolean. Reported as a whole because a template inside a `+` chain is read as one piece',
   "server.ts:'saihm: not exported - ' + relativeDirRefusal(relativeHome, ":
     'export-identity refusing a relative SAIHM_HOME (0.13.0): a fixed prefix and `relativeDirRefusal`, fixed ' +
@@ -568,7 +569,7 @@ const RENDER_ALLOWED_TABLE: Record<string, string> = {
     'if a fourth occurrence appeared unfenced. Reported only because the predicate cannot see ' +
     'through a call boundary to the fence on the other side',
 };
-const SAFESCALAR_SITES_PIN = 38; // +1 (0.14.3): `identity-record`'s file error, the Node error code; +1 (warm start): a listed snapshot's `created=` time; +1 (0.13.0 review): the version listing tests whether the next page's `after` renders EXACTLY, and says so instead when it would not; +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts; +1: `export-identity`'s tier in its summary; +1: `saihm_join`'s paid-plan answer; +2: the plan name meant, in the join's tier answer and in `export-identity`'s refusal of a tier slip; +2 (0.13.0): the own-cell read by id, its cellId and seq in label position as on every own-memory line; +3 (0.13.0): the version listing, each entry's cellId and seq and the next page's `after`, all endpoint claims
+const SAFESCALAR_SITES_PIN = 39; // +1 (0.15.0): `saihm_status`'s local plan name, from a closed set; +1 (0.14.3): `identity-record`'s file error, the Node error code; +1 (warm start): a listed snapshot's `created=` time; +1 (0.13.0 review): the version listing tests whether the next page's `after` renders EXACTLY, and says so instead when it would not; +1: `saihm_status`'s local seq-state degradation token; +2: `saihm_remember`'s two local share re-issue counts; +1: `export-identity`'s tier in its summary; +1: `saihm_join`'s paid-plan answer; +2: the plan name meant, in the join's tier answer and in `export-identity`'s refusal of a tier slip; +2 (0.13.0): the own-cell read by id, its cellId and seq in label position as on every own-memory line; +3 (0.13.0): the version listing, each entry's cellId and seq and the next page's `after`, all endpoint claims
 const RENDER_HELPER_EXPORTS: string[] = [
   'ABBREV_CHARS', 'BLANK_SYMBOLS', 'MALFORMED', 'MAX_ERROR_MESSAGE_CHARS',
   'MAX_JOIN_FIELD_CHARS', 'MAX_PATH_FIELD_CHARS', 'MAX_PATH_MESSAGE_CHARS', 'MAX_SCALAR_CHARS',
@@ -1224,8 +1225,10 @@ test('boundedOrMarker REJECTS a non-string rather than fabricating one', () => {
 test('a value String() cannot survive becomes a marker, not a thrown stack overflow', () => {
   // An 8 KB response could otherwise hold four of the eight tools unusable: `String(v)` recurses
   // through nested arrays, and the RangeError escaped every fence to reach the agent as a bare
-  // "Maximum call stack size exceeded" with no SAIHM prefix and no attribution.
-  const deep = JSON.parse('['.repeat(4000) + '"x"' + ']'.repeat(4000)) as unknown;
+  // "Maximum call stack size exceeded" with no SAIHM prefix and no attribution. 4000 levels overflow
+  // String() on Node 20 to 24 but not on Node 26, which survives 4000 and overflows by 20000
+  // (measured), so the fixture nests 100000 deep to overflow on every Node line the package supports.
+  const deep = JSON.parse('['.repeat(100_000) + '"x"' + ']'.repeat(100_000)) as unknown;
   assert.equal(safeScalar(deep), MALFORMED);
   assert.equal(boundedOrMarker(deep), MALFORMED);
 
@@ -1383,6 +1386,12 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
       MAX_RESPONSE_BYTES: 16 * 1024 * 1024,
       JWT_REFRESH_SKEW_MS: 60_000,
       OPAQUE_TOKEN_TTL_MS: 5 * 60_000,
+      // 0.15.0: a refused plan (by plan and payment method) is not switched to for 50 minutes, less than the free sign-in's
+      // first refresh at 59 (0.15.0 review); settings naming a refused plan probe once an hour; a FREE sign-in is not kept
+      // for a day after `upgrade` printed a link.
+      PLAN_REFUSAL_HOLD_MS: 50 * 60_000,
+      FREE_PROBE_INTERVAL_MS: 60 * 60_000,
+      UPGRADE_PENDING_MS: 24 * 60 * 60_000,
       FREE_ONBOARD_POLL_MS: 5_000,
       MAX_COUNTER_CHARS: 32,
       // NOT A BUDGET - a per-process tmp-name counter, whose initial value is the only thing there
@@ -1503,6 +1512,7 @@ test('EVERY declared budget is pinned — the enumeration is derived, not rememb
     // 0.14.3, the sign-in kept between sessions: the longest token kept or used, the largest file read (anything larger
     // is not one this package wrote), and how long a keep or a drop waits for the lock before giving up.
     'session-token-file.ts': { MAX_SESSION_TOKEN_CHARS: 8192, MAX_SESSION_FILE_BYTES: 16384, LOCK_WAIT_MS: 1000 },
+    'plan-file.ts': { MAX_PLAN_FILE_BYTES: 4096, LOCK_WAIT_MS: 1000 },
     // Warm start's format and bounds: how old a leftover payload file must be before it is removed, the key envelope's
     // layout byte and size, the snapshot key, nonce, GCM nonce and tag sizes, the part sizes this client accepts from
     // the endpoint, and the longest key envelope the endpoint stores.
@@ -2323,7 +2333,7 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
       // 0.14.0: a share listing page's cursor on the NEXT line, compared and then rendered: shown only when the fence
       // leaves it whole, at the longest cursor the tool carries (a longer one fails the page before it gets here).
       'safeField:MAX_TOOL_SHARES_CURSOR_CHARS': 2,
-      'safeField:MAX_JOIN_FIELD_CHARS': 3, // the device-flow verificationUri, twice
+      'safeField:MAX_JOIN_FIELD_CHARS': 4, // the device-flow verificationUri, twice; +1 (0.15.0): saihm_status's plan note
       'safeField:MAX_URL_FIELD_CHARS': 2, // the hosted checkout URL, twice
       // "Also written to", "Back up <keyPath>", and the two join-result keyPaths
       // FIVE since `join` stopped telling a file-key caller to keep an env var: it now names the
@@ -2397,6 +2407,7 @@ test('EVERY safeField call site carries a PINNED budget - the defect class, mech
     'record-file.ts': {},
     // {} - the kept sign-in calls no fence: it renders nothing.
     'session-token-file.ts': {},
+    'plan-file.ts': {},
   };
   // The file set is DERIVED, not listed. Hand-keeping it was this sweep's own first defect: a new
   // module under `src/` with a wrong-budget call site stayed green, and `index.ts` was missing
@@ -2639,6 +2650,14 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     'session-token-file.ts:drop': 1,
     'session-token-file.ts:discard': 1,
     'session-token-file.ts:fd': 1,
+    // 0.15.0: the plan saved from the server (its folder, its 0600 temporary file, the rename, the unlink on a failed
+    // rename; the discard; the read's fd) and the upgrade marker (its folder, its empty 0600 temporary file `wx`, the
+    // rename over the marker's name, the unlink of its own temporary file on a failed rename). None writes the cache.
+    'plan-file.ts:keep': 4,
+    'plan-file.ts:discard': 1,
+    'plan-file.ts:fd': 1,
+    'client.ts:markUpgradePending': 4,
+    'client.ts:switchToPaidPlan': 1,
   };
   // A behavioural test proves the mechanism at ONE site. It cannot prove the mechanism is APPLIED at
   // the others, and that is precisely how this failed: four of five call sites had no coverage and
@@ -3110,7 +3129,7 @@ test('EVERY persist-reaching call is CONTAINED by a markPathBearing wrapper', ()
     // `persist()`.
     // `record-file.ts: 0` - it reads one file and reaches no `persist()`. `session-token-file.ts: 0` - it writes its own
     // file (censused in `FS_WRITES`) and reaches no `persist()`.
-    { 'change-feed.ts': 0, 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'session-token-file.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0, 'tool-input.ts': 0, 'warm-start.ts': 0 },
+    { 'change-feed.ts': 0, 'client.ts': 5, 'erasure-feed.ts': 0, 'feed-state-file.ts': 0, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'plan-file.ts': 0, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 0, 'session-token-file.ts': 0, 'share-events.ts': 0, 'share-states-file.ts': 0, 'tool-input.ts': 0, 'warm-start.ts': 0 },
     'a persist-reaching call site was added, removed, or moved between modules',
   );
   assert.equal(total, 5, 'the number of persist-reaching call sites changed');
@@ -3254,8 +3273,10 @@ test('every tmp-then-rename arm unlinks ITS OWN tmp — at its own site, not by 
     // that a failed restore leaves no file, and the warm-start folder's sweep removes any temporary file a crash leaves.
     // `record-file.ts: 0` - it writes no file. `session-token-file.ts: 1` - the kept sign-in is written to a temporary
     // file of mode 600 and renamed over the old one under the lock, and the arm unlinks its own temporary file when the
-    // rename fails.
-    { 'change-feed.ts': 0, 'client.ts': 3, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'session-token-file.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1, 'tool-input.ts': 0, 'warm-start.ts': 1 },
+    // rename fails. `client.ts: 4` from 0.15.0's review: the upgrade marker is an empty file of mode 600 created `wx` and
+    // renamed over the marker's name (never written through it: a link planted there emptied the key file), and the arm
+    // unlinks its own temporary file when the rename fails.
+    { 'change-feed.ts': 0, 'client.ts': 4, 'erasure-feed.ts': 0, 'feed-state-file.ts': 1, 'file-lock.ts': 0, 'identity-token.ts': 0, 'index.ts': 0, 'plan-file.ts': 1, 'record-file.ts': 0, 'render_fence.ts': 0, 'server.ts': 1, 'session-token-file.ts': 1, 'share-events.ts': 0, 'share-states-file.ts': 1, 'tool-input.ts': 0, 'warm-start.ts': 1 },
     'a tmp-then-rename arm was added, removed, or moved between modules',
   );
   assert.equal(rotations, 1, 'the rotation exemption names exactly one rename');
@@ -3748,6 +3769,10 @@ test('EVERY structured field on EVERY tool is DECLARED — the map in `render_fe
       // no endpoint budget applies. Bounded anyway on the TEXT side by `safeScalar`, because the
       // errno inside it comes from Node rather than from a list this file controls.
       seqStateDegraded: 'CLIENT-ORIGIN: local filesystem state, never endpoint-reachable',
+      // LOCAL too (0.15.0): the plan this client signs in on, by a name from a closed set (`displayablePlan`, else
+      // `unrecognized`/`none`), its source from a closed set, and a note this module writes itself. A plan the endpoint
+      // reported reaches it only through `paidPlanOf`, which admits the closed sets alone.
+      plan: 'CLIENT-ORIGIN: closed-set plan name and source, and a note this client writes',
       // ENDPOINT-CHOSEN, and passed on whole: the one structured field here that is an object rather than a scalar. It
       // is bounded, not checked: a plain object of at most 16 levels and 16,384 JSON characters, else null.
       features: 'BOUNDED IN THE CLIENT: a plain object of at most 16 levels and 16,384 JSON characters, or null',
@@ -4277,6 +4302,7 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
     'record-file.ts': {},
     // {} - the kept sign-in reads no variable itself; its path comes from the default key file's folder.
     'session-token-file.ts': {},
+    'plan-file.ts': {},
     'server.ts': {
       // An env read into a local, the same shape as the `client.ts` allowance above. It is here
       // because `persistCheckoutUrl` now honours `SAIHM_HOME` as a fallback for `SAIHM_STATE_DIR`:
@@ -4416,7 +4442,9 @@ test('EVERY occurrence of a caller-chosen value is ENUMERATED - no syntax gate t
   // session-token-file.ts: 1 (0.14.3) - the kept sign-in counts a parsed file's own keys to refuse one with a field too
   // many or too few. It compares names against a fixed list; the one value it returns is the token, which reaches no
   // renderer.
-  const ANON: Record<string, number> = { 'change-feed.ts': 1, 'client.ts': 7, 'record-file.ts': 1, 'session-token-file.ts': 1, 'share-events.ts': 4, 'tool-input.ts': 1 };
+  // plan-file.ts: 1 (0.15.0) - the saved plan counts a parsed file's own keys to refuse one with a field too many, as the
+  // kept sign-in does; the plan it returns is read field by field through `paidPlanOf`. Nothing it counts is rendered.
+  const ANON: Record<string, number> = { 'change-feed.ts': 1, 'client.ts': 7, 'plan-file.ts': 1, 'record-file.ts': 1, 'session-token-file.ts': 1, 'share-events.ts': 4, 'tool-input.ts': 1 };
   // ...and resolved to the BINDING, not the spelling at the call site. Matching the call site's
   // text closed `const { entries } = Object;` and left `const { entries: pairs } = Object;` open -
   // measured green, which is this round's whole lesson landing on the fix for this round's finding.
@@ -5527,7 +5555,7 @@ test('a fenced value is never rendered INSIDE a delimiter it could close', () =>
   // +2 (0.14.3), measured: with these two replaced by literal text in a scratch copy and nothing else changed, the sweep
   // examined 124 again. `identity-record`'s summary naming the file written (`safePathField`, a pure template) and its
   // refusal naming the Node error code (`safeScalar`, after a colon). Neither inside a delimiter.
-  const EXAMINED_SPANS_PIN = 126;
+  const EXAMINED_SPANS_PIN = 131; // +5 (0.15.0): the fenced spans of saihm_status's local plan line and plan note
   let examinedSpans = 0;
   // The fence guarantees what a value cannot CONTAIN. It guarantees nothing about what a sentence
   // wraps it in, and those are different questions: `Using your existing memory key (<path>).`

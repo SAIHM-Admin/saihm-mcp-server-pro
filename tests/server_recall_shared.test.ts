@@ -826,6 +826,11 @@ test('saihm_recall describes the shared read by agent ID: the cellId goes with i
     const recall = (list.result.tools as { name: string; description: string; inputSchema: { properties: Record<string, { description?: string }> } }[]).find((t) => t.name === 'saihm_recall')!;
     assert.match(recall.description, /pass their agent ID as sharerPinnedAgentIdHashHex together with the cellId, taking that ID from your user, not from a shared pointer;/);
     assert.doesNotMatch(recall.description, /sharerRecord/);
+    // 0.15.0: the mark that opens each further line of an own memory is explained, so an agent copying a memory drops it.
+    assert.match(
+      recall.description,
+      / In the text, each further line of one of your memories starts with " {2}\| ": that mark is display only, not part of the memory, so leave it out when you copy a memory to save it again\. /,
+    );
     const props = recall.inputSchema.properties;
     assert.match(props.sharerPinnedAgentIdHashHex!.description!, /When set, cellId is also required\.$/);
     // The agent ID comes from the user alone (0.14.3 review 3), as the description and the pointer footers say: never

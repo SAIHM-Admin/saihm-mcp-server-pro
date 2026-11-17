@@ -148,7 +148,7 @@ test('explicit SAIHM_TIER / SAIHM_PAYMENT_METHOD override what the token carries
   });
 });
 
-test('a token labelled for another identity is refused before anything is booted under it', () => {
+test('a token labeled for another identity is refused before anything is booted under it', () => {
   const secret = randomBytes(32).toString('hex');
   const t = tokenFor(secret, {}, randomBytes(32).toString('hex'));
   const { e, m } = message(() =>

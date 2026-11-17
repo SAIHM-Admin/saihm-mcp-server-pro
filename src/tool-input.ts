@@ -59,13 +59,22 @@ export function acceptAbsentToolArguments<T extends Transport>(transport: T): T 
 
 // A host that fills every field (OpenAI strict function calling, and the hosts that convert an MCP schema to it) can only
 // send what the advertised schema allows. An optional choice or grammar that does not allow a blank forces such a host to
-// pick a value, and the value starts a mode the user never asked for. So every optional enum and pattern advertises the
-// blank beside its values. A blank is still read as absent before validation (optionalInput), so it never reaches the
-// enum or the pattern, and every value that was valid before is valid now.
+// pick a value, and the value starts a mode the user never asked for. So every optional enum and pattern advertises a
+// way to leave it: a pattern the blank beside its grammar, and an enum the choice "default" beside its values (0.15.0).
+// An enum advertised "" from 0.14.1 to 0.14.4, and Gemini refuses a tool declaration whose enum holds an empty value
+// ("enum[0]: cannot be empty" in its `parameters` field), which stopped every request of a Gemini agent with SAIHM
+// configured. A blank and "default" are both read as absent before validation (optionalInput), so neither reaches the
+// enum or the pattern, and every value that was valid before is valid now, "" included.
 
-/** An optional choice among `values`, advertised with "" (leave it blank) as one of the choices. */
+/** The choice an optional enum advertises for "leave it": read as absent, exactly like a blank. */
+export const CHOICE_DEFAULT = 'default';
+
+/** An optional choice among `values`, advertised with "default" (leave it) as one of the choices; "" is still accepted. */
 export function optionalChoice<const T extends readonly [string, ...string[]]>(values: T) {
-  return optionalInput(z.enum(['', ...values] as unknown as readonly ['', ...T]));
+  if ((values as readonly string[]).includes(CHOICE_DEFAULT)) throw new Error(`optionalChoice: "${CHOICE_DEFAULT}" is the leave-it choice, not a value`);
+  // Typed as the values alone: "default" never reaches the enum (it is read as absent first), so no caller sees it.
+  const choice = z.enum([CHOICE_DEFAULT, ...values] as unknown as T);
+  return z.preprocess((v) => (isBlankInput(v) || v === CHOICE_DEFAULT ? undefined : v), choice.optional());
 }
 
 /** An optional string with an anchored grammar, advertised as that grammar or the blank. */

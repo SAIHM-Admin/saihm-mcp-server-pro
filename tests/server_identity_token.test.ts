@@ -582,9 +582,10 @@ test('free-join refuses in a temporary home; a flag cannot override it, the oper
 
 test('a refused onboard names its reason and, for the two configuration reasons, what to set', async () => {
   for (const [reason, remedy] of [
-    // 0.14.3 (O22): the waiting join first, then the paid plan's variables.
-    ['no_free_entitlement', /\(verification_failed: no_free_entitlement\) A free join may still be waiting for approval: open its link and enter its code, or say "Join SAIHM"\. Paid plan\? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD for it\.$/],
-    ['no_active_subscription', /Check that SAIHM_TIER names the plan this identity was bought on/],
+    // 0.14.3 (O22): the waiting join first, then the paid plan's variables. 0.15.0: the server finds a card, PayPal or
+    // Paystack plan on this key itself, so the variables are named only for a plan it does not report (stablecoin).
+    ['no_free_entitlement', /\(verification_failed: no_free_entitlement\) A free join may still be waiting for approval: open its link and enter its code, or say "Join SAIHM"\. Stablecoin plan\? Set SAIHM_TIER and SAIHM_PAYMENT_METHOD\.$/],
+    ['no_active_subscription', /Check that SAIHM_TIER names the plan this identity was bought on, or leave SAIHM_TIER and SAIHM_PAYMENT_METHOD unset so SAIHM finds the plan\.$/],
   ] as const) {
     const home = tempHome('n');
     try {
@@ -970,6 +971,32 @@ test('a FREE export carries no payment warning; one with no tier says so', async
     assert.equal(none.code, 0, none.stderr);
     assert.match(none.stdout, /This token carries no tier/);
     assert.doesNotMatch(none.stdout, /, tier /);
+    // 0.15.0: a plan paid by card is found where the token is used; only a stablecoin plan is baked in (review 2 pins it).
+    assert.ok(
+      none.stdout.includes(
+        [
+          'This token carries no tier, because SAIHM_TIER is not set here: where it is used, it boots FREE',
+          '(where self-join is on) unless SAIHM_TIER is set there. A plan paid by card is found at sign-in;',
+          'for a stablecoin plan, set SAIHM_TIER and SAIHM_PAYMENT_METHOD as your MCP client does, and',
+          'export again.',
+        ].join('\n'),
+      ),
+      none.stdout,
+    );
+    const byDefault = await runCli(['export-identity'], { SAIHM_HOME: home, SAIHM_MASTER_SECRET_HEX: identity().secretHex });
+    assert.equal(byDefault.code, 0, byDefault.stderr);
+    assert.match(byDefault.stdout, /, tier FREE\./);
+    assert.ok(
+      byDefault.stdout.includes(
+        [
+          'The tier is FREE only because SAIHM_TIER is not set here. Where the token is used, SAIHM finds a',
+          'plan paid by card at sign-in; for a stablecoin plan, set SAIHM_TIER and SAIHM_PAYMENT_METHOD as',
+          'your MCP client does, and export again.',
+        ].join('\n'),
+      ),
+      byDefault.stdout,
+    );
+    assert.doesNotMatch(free.stdout, /plan paid by card/, 'a FREE tier that is set says nothing of it');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

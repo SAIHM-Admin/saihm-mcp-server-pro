@@ -1,6 +1,6 @@
 # SAIHM — memory for AI agents
 
-**An advanced sovereign, encrypted, sharable, persistent, enterprise-class memory protocol
+**An advanced sovereign, encrypted, shareable, persistent, enterprise-class memory protocol
 for AI agents.** Consumer-class tools remember; SAIHM can prove what it remembers, shares,
 and erases. Your assistant keeps what matters across sessions, models and vendors. Share a
 memory with someone else's agent, take it back, or erase it for good.
@@ -54,20 +54,28 @@ sign-in that confirms you're a real person:
 2. Open the link, sign in to GitHub, enter the code and approve.
 3. The command finishes by itself and shows where your key is saved.
 
+In a terminal with no browser, open the link on any device that has one. The command waits
+for your approval until the code expires, about 15 minutes. Ctrl+C stops it safely, and
+running it again reuses the key it created.
+
 Then [add SAIHM to your AI client](#add-saihm-to-your-ai-client), restart it, and say
 **"Recall my SAIHM memories."** You're running.
 
 **No GitHub account?** Start at <https://saihm.net/free> instead: you sign in with
 Google or Microsoft, and the page gives you your key and the steps to connect your
 assistant. Follow them, then say **"Recall my SAIHM memories."** Keep your key safe: it
-is the only key to your memory. Your key is already active, so skip *"Join SAIHM"*: there
-is nothing to join, and saying it anyway makes no new key.
+is the only key to your memory. Your key is already active, so skip *"Join SAIHM"* and
+*"Add SAIHM"*: there is nothing to join, and saying either anyway makes no new key.
+
+**Coming from Microsoft Marketplace?** Start at <https://saihm.net/microsoft>: sign in
+with your Microsoft account on the computer where your AI client runs, and create your
+free key there.
 
 **Rather let your assistant set it up?** Install SAIHM in your AI client first: for Claude
 Code that is the one command under [Claude Code](#claude-code-anthropic), and the other
 clients are [below](#add-saihm-to-your-ai-client). Restart the client, then say **"Join
-SAIHM"** to your assistant. It asks whether you already have a SAIHM identity, then runs
-the same setup and gives you the same link and code to approve.
+SAIHM"** or **"Add SAIHM"** to your assistant. It asks whether you already have a SAIHM
+identity, then runs the same setup and gives you the same link and code to approve.
 
 **If a join is interrupted**, join again on the same machine: it reuses the key it
 already created, so you keep the same identity. To cancel a join, stop it and don't
@@ -109,8 +117,9 @@ memories."* Give it the same settings as your first client:
 
 - **Your key in another folder or file:** set the same `SAIHM_HOME`, or the same
   `SAIHM_MASTER_SECRET_FILE`, in its block.
-- **A paid plan:** add `SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` to its block, wherever your
-  key is, `~/.saihm` included. Without them the new client signs in on the free plan.
+- **A paid plan:** nothing to add if you paid by card or M-PESA: each client finds your
+  plan when it signs in. For a stablecoin plan, add `SAIHM_TIER` and
+  `SAIHM_PAYMENT_METHOD` to its block, wherever your key is, `~/.saihm` included.
 
 ### Claude Code (Anthropic)
 
@@ -298,7 +307,7 @@ allow SAIHM:
      ```
 
      VS Code's MCP server gallery installs SAIHM pinned to the current version and
-     without `-y`, for example `["npx", "@saihm/mcp-server-pro@0.14.4"]`. Copilot matches
+     without `-y`, for example `["npx", "@saihm/mcp-server-pro@0.15.0"]`. Copilot matches
      the command and each argument exactly, so list each form your users run.
    - In a list without command entries, add `{ "serverName": "saihm" }`, and have your
      users add SAIHM with this README's setup blocks, which give it that name. A copy
@@ -450,13 +459,14 @@ paid plan keeps the same key and every memory.
   It saves two values to a file only you can read: `SAIHM_IDENTITY` (your key,
   sealed) and `SAIHM_IDENTITY_PASSPHRASE` (the passphrase that opens it). Set both as
   environment variables or secrets wherever the memory should follow you, then start
-  a new session. Don't say *"Join SAIHM"* there: a join starts a new, empty memory.
+  a new session. Don't say *"Join SAIHM"* or *"Add SAIHM"* there: a join starts a new,
+  empty memory.
   Together the two values **are** your identity: keep them in a password manager,
   never in a chat or a repository, and delete the export file. On a paid plan, see
   [exporting your identity](./REFERENCE.md#exporting-your-identity) first.
 - **Copy the key file** — put it at `~/.saihm/free-identity.key` on the other machine
   (or point `SAIHM_MASTER_SECRET_FILE` at it) before the server starts, use the same
-  settings as the first machine (on a paid plan, `SAIHM_TIER` and
+  settings as the first machine (on a stablecoin plan, `SAIHM_TIER` and
   `SAIHM_PAYMENT_METHOD` too), and say *"Recall my SAIHM memories."*
 - **Keep work and personal apart** — start fresh on the second machine and share
   across instead: *"Share my SAIHM notes on the launch with the agent in
@@ -598,7 +608,8 @@ for trying SAIHM on real infrastructure — it doesn't reset or refill. **No car
 nothing to cancel.** Once it is used up you can still list your memories and erase them,
 and upgrading keeps every one.
 
-Paid plans are monthly; prices are on the [pricing page](https://saihm.net/pricing).
+Paid plans are monthly, and pay-as-you-go is charged per call; prices are on the
+[pricing page](https://saihm.net/pricing).
 Upgrading keeps the same key and every memory you already have:
 
 ```sh
@@ -607,33 +618,31 @@ SAIHM_TIER=FREE \
   npx -y @saihm/mcp-server-pro upgrade PRO
 ```
 
-That prints a checkout link tied to your identity, to open in a browser, and the two
-settings to add to your client's configuration once you have paid. Add both, in the form
-your client's settings use, and restart the client. In a JSON `env` block:
+That prints a checkout link tied to your identity, to open in a browser. After you pay,
+there is nothing to change: every AI client that uses this key switches to the new plan on
+its own within the hour. To switch one on this computer now, restart it, then say
+*"Show my SAIHM status"*: it shows your plan and where it came from. A client on another
+computer keeps its current sign-in until it expires, then switches, still within the hour.
+A client pinned to a version before 0.15.0, such as one the VS Code gallery installed, must
+be updated to 0.15.0 or later first. If SAIHM finds a plan already paid on the key,
+`upgrade` says so and creates no second checkout.
 
-```json
-"SAIHM_TIER": "PRO",
-"SAIHM_PAYMENT_METHOD": "stripe"
-```
-
-In a TOML configuration, such as Codex's or Grok's, inside `env = { ... }`:
-
-```toml
-env = { SAIHM_ENDPOINT_URL = "https://saihm.net/mcp", SAIHM_TIER = "PRO", SAIHM_PAYMENT_METHOD = "stripe" }
-```
-
-A paid plan needs both: without `SAIHM_PAYMENT_METHOD`, which names the payment rail to
-check, the server starts, but every memory call fails and names it until it is set. Then
-say *"Show my SAIHM status"* to see the plan.
+If your plan changes later, PRO to PRO_FAST for example, your clients follow it the same
+way. A client whose settings name a paid `SAIHM_TIER` keeps those settings: remove
+`SAIHM_TIER` and `SAIHM_PAYMENT_METHOD` there to let SAIHM pick the plan. To change or
+cancel a plan, email ops@saihm.net with [billing] at the start of the subject.
 
 | How you pay | Where | Your key and memories | `SAIHM_PAYMENT_METHOD` |
 |---|---|---|---|
-| Card, for the key you have | the `upgrade` command's link | kept | `stripe` |
-| Card or another method on the website | the [join page](https://saihm.net/join) | a new identity with its own key | the one in the configuration the page gives you |
-| Stablecoin | the [join page](https://saihm.net/join) | a new identity with its own key | `stablecoin` |
+| Card, for the key you have | the `upgrade` command's link | kept | nothing to set |
+| Card through Stripe, or card and M-PESA through Paystack where the page offers it | the [join page](https://saihm.net/join) | a new identity with its own key | set by the configuration the page gives you, if it lists one |
+| Stablecoin, by a gasless signed authorization | the [join page](https://saihm.net/join) | a new identity with its own key | `stablecoin` |
 
 The memories on a key you already have stay on that key and do not move to a new one, so
 to upgrade the key you have, use the card link.
+
+Pay-as-you-go has no subscription: each call is settled on-chain at write time, and the
+[pricing page](https://saihm.net/pricing#pay-as-you-go-payg) lists the rate for each call.
 
 ## If something isn't working
 
@@ -654,10 +663,13 @@ Proxies, erasure answers and everything else are in the
 ## How it works
 
 Your memories are encrypted on your machine before they are sent, and decrypted on your
-machine after they come back. SAIHM stores them encrypted, with the few routing details
-they need and each memory's key locked under yours. To erase something, that key is
-destroyed — which is why erasing the stored memory is immediate and final rather than a
-promise that a copy was deleted somewhere.
+machine after they come back. SAIHM stores them encrypted, with each memory's key locked
+under yours. The service can see the details it needs to store, find, share and bill for
+them, such as each memory's id, version and time, your plan, and whom you share with; the
+[privacy notice](https://saihm.net/terms#privacy) lists them. To erase a memory, SAIHM
+deletes its key, so the stored memory can no longer be read through SAIHM: immediate and
+final, rather than a promise that a copy was deleted somewhere. Copies outside the
+service, such as text your assistant already showed you, stay where they are.
 
 - **Post-quantum by design.** ML-DSA-65 signs every memory, and ML-KEM-768 protects
   sharing.
@@ -725,7 +737,8 @@ npm install @saihm/mcp-server-pro
 import { SaihmProClient } from '@saihm/mcp-server-pro';
 
 // Boot from env: SAIHM_ENDPOINT_URL, SAIHM_MASTER_SECRET_FILE (or _HEX)
-//   self-onboard (recommended): + SAIHM_PAYMENT_METHOD + SAIHM_TIER (omit SAIHM_AUTH_HEADER)
+//   self-onboard (recommended): add SAIHM_TIER and SAIHM_PAYMENT_METHOD for a stablecoin plan;
+//     with SAIHM_SELF_JOIN=0, SAIHM_TIER for every plan (omit SAIHM_AUTH_HEADER)
 //   static token (advanced):    + SAIHM_AUTH_HEADER="Bearer <JWT>"
 const saihm = SaihmProClient.bootFromEnv();
 

@@ -1,6 +1,6 @@
 # Case study: an example of regulated work with three agent roles, SAIHM + SHM
 
-The company is fictional. The staffing comparison is a worked scenario, SHM works with a paid SAIHM plan.
+The company is fictional. The staffing comparison is a worked scenario. SHM works with a paid SAIHM plan.
 
 ## The short version
 
